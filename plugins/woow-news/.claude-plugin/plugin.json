@@ -1,0 +1,8 @@
+{
+  "name": "woow-news",
+  "version": "1.0.0",
+  "description": "Skill operacional da newsletter WooW! Daily Drops da metaKosmos: gaveta editorial, pipeline de pesquisa/curadoria/disparo e metricas, via broker autenticado por email mK.",
+  "author": { "name": "metaKosmos", "email": "david@metakosmos.com.br" },
+  "homepage": "https://github.com/metaKosmos/mk-woow-news-skill",
+  "keywords": ["newsletter", "zoho", "marketing", "metakosmos", "woow"]
+}

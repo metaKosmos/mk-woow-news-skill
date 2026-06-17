@@ -1,0 +1,15 @@
+{
+  "name": "mk-skills",
+  "owner": { "name": "metaKosmos", "email": "david@metakosmos.com.br" },
+  "metadata": {
+    "description": "Marketplace de skills internas da metaKosmos.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "woow-news",
+      "source": "./plugins/woow-news",
+      "description": "Opera a newsletter WooW! Daily Drops: pesquisa, curadoria e disparo via broker autenticado por email mK (segredos ficam no GCP, nunca na maquina)."
+    }
+  ]
+}
