@@ -1,0 +1,25 @@
+# Fontes RSS da WooW! Daily Drops
+# Extraído do workflow n8n do João (Newsletter Automatizada - Template, 2026-06-16).
+# Editável pelo João sem tocar no código (liga com MAR-134). Adicionar/remover feeds aqui.
+
+feeds:
+  - source: Modern Retail
+    url: https://www.modernretail.co/feed/
+  - source: Glossy
+    url: https://www.glossy.co/feed/
+  - source: Digital Commerce 360
+    url: https://digitalcommerce360.com/feed/
+  - source: Business of Fashion
+    url: https://www.businessoffashion.com/feed
+  - source: VentureBeat
+    url: https://venturebeat.com/feed/
+  - source: Fast Company
+    url: https://www.fastcompany.com/feed
+  - source: AR Insider
+    url: https://arinsider.co/feed/
+  - source: Meio & Mensagem
+    url: https://www.meioemensagem.com.br/feed
+  - source: Mercado&Consumo
+    url: https://mercadoeconsumo.com.br/feed/
+  - source: E-Commerce Brasil
+    url: https://www.ecommercebrasil.com.br/feed/

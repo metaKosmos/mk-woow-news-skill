@@ -1,0 +1,46 @@
+# Config geral da WooW! Daily Drops (camada de conteúdo)
+# Extraído/derivado do workflow n8n do João + parâmetros ZMA validados E2E (README).
+
+newsletter:
+  name: "WooW! Daily Drops"
+  tag: "WDD"
+  signature: "Ian Borges · CEO da metaKosmos"
+  language: pt-BR
+
+# Estrutura fixa da edição (1 manchete + 2 secundárias + 2 sinais = 5 notícias)
+structure:
+  manchete: 1
+  secundarias: 2
+  sinais: 2
+
+# Ingestão (research.py)
+research:
+  days_lookback: 3        # janela do filtro de recência (n8n usava 3 dias)
+  max_per_source: 25      # teto de itens coletados por feed (evita feeds gigantes)
+
+# Curadoria + redação (generate_content.py)
+gemini:
+  api_key_env: GEMINI_API_NEWSLETTER_KEY
+  endpoint: https://generativelanguage.googleapis.com/v1beta/models
+  model_classify: gemini-3.5-flash   # flash de geração mais nova; classify/score podem ir p/ flash-lite se quiser cortar custo
+  model_score: gemini-3.5-flash
+  model_write: gemini-3.5-flash      # redação; subir p/ gemini-3.5-pro (se existir) ou gemini-3.1-pro-preview se precisar de mais qualidade
+  temperature: 0.4
+  pool_to_writer: 8           # quantos itens (top score) vão para o Escritor selecionar os 5
+  write_thinking_budget: 4096 # tokens de raciocínio na redação (0 = sem thinking). classify/score = 0
+
+# Imagem da manchete (generate_image.py): art-director -> Nano Banana Pro
+media:
+  art_director_model: gemini-3.5-flash   # texto: monta o prompt de imagem a partir da manchete
+  image_model: gemini-3-pro-image        # Nano Banana Pro (versão GA do que o João usava)
+  aspect_ratio: "16:9"                    # banner da manchete (landscape)
+  # Onde a imagem fica hospedada no publish (URL pública pro email). O render monta
+  # {public_base_url}/woow-<edição>-manchete.<ext>. Firebase é o alvo de publish do HTML.
+  public_base_url: "https://mkaifirst.web.app/nl/img"
+
+# Entrega ZMA (send_zma.py) — valores validados no teste E2E de 2026-06-10
+delivery:
+  from_email: patrick@metakosmos.com.br   # sender verificado na org ZMA (david@ deu 6610)
+  from_name: "WooW! Daily Drops"
+  topic_id: "1487553000000047017"          # topic "Marketing"
+  list_name: "mK Newsletter Discovery Test"

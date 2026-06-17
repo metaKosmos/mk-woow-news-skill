@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WooW! Daily Drops</title>
+<!--[if mso]>
+<style type="text/css">
+  table {border-collapse:collapse;border-spacing:0;margin:0;}
+  div,td {padding:0;}
+  div {margin:0 !important;}
+</style>
+<noscript>
+<xml>
+  <o:OfficeDocumentSettings>
+    <o:PixelsPerInch>96</o:PixelsPerInch>
+  </o:OfficeDocumentSettings>
+</xml>
+</noscript>
+<![endif]-->
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Anton&display=swap');
+
+  body, html {
+    margin: 0;
+    padding: 0;
+    background-color: #F3F3F3;
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    -webkit-text-size-adjust: 100%;
+    -ms-text-size-adjust: 100%;
+  }
+  table { border-collapse: collapse; }
+  img { border: 0; display: block; outline: none; text-decoration: none; -ms-interpolation-mode: bicubic; }
+  a { color: #1291E2; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .anton {
+    font-family: 'Anton', 'Impact', 'Arial Black', sans-serif;
+    font-weight: 400;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  @media only screen and (max-width: 620px) {
+    .container { width: 100% !important; }
+    .px-mobile { padding-left: 20px !important; padding-right: 20px !important; }
+    .h1-mobile { font-size: 32px !important; line-height: 1.1 !important; }
+    .h2-mobile { font-size: 22px !important; line-height: 1.2 !important; }
+    .h3-mobile { font-size: 17px !important; }
+  }
+</style>
+</head>
+<body style="margin:0; padding:0; background-color:#F3F3F3;">
+
+<!-- Preheader (texto invisível no inbox) -->
+<div style="display:none; font-size:1px; color:#F3F3F3; line-height:1px; max-height:0; max-width:0; opacity:0; overflow:hidden;">
+  {{ content.titulo_edicao }}
+</div>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F3F3F3;">
+  <tr>
+    <td align="center" style="padding: 24px 12px;">
+
+      <table role="presentation" class="container" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px; max-width:600px; background-color:#FFFFFF;">
+
+        <!-- ========== CABEÇALHO ========== -->
+        <tr>
+          <td class="px-mobile" style="padding: 28px 40px 16px 40px; background-color:#000000;">
+            <p style="margin:0; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:12px; line-height:1.4; color:#FFFFFF; letter-spacing:1.5px; text-transform:uppercase; font-weight:700;">
+              {{ content.cabecalho }}
+            </p>
+          </td>
+        </tr>
+
+        <!-- Bandeirinha rainbow no topo -->
+        <tr>
+          <td style="padding:0; font-size:0; line-height:0;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; table-layout:fixed; border-collapse:collapse;">
+              <tr>
+                <td height="6" style="height:6px; line-height:6px; font-size:6px; background-color:#7C16DB;">&nbsp;</td>
+                <td height="6" style="height:6px; line-height:6px; font-size:6px; background-color:#DC0C9F;">&nbsp;</td>
+                <td height="6" style="height:6px; line-height:6px; font-size:6px; background-color:#1291E2;">&nbsp;</td>
+                <td height="6" style="height:6px; line-height:6px; font-size:6px; background-color:#FB5B12;">&nbsp;</td>
+                <td height="6" style="height:6px; line-height:6px; font-size:6px; background-color:#00FC8A;">&nbsp;</td>
+                <td height="6" style="height:6px; line-height:6px; font-size:6px; background-color:#E8F102;">&nbsp;</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- ========== TÍTULO DA EDIÇÃO ========== -->
+        <tr>
+          <td class="px-mobile" style="padding: 40px 40px 24px 40px;">
+            <h1 class="anton h1-mobile" style="margin:0; font-family:'Anton', 'Impact', 'Arial Black', sans-serif; font-weight:400; font-size:42px; line-height:1.05; color:#000000; text-transform:uppercase; letter-spacing:0.5px;">
+              {{ content.titulo_edicao }}
+            </h1>
+          </td>
+        </tr>
+
+        <!-- ========== SUMÁRIO ========== -->
+        <tr>
+          <td class="px-mobile" style="padding: 0 40px 32px 40px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F3F3F3; border-left:4px solid #000000;">
+              <tr>
+                <td style="padding: 20px 24px;">
+                  <p style="margin:0 0 12px 0; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:14px; line-height:1.4; color:#000000; font-weight:700; text-transform:uppercase; letter-spacing:1px;">
+                    Hoje no Drop:
+                  </p>
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                    {% for item in content.sumario %}
+                    <tr><td style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:15px; line-height:1.55; color:#1a1a1a; padding:3px 0;"><strong style="color:#000;">{{ loop.index }}.</strong> {{ item }}</td></tr>
+                    {% endfor %}
+                  </table>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- ========== MANCHETE ========== -->
+        <tr>
+          <td class="px-mobile" style="padding: 16px 40px 12px 40px;">
+            <h2 class="anton h2-mobile" style="margin:0; font-family:'Anton', 'Impact', 'Arial Black', sans-serif; font-weight:400; font-size:28px; line-height:1.15; color:#000000; text-transform:uppercase; letter-spacing:0.3px;">
+              {{ content.manchete.headline }}
+            </h2>
+          </td>
+        </tr>
+        {% if imagem_manchete_url %}
+        <tr>
+          <td class="px-mobile" style="padding: 16px 40px 20px 40px;">
+            <img src="{{ imagem_manchete_url }}" width="520" alt="Imagem da manchete" style="display:block; width:100%; max-width:520px; height:auto; border-radius:4px;">
+          </td>
+        </tr>
+        {% endif %}
+        <tr>
+          <td class="px-mobile" style="padding: 0 40px 36px 40px; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:16px; line-height:1.6; color:#1a1a1a;">
+            {{ content.manchete.corpo | safe }}
+          </td>
+        </tr>
+
+        <!-- Bandeirinha separador -->
+        <tr>
+          <td class="px-mobile" style="padding: 0 40px 36px 40px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; table-layout:fixed; border-collapse:collapse;">
+              <tr>
+                <td height="4" style="height:4px; line-height:4px; font-size:4px; background-color:#7C16DB;">&nbsp;</td>
+                <td height="4" style="height:4px; line-height:4px; font-size:4px; background-color:#DC0C9F;">&nbsp;</td>
+                <td height="4" style="height:4px; line-height:4px; font-size:4px; background-color:#1291E2;">&nbsp;</td>
+                <td height="4" style="height:4px; line-height:4px; font-size:4px; background-color:#FB5B12;">&nbsp;</td>
+                <td height="4" style="height:4px; line-height:4px; font-size:4px; background-color:#00FC8A;">&nbsp;</td>
+                <td height="4" style="height:4px; line-height:4px; font-size:4px; background-color:#E8F102;">&nbsp;</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- ========== SECUNDÁRIA 1 ========== -->
+        <tr>
+          <td class="px-mobile" style="padding: 0 40px 12px 40px;">
+            <h2 class="anton h2-mobile" style="margin:0; font-family:'Anton', 'Impact', 'Arial Black', sans-serif; font-weight:400; font-size:26px; line-height:1.15; color:#000000; text-transform:uppercase; letter-spacing:0.3px;">
+              {{ content.secundaria_1.headline }}
+            </h2>
+          </td>
+        </tr>
+        <tr>
+          <td class="px-mobile" style="padding: 12px 40px 36px 40px; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:16px; line-height:1.6; color:#1a1a1a;">
+            {{ content.secundaria_1.corpo | safe }}
+          </td>
+        </tr>
+
+        <!-- Bandeirinha separador -->
+        <tr>
+          <td class="px-mobile" style="padding: 0 40px 36px 40px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; table-layout:fixed; border-collapse:collapse;">
+              <tr>
+                <td height="4" style="height:4px; line-height:4px; font-size:4px; background-color:#7C16DB;">&nbsp;</td>
+                <td height="4" style="height:4px; line-height:4px; font-size:4px; background-color:#DC0C9F;">&nbsp;</td>
+                <td height="4" style="height:4px; line-height:4px; font-size:4px; background-color:#1291E2;">&nbsp;</td>
+                <td height="4" style="height:4px; line-height:4px; font-size:4px; background-color:#FB5B12;">&nbsp;</td>
+                <td height="4" style="height:4px; line-height:4px; font-size:4px; background-color:#00FC8A;">&nbsp;</td>
+                <td height="4" style="height:4px; line-height:4px; font-size:4px; background-color:#E8F102;">&nbsp;</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- ========== SECUNDÁRIA 2 ========== -->
+        <tr>
+          <td class="px-mobile" style="padding: 0 40px 12px 40px;">
+            <h2 class="anton h2-mobile" style="margin:0; font-family:'Anton', 'Impact', 'Arial Black', sans-serif; font-weight:400; font-size:26px; line-height:1.15; color:#000000; text-transform:uppercase; letter-spacing:0.3px;">
+              {{ content.secundaria_2.headline }}
+            </h2>
+          </td>
+        </tr>
+        <tr>
+          <td class="px-mobile" style="padding: 12px 40px 40px 40px; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:16px; line-height:1.6; color:#1a1a1a;">
+            {{ content.secundaria_2.corpo | safe }}
+          </td>
+        </tr>
+
+        <!-- ========== SEÇÃO SINAIS DO DIA ========== -->
+        <tr>
+          <td class="px-mobile" style="padding: 0 40px 0 40px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td height="2" style="background-color:#000000; font-size:0; line-height:0;">&nbsp;</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td class="px-mobile" style="padding: 24px 40px 24px 40px;">
+            <p class="anton" style="margin:0; font-family:'Anton', 'Impact', 'Arial Black', sans-serif; font-weight:400; font-size:14px; line-height:1; color:#000000; text-transform:uppercase; letter-spacing:2.5px;">
+              Sinais do dia
+            </p>
+          </td>
+        </tr>
+
+        <!-- ========== SINAL 1 ========== -->
+        <tr>
+          <td class="px-mobile" style="padding: 0 40px 8px 40px;">
+            <h3 class="h3-mobile" style="margin:0; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-weight:800; font-size:19px; line-height:1.25; color:#000000;">
+              {{ content.sinal_1.headline }}
+            </h3>
+          </td>
+        </tr>
+        <tr>
+          <td class="px-mobile" style="padding: 8px 40px 28px 40px; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:15px; line-height:1.55; color:#1a1a1a;">
+            {{ content.sinal_1.corpo | safe }}
+          </td>
+        </tr>
+
+        <!-- ========== SINAL 2 ========== -->
+        <tr>
+          <td class="px-mobile" style="padding: 0 40px 8px 40px;">
+            <h3 class="h3-mobile" style="margin:0; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-weight:800; font-size:19px; line-height:1.25; color:#000000;">
+              {{ content.sinal_2.headline }}
+            </h3>
+          </td>
+        </tr>
+        <tr>
+          <td class="px-mobile" style="padding: 8px 40px 48px 40px; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:15px; line-height:1.55; color:#1a1a1a;">
+            {{ content.sinal_2.corpo | safe }}
+          </td>
+        </tr>
+
+        <!-- Bandeirinha antes do CTA -->
+        <tr>
+          <td style="padding:0; font-size:0; line-height:0;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; table-layout:fixed; border-collapse:collapse;">
+              <tr>
+                <td height="6" style="height:6px; line-height:6px; font-size:6px; background-color:#7C16DB;">&nbsp;</td>
+                <td height="6" style="height:6px; line-height:6px; font-size:6px; background-color:#DC0C9F;">&nbsp;</td>
+                <td height="6" style="height:6px; line-height:6px; font-size:6px; background-color:#1291E2;">&nbsp;</td>
+                <td height="6" style="height:6px; line-height:6px; font-size:6px; background-color:#FB5B12;">&nbsp;</td>
+                <td height="6" style="height:6px; line-height:6px; font-size:6px; background-color:#00FC8A;">&nbsp;</td>
+                <td height="6" style="height:6px; line-height:6px; font-size:6px; background-color:#E8F102;">&nbsp;</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- ========== CTA WHATSAPP ========== -->
+        <tr>
+          <td class="px-mobile" style="padding: 44px 40px 16px 40px; text-align:center; background-color:#000000;">
+            <p class="anton" style="margin:0; font-family:'Anton', 'Impact', 'Arial Black', sans-serif; font-weight:400; font-size:22px; line-height:1.2; color:#FFFFFF; text-transform:uppercase; letter-spacing:0.5px;">
+              Quer trazer Immersive Commerce<br>pra sua marca?
+            </p>
+          </td>
+        </tr>
+        <tr>
+          <td class="px-mobile" style="padding: 0 40px 44px 40px; text-align:center; background-color:#000000;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="margin-top:20px;">
+              <tr>
+                <td align="center" style="background-color:#00FC8A; border-radius:4px;">
+                  <a href="https://wa.me/5521970936057" target="_blank" style="display:inline-block; padding:16px 32px; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:14px; line-height:1; color:#000000; font-weight:800; text-decoration:none; text-transform:uppercase; letter-spacing:1.5px;">
+                    Falar com especialista &rarr;
+                  </a>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- ========== ASSINATURA ========== -->
+        <tr>
+          <td class="px-mobile" style="padding: 44px 40px 12px 40px; text-align:center;">
+            <p class="anton" style="margin:0 0 8px 0; font-family:'Anton', 'Impact', 'Arial Black', sans-serif; font-weight:400; font-size:18px; line-height:1; color:#000000; text-transform:uppercase; letter-spacing:1px;">
+              From Good to WooW!
+            </p>
+            <p style="margin:0; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:13px; line-height:1.4; color:#666666;">
+              Ian Borges &middot; CEO da metaKosmos
+            </p>
+          </td>
+        </tr>
+
+        <!-- ========== CAPA FIXA WDD (selo decorativo) ========== -->
+        <tr>
+          <td class="px-mobile" style="padding: 36px 40px 24px 40px;">
+            <img src="https://mkaifirst.web.app/nl/img/wdd-selo.png" width="520" alt="WooW! Daily Drops" style="display:block; width:100%; max-width:520px; height:auto;">
+          </td>
+        </tr>
+
+        <!-- ========== RODAPÉ ========== -->
+        <tr>
+          <td class="px-mobile" style="padding: 24px 40px 32px 40px; text-align:center; background-color:#F3F3F3;">
+            <p style="margin:0 0 8px 0; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:11px; line-height:1.5; color:#888888;">
+              metaKosmos &middot; Rio de Janeiro, Brasil
+            </p>
+            <p style="margin:0; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:11px; line-height:1.5; color:#888888;">
+              Você está recebendo esta newsletter por ter se inscrito na WooW! News.<br>
+              <a href="{{ unsubscribe_url }}" style="color:#888888; text-decoration:underline;">Cancelar inscrição</a>
+            </p>
+          </td>
+        </tr>
+
+      </table>
+
+    </td>
+  </tr>
+</table>
+
+</body>
+</html>
