@@ -100,6 +100,37 @@ def _publish_public(wd, edition):
     return html_url, img_url
 
 
+def _read_health(wd, edition):
+    """Lê o health.json que a research.py grava no workdir (None se ausente/ilegível)."""
+    p = wd / "content" / f"{edition}.research.health.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _record_stage_error(sm, edition, stage, exc):
+    """Persiste a falha do estágio em health.last_error (merge raso no health existente,
+    p/ não apagar candidates/feed_errors da pesquisa)."""
+    try:
+        health = dict(sm.get_state(edition).get("health") or {})
+        health["last_error"] = {"stage": stage, "message": str(exc)[:500],
+                                "at": datetime.now(BRT).isoformat(timespec="seconds")}
+        sm.upsert_edition(edition, {"health": health})
+    except Exception as inner:  # noqa: BLE001 — registrar erro não pode mascarar o erro real
+        print(f"[health] não registrei erro de {edition}/{stage}: {inner}")
+
+
+def _clear_stage_error(sm, edition):
+    """Limpa health.last_error após um estágio concluir OK (no-op se não houver)."""
+    health = sm.get_state(edition).get("health")
+    if health and "last_error" in health:
+        sm.upsert_edition(edition, {"health": {k: v for k, v in health.items()
+                                               if k != "last_error"}})
+
+
 def run_stage(edition, stage, payload):
     sm = _sm()
     wd = _workdir(edition)
@@ -109,8 +140,11 @@ def run_stage(edition, stage, payload):
         if stage == "research":
             out = _run_script(wd, "research.py", ["--edition", edition])
             _persist_content(sm, wd, edition)
-            sm.upsert_edition(edition, {"stage": "researched",
-                                        "date": _resolve_edition_date(edition)})
+            patch = {"stage": "researched", "date": _resolve_edition_date(edition)}
+            health = _read_health(wd, edition)
+            if health is not None:
+                patch["health"] = health  # pesquisa OK -> health nova, sem last_error
+            sm.upsert_edition(edition, patch)
             summary = (wd / "content" / f"{edition}.research.md").read_text(encoding="utf-8")[:4000]
             return {"stage": "researched", "summary": summary, "log": out.strip()}
 
@@ -133,6 +167,7 @@ def run_stage(edition, stage, payload):
                                         "image_ready": True, "tokens": usage, "cost": cost,
                                         "preview_url": html_url,
                                         "date": meta.get("edition_date") or _resolve_edition_date(edition)})
+            _clear_stage_error(sm, edition)
             return {"stage": "ready", "preview_url": html_url, "image_url": img_url,
                     "subject": meta.get("subject", ""), "cost_brl": round(cost["total_brl"], 4)}
 
@@ -149,9 +184,13 @@ def run_stage(edition, stage, payload):
             out = _run_script(wd, "send_zma.py", send_args)
             key = next((l.split(":")[-1].strip() for l in out.splitlines() if "campaignKey" in l), "")
             sm.upsert_edition(edition, {"stage": "sent", "campaign_key": key})
+            _clear_stage_error(sm, edition)
             return {"stage": "sent", "campaign_key": key, "log": out.strip()}
 
         raise ValueError(f"stage inválido: {stage}")
+    except Exception as e:  # noqa: BLE001 — registra a falha do estágio antes de propagar
+        _record_stage_error(sm, edition, stage, e)
+        raise
     finally:
         shutil.rmtree(wd, ignore_errors=True)
 
@@ -173,8 +212,10 @@ def get_queue():
     return _sm().get_queue()
 
 
-def get_metrics():
-    sm = _sm()
+def _refresh_metrics(sm):
+    """Atualiza no estado (GCS) as métricas ZMA das últimas edições enviadas. Cada
+    edição é isolada por try/except: uma falha do Zoho numa não impede as outras.
+    Devolve o payload usado pela rota /metrics."""
     q = sm.get_queue()
     sent = [e for e in q["editions"] if e["stage"] == "sent"][-4:]
     env = secrets_store.get_zma_gemini_env()
@@ -182,17 +223,32 @@ def get_metrics():
     for e in sent:
         st = sm.get_state(e["edition"])
         if st.get("campaign_key"):
-            m = zma_metrics.fetch(env, st["campaign_key"])
+            try:
+                m = zma_metrics.fetch(env, st["campaign_key"])
+            except Exception as exc:  # noqa: BLE001 — 1 edição não pode quebrar o resto
+                print(f"[metrics] {e['edition']} falhou: {exc}")
+                m = None
             if m:
-                st["metrics"] = {**m, "fetched_at": datetime.utcnow().isoformat()}
+                st["metrics"] = {**m, "fetched_at": datetime.now(BRT).isoformat(timespec="seconds")}
                 sm.upsert_edition(e["edition"], {"metrics": st["metrics"]})
         out.append({"edition": e["edition"], "subject": st.get("subject", ""),
                     "metrics": st.get("metrics", {}), "cost": st.get("cost", {})})
     return {"editions": out}
 
 
+def get_metrics():
+    return _refresh_metrics(_sm())
+
+
 def do_sync():
-    return _sm().sync_to_firebase()
+    """O cron diário bate aqui. Refresca as métricas ZMA ANTES de espelhar o estado;
+    falha do Zoho é logada mas NÃO derruba o espelho (o painel continua atualizado)."""
+    sm = _sm()
+    try:
+        _refresh_metrics(sm)
+    except Exception as exc:  # noqa: BLE001 — refresh global falho não pode parar o sync
+        print(f"[sync] metrics refresh falhou: {exc}")
+    return sm.sync_to_firebase()
 
 
 def reset_edition(edition):
