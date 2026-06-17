@@ -130,11 +130,17 @@ class StateManager:
     def sync_to_firebase(self):
         try:
             import firebase_admin
-            from firebase_admin import db
+            from firebase_admin import credentials, db
             try:
                 firebase_admin.get_app()
             except ValueError:
-                firebase_admin.initialize_app(options={
+                # Credencial do secret (SA do projeto que dona o RTDB, ex: mk-ops-dashboard).
+                # Sem isso o admin SDK cai na ADC (SA de runtime do broker, em mk-ai-first-ops),
+                # que NAO tem acesso ao RTDB -> "Unauthorized request." (import lazy: testes
+                # locais nao chamam sync, entao secrets_store nao precisa estar instalado).
+                import secrets_store
+                cred = credentials.Certificate(secrets_store.get_firebase_credentials())
+                firebase_admin.initialize_app(cred, {
                     "databaseURL": os.environ.get("FIREBASE_DB_URL", "")})
             payload = {"queue": self.get_queue(),
                        "editions": {e: self.get_state(e) for e in self.store.list_editions()}}

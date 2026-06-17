@@ -26,7 +26,10 @@ SA="woow-news-broker-runtime@${PROJECT}.iam.gserviceaccount.com"
 : "${OAUTH_CLIENT_ID:?defina OAUTH_CLIENT_ID antes de rodar}"
 : "${OAUTH_CLIENT_SECRET:?defina OAUTH_CLIENT_SECRET antes de rodar}"
 : "${FIREBASE_DB_URL:?defina FIREBASE_DB_URL antes de rodar}"
-CRON_TOKEN="$(openssl rand -hex 24)"
+# Reusa o CRON_TOKEN ja deployado (re-run nao deve trocar o token e quebrar o n8n).
+CRON_TOKEN="$(gcloud functions describe "$SVC" --gen2 --region="$REGION" --project="$PROJECT" \
+  --format='value(serviceConfig.environmentVariables.CRON_TOKEN)' 2>/dev/null || true)"
+[ -z "$CRON_TOKEN" ] && CRON_TOKEN="$(openssl rand -hex 24)"
 
 echo "==> Projeto + APIs"
 gcloud config set project "$PROJECT"
