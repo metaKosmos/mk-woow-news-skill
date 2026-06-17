@@ -56,7 +56,7 @@ def get_oauth_client():
 # URL base do broker (Cloud Run function, projeto mk-ai-first-ops, southamerica-east1).
 BROKER_URL = os.environ.get(
     "WOOW_NEWS_BROKER_URL",
-    "https://woow-news-broker-PLACEHOLDER.run.app",  # TODO: substituir pela URL real do deploy (Task 9)
+    "https://woow-news-broker-lpbyopeg7q-rj.a.run.app",  # broker live (mk-ai-first-ops, southamerica-east1)
 ).rstrip("/")
 
 # Tempo maximo de sessao (horas) antes de exigir novo login interativo no navegador.
