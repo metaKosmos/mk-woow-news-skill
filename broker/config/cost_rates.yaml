@@ -1,0 +1,18 @@
+# Rates de custo Gemini, USD por 1.000.000 de tokens. CONFIRMAR com David contra a
+# pagina de pricing Gemini antes do deploy (D3). A aritmetica (tokens*rate) e testada;
+# estes numeros sao config, nao codigo.
+brl_rate: 5.70            # USD->BRL (env BRL_RATE sobrescreve)
+models:
+  gemini-3.5-flash:       # CONFIRMAR
+    input_per_m: 0.30
+    output_per_m: 2.50
+  gemini-3-pro-image:     # CONFIRMAR — imagem cobra por imagem, nao por token
+    input_per_m: 0.30
+    per_image_usd: 0.06   # CONFIRMAR
+# mapa etapa -> modelo (espelha newsletter.yaml; usado quando o state so tem a etapa)
+steps:
+  classify: gemini-3.5-flash
+  score: gemini-3.5-flash
+  write: gemini-3.5-flash
+  art_director: gemini-3.5-flash
+  image: gemini-3-pro-image
