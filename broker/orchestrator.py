@@ -6,6 +6,7 @@ subprocess, e persiste state + custo + publica HTML/imagem no bucket público.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -93,42 +94,53 @@ def _publish_public(wd, edition):
 def run_stage(edition, stage, payload):
     sm = _sm()
     wd = _workdir(edition)
-    _restore_content(sm, wd, edition)
+    try:
+        _restore_content(sm, wd, edition)
 
-    if stage == "research":
-        out = _run_script(wd, "research.py", ["--edition", edition])
-        _persist_content(sm, wd, edition)
-        sm.upsert_edition(edition, {"stage": "researched"})
-        summary = (wd / "content" / f"{edition}.research.md").read_text(encoding="utf-8")[:4000]
-        return {"stage": "researched", "summary": summary, "log": out.strip()}
+        if stage == "research":
+            out = _run_script(wd, "research.py", ["--edition", edition])
+            _persist_content(sm, wd, edition)
+            sm.upsert_edition(edition, {"stage": "researched"})
+            summary = (wd / "content" / f"{edition}.research.md").read_text(encoding="utf-8")[:4000]
+            return {"stage": "researched", "summary": summary, "log": out.strip()}
 
-    if stage == "generate":
-        _run_script(wd, "generate_content.py", ["--edition", edition])
-        _run_script(wd, "generate_image.py", ["--edition", edition])
-        _run_script(wd, "render_newsletter.py", ["--edition", edition])
-        usage = json.loads((wd / "content" / f"{edition}.usage.json").read_text(encoding="utf-8"))
-        cost = compute_cost(usage, _rates())
-        meta = json.loads((wd / "content" / f"{edition}.json").read_text(encoding="utf-8")).get("meta", {})
-        html_url, img_url = _publish_public(wd, edition)
-        _persist_content(sm, wd, edition)
-        sm.upsert_edition(edition, {"stage": "ready", "subject": meta.get("subject", ""),
-                                    "image_ready": True, "tokens": usage, "cost": cost,
-                                    "preview_url": html_url})
-        return {"stage": "ready", "preview_url": html_url, "image_url": img_url,
-                "subject": meta.get("subject", ""), "cost_brl": round(cost["total_brl"], 4)}
+        if stage == "generate":
+            _run_script(wd, "generate_content.py", ["--edition", edition])
+            _run_script(wd, "generate_image.py", ["--edition", edition])
+            img_ext = next((e for e in ("jpg", "png")
+                            if (wd / "renders" / f"woow-{edition}-manchete.{e}").exists()), None)
+            render_args = ["--edition", edition]
+            if img_ext:
+                render_args += ["--image-url",
+                                f"https://storage.googleapis.com/{PUBLIC_BUCKET}/nl/img/woow-{edition}-manchete.{img_ext}"]
+            _run_script(wd, "render_newsletter.py", render_args)
+            usage = json.loads((wd / "content" / f"{edition}.usage.json").read_text(encoding="utf-8"))
+            cost = compute_cost(usage, _rates())
+            meta = json.loads((wd / "content" / f"{edition}.json").read_text(encoding="utf-8")).get("meta", {})
+            html_url, img_url = _publish_public(wd, edition)
+            _persist_content(sm, wd, edition)
+            sm.upsert_edition(edition, {"stage": "ready", "subject": meta.get("subject", ""),
+                                        "image_ready": True, "tokens": usage, "cost": cost,
+                                        "preview_url": html_url})
+            return {"stage": "ready", "preview_url": html_url, "image_url": img_url,
+                    "subject": meta.get("subject", ""), "cost_brl": round(cost["total_brl"], 4)}
 
-    if stage == "send":
-        html_url = sm.get_state(edition).get("preview_url")
-        out = _run_script(wd, "send_zma.py",
-                          [f"content/{edition}.md", "--content-url", html_url, "--send"])
-        key = next((l.split(":")[-1].strip() for l in out.splitlines() if "campaignKey" in l), "")
-        sm.upsert_edition(edition, {"stage": "sent", "campaign_key": key})
-        return {"stage": "sent", "campaign_key": key, "log": out.strip()}
+        if stage == "send":
+            html_url = sm.get_state(edition).get("preview_url")
+            out = _run_script(wd, "send_zma.py",
+                              [f"content/{edition}.md", "--content-url", html_url, "--send"])
+            key = next((l.split(":")[-1].strip() for l in out.splitlines() if "campaignKey" in l), "")
+            sm.upsert_edition(edition, {"stage": "sent", "campaign_key": key})
+            return {"stage": "sent", "campaign_key": key, "log": out.strip()}
 
-    raise ValueError(f"stage inválido: {stage}")
+        raise ValueError(f"stage inválido: {stage}")
+    finally:
+        shutil.rmtree(wd, ignore_errors=True)
 
 
 def add_pauta(edition, pauta):
+    if not pauta:
+        raise ValueError("campo 'pauta' obrigatório")
     sm = _sm()
     raw = sm.store.read(f"content/{edition}.research.json")
     items = json.loads(raw) if raw else []
@@ -166,8 +178,5 @@ def do_sync():
 
 
 def reset_edition(edition):
-    sm = _sm()
-    sm.store.write(f"editions/{edition}.state.json",
-                   json.dumps({"edition": edition, "stage": "empty"}))
-    sm._rebuild_queue()
+    _sm().reset_edition(edition)
     return {"reset": edition}

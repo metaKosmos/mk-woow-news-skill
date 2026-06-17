@@ -120,6 +120,12 @@ class StateManager:
             cov[stage] += 1
         return cov
 
+    def reset_edition(self, edition):
+        """Zera o state da edição p/ 'empty' e reconstrói a queue."""
+        self.store.write(f"editions/{edition}.state.json",
+                         json.dumps({"edition": edition, "stage": "empty"}))
+        return self._rebuild_queue()
+
     # -- espelho Firebase (produção; devolve erro estruturado se firebase_admin ausente) --
     def sync_to_firebase(self):
         try:

@@ -29,8 +29,9 @@ def _access(secret_name, version="latest"):
     return resp.payload.data.decode("utf-8").strip()
 
 
+@lru_cache(maxsize=1)
 def get_zma_gemini_env():
-    """Devolve dict no formato que os scripts do pipeline esperam no .envmk."""
+    """Devolve dict no formato que os scripts do pipeline esperam no .envmk (cacheado)."""
     return {key: _access(secret) for key, secret in SECRET_NAMES.items()}
 
 
