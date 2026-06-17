@@ -11,6 +11,8 @@ def test_upsert_edition_and_queue(tmp_path):
     assert st["subject"] == "S25"
     assert st["stage"] == "ready"
     assert st["image_ready"] is True
+    assert "researched_at" in st.get("timestamps", {})
+    assert "ready_at" in st.get("timestamps", {})
     q = sm.get_queue()
     rows = [e for e in q["editions"] if e["edition"] == "2026-w25"]
     assert len(rows) == 1
@@ -21,6 +23,8 @@ def test_queue_sorted_and_coverage(tmp_path):
     sm = StateManager(LocalStore(tmp_path))
     sm.upsert_edition("2026-w24", {"stage": "sent", "date": "2026-06-13"})
     sm.upsert_edition("2026-w26", {"stage": "ready", "date": "2026-06-17"})
+    eds = [e["edition"] for e in sm.get_queue()["editions"]]
+    assert eds == sorted(eds)
     cov = sm.coverage()
     assert cov["ready"] == 1
     assert cov["sent"] == 1

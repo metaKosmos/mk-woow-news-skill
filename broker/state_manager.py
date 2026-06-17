@@ -83,7 +83,7 @@ class StateManager:
             if k == "stage":
                 continue
             st[k] = v
-        if new_stage and STAGE_RANK.get(new_stage, 0) >= STAGE_RANK.get(st.get("stage", "empty"), 0):
+        if new_stage is not None and STAGE_RANK.get(new_stage, -1) >= STAGE_RANK.get(st.get("stage", "empty"), 0):
             st["stage"] = new_stage
             st.setdefault("timestamps", {})[f"{new_stage}_at"] = _now_brt()
         st["edition"] = edition
@@ -116,7 +116,8 @@ class StateManager:
     def coverage(self):
         cov = {k: 0 for k in STAGE_RANK}
         for e in self.get_queue()["editions"]:
-            cov[e["stage"]] = cov.get(e["stage"], 0) + 1
+            stage = e["stage"] if e["stage"] in STAGE_RANK else "empty"
+            cov[stage] += 1
         return cov
 
     # -- espelho Firebase (produção; devolve erro estruturado se firebase_admin ausente) --
@@ -124,7 +125,9 @@ class StateManager:
         try:
             import firebase_admin
             from firebase_admin import db
-            if not firebase_admin._apps:
+            try:
+                firebase_admin.get_app()
+            except ValueError:
                 firebase_admin.initialize_app(options={
                     "databaseURL": os.environ.get("FIREBASE_DB_URL", "")})
             payload = {"queue": self.get_queue(),
