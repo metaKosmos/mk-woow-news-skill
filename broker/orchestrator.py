@@ -6,6 +6,7 @@ subprocess, e persiste state + custo + publica HTML/imagem no bucket público.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -15,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-from state_manager import StateManager, GcsStore
+from state_manager import StateManager, GcsStore, BRT
 from cost_tracker import compute_cost
 import zma_metrics
 import secrets_store
@@ -28,6 +29,14 @@ PUBLIC_BUCKET = os.environ.get("PUBLIC_BUCKET", "mk-woow-news-public")
 
 def _sm():
     return StateManager(GcsStore())
+
+
+def _resolve_edition_date(edition):
+    """Data da edição (YYYY-MM-DD). Daily Drops: a chave já é a data; se não casar
+    (legado wNN), cai para hoje em BRT. Conserta o bug de `date` em branco na gaveta."""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", edition or ""):
+        return edition
+    return datetime.now(BRT).strftime("%Y-%m-%d")
 
 
 def _rates():
@@ -100,7 +109,8 @@ def run_stage(edition, stage, payload):
         if stage == "research":
             out = _run_script(wd, "research.py", ["--edition", edition])
             _persist_content(sm, wd, edition)
-            sm.upsert_edition(edition, {"stage": "researched"})
+            sm.upsert_edition(edition, {"stage": "researched",
+                                        "date": _resolve_edition_date(edition)})
             summary = (wd / "content" / f"{edition}.research.md").read_text(encoding="utf-8")[:4000]
             return {"stage": "researched", "summary": summary, "log": out.strip()}
 
@@ -121,7 +131,8 @@ def run_stage(edition, stage, payload):
             _persist_content(sm, wd, edition)
             sm.upsert_edition(edition, {"stage": "ready", "subject": meta.get("subject", ""),
                                         "image_ready": True, "tokens": usage, "cost": cost,
-                                        "preview_url": html_url})
+                                        "preview_url": html_url,
+                                        "date": meta.get("edition_date") or _resolve_edition_date(edition)})
             return {"stage": "ready", "preview_url": html_url, "image_url": img_url,
                     "subject": meta.get("subject", ""), "cost_brl": round(cost["total_brl"], 4)}
 

@@ -5,8 +5,8 @@ Uso:
   python scripts/woow.py status
   python scripts/woow.py queue
   python scripts/woow.py metrics
-  python scripts/woow.py run --edition 2026-w26 [--stage research|generate|send]
-  python scripts/woow.py add-pauta --edition 2026-w26 --title "..." --content "..." --link "..."
+  python scripts/woow.py run --edition 2026-06-17 [--stage research|generate|send]
+  python scripts/woow.py add-pauta --edition 2026-06-17 --title "..." --content "..." --link "..."
   python scripts/woow.py sync
 """
 import argparse, sys

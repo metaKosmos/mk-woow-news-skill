@@ -14,11 +14,17 @@ Rode a checagem de versão e mostre o aviso de 1 linha se houver update:
 ## Login (uma vez)
 `bash scripts/setup.sh` instala deps + faz login Google mK (loopback). Depois, `python3 scripts/auth.py --status` mostra quem está logado.
 
+## Convenção da edição (diária)
+WooW! **Daily Drops** = uma edição por dia. O identificador da edição é a **data de
+publicação no formato `YYYY-MM-DD`** (ex.: `2026-06-17`). O broker já preenche o campo
+`date` a partir dessa chave. (Edições legadas com chave semanal `2026-wNN` ainda funcionam,
+mas use o formato de data para as novas.)
+
 ## Comandos (sempre via scripts/woow.py)
 - `python3 scripts/woow.py status` — a gaveta: enviado, pronto, gerado, pesquisado, vazio + cobertura.
-- `python3 scripts/woow.py run --edition 2026-wXX` — pipeline completo COM checkpoints: pesquisa, mostra pauta, pergunta pauta manual, gera conteúdo+imagem+HTML, mostra preview + custo, pergunta se dispara. O disparo NUNCA é automático.
-- `python3 scripts/woow.py run --edition 2026-wXX --stage research|generate|send` — roda um estágio isolado.
-- `python3 scripts/woow.py add-pauta --edition 2026-wXX --title "..." --content "..." --link "..."` — injeta pauta manual no próximo research.
+- `python3 scripts/woow.py run --edition 2026-06-17` — pipeline completo COM checkpoints: pesquisa, mostra pauta, pergunta pauta manual, gera conteúdo+imagem+HTML, mostra preview + custo, pergunta se dispara. O disparo NUNCA é automático.
+- `python3 scripts/woow.py run --edition 2026-06-17 --stage research|generate|send` — roda um estágio isolado.
+- `python3 scripts/woow.py add-pauta --edition 2026-06-17 --title "..." --content "..." --link "..."` — injeta pauta manual no próximo research.
 - `python3 scripts/woow.py queue` — fila detalhada (JSON).
 - `python3 scripts/woow.py metrics` — métricas ZMA (open/click/bounce) + custo das últimas edições.
 - `python3 scripts/woow.py sync` — força o espelho do estado pro Firebase (o painel mkaifirst.web.app/#newsletter lê de lá).

@@ -6,7 +6,6 @@ runtime, mantidos só em memória pelo tempo da requisição.
 import json
 import os
 from functools import lru_cache
-from google.cloud import secretmanager
 
 PROJECT_ID = os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT", "mk-ai-first-ops")
 
@@ -22,6 +21,8 @@ SECRET_NAMES = {
 
 @lru_cache(maxsize=1)
 def _client():
+    # Lazy import: mantém o módulo carregável offline (testes), igual ao GcsStore.
+    from google.cloud import secretmanager
     return secretmanager.SecretManagerServiceClient()
 
 

@@ -26,12 +26,34 @@ def _pct(v):
         return None
 
 
+def _int(v):
+    """Coerção tolerante para contagem inteira (aceita '182', 182, 182.0)."""
+    if v is None:
+        return None
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return None
+
+
+# Contagens absolutas: chave de saída -> candidatos na resposta crua do ZMA.
+_COUNT_FIELDS = (
+    ("sent", ("sent", "emailssent")),
+    ("delivered", ("delivered",)),
+    ("opened", ("opened",)),
+    ("clicked", ("clicked",)),
+    ("bounced", ("bounced",)),
+)
+
+
 def parse_report(raw):
-    """Normaliza a resposta crua do ZMA para {open_rate, click_rate, bounce_rate}."""
+    """Normaliza a resposta crua do ZMA: taxas (open/click/bounce_rate) + contagens
+    absolutas presentes (sent/delivered/opened/clicked/bounced). O painel mostra o
+    absoluto (ex.: total de cliques) quando a chave existe; senão só a taxa."""
     out = {"open_rate": None, "click_rate": None, "bounce_rate": None}
     if not raw:
         return out
-    sent = raw.get("sent") or raw.get("emailssent") or 0
+    sent = _int(raw.get("sent") or raw.get("emailssent") or raw.get("delivered")) or 0
     pairs = [("open_rate", "opened", "open_percent"),
              ("click_rate", "clicked", "click_percent"),
              ("bounce_rate", "bounced", "bounce_percent")]
@@ -39,7 +61,16 @@ def parse_report(raw):
         if pct_key in raw:
             out[rate_key] = _pct(raw.get(pct_key))
         elif count_key in raw and sent:
-            out[rate_key] = raw[count_key] / sent
+            cnt = _int(raw.get(count_key))
+            if cnt is not None:
+                out[rate_key] = cnt / sent
+    # Inclui só as contagens presentes (mantém o payload enxuto).
+    for out_key, candidates in _COUNT_FIELDS:
+        for c in candidates:
+            v = _int(raw.get(c))
+            if v is not None:
+                out[out_key] = v
+                break
     return out
 
 
