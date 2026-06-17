@@ -43,4 +43,7 @@ delivery:
   from_email: patrick@metakosmos.com.br   # sender verificado na org ZMA (david@ deu 6610)
   from_name: "WooW! Daily Drops"
   topic_id: "1487553000000047017"          # topic "Marketing"
-  list_name: "mK Newsletter Discovery Test"
+  list_name: "mK Newsletter Discovery Test"   # legado; list_key abaixo tem precedência
+  # Lista interna de teste WooW Daily Drops (4 contatos, dona Patrick). listkey é estável,
+  # evita falha de match por nome no getmailinglists.
+  list_key: "3zd6d14ba9f7905af73feb41e54d8d0e7060e65e18558d6211c1c5936e0053fb2a"

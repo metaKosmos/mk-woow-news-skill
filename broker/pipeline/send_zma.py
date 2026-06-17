@@ -169,6 +169,7 @@ def main():
     ap.add_argument("--from-name", default=DEFAULT_FROM_NAME)
     ap.add_argument("--topic-id", default=None, help="topicId (se Topic Management estiver ativo)")
     ap.add_argument("--list-name", default=None, help="sobrescreve o list_name do front-matter")
+    ap.add_argument("--list-key", default=None, help="listkey direto do ZMA (pula a resolução por nome)")
     ap.add_argument("--send", action="store_true", help="dispara (default: só cria Draft)")
     args = ap.parse_args()
 
@@ -179,16 +180,20 @@ def main():
 
     subject = meta.get("subject") or sys.exit("front-matter sem 'subject'")
     list_name = args.list_name or meta.get("list_name")
-    if not list_name:
-        sys.exit("Defina list_name no front-matter ou via --list-name")
+    if not args.list_key and not list_name:
+        sys.exit("Defina --list-key, ou list_name no front-matter / --list-name")
     campaignname = f"mK Newsletter {content_path.stem}"
 
     env = load_env()
     token = get_access_token(env)
     print("OK access_token obtido")
 
-    listkey = resolve_listkey(token, list_name)
-    print(f"OK listkey de '{list_name}': {listkey}")
+    if args.list_key:
+        listkey = args.list_key
+        print(f"OK listkey (config): {listkey}")
+    else:
+        listkey = resolve_listkey(token, list_name)
+        print(f"OK listkey de '{list_name}': {listkey}")
 
     key, resp = create_campaign(
         token,

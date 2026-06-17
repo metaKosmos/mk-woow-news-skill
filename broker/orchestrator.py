@@ -127,8 +127,15 @@ def run_stage(edition, stage, payload):
 
         if stage == "send":
             html_url = sm.get_state(edition).get("preview_url")
-            out = _run_script(wd, "send_zma.py",
-                              [f"content/{edition}.md", "--content-url", html_url, "--send"])
+            deliv = yaml.safe_load((CONFIG / "newsletter.yaml").read_text(encoding="utf-8"))["delivery"]
+            send_args = [f"content/{edition}.md", "--content-url", html_url, "--send",
+                         "--from-email", deliv["from_email"], "--from-name", deliv["from_name"],
+                         "--topic-id", str(deliv["topic_id"])]
+            if deliv.get("list_key"):
+                send_args += ["--list-key", deliv["list_key"]]
+            elif deliv.get("list_name"):
+                send_args += ["--list-name", deliv["list_name"]]
+            out = _run_script(wd, "send_zma.py", send_args)
             key = next((l.split(":")[-1].strip() for l in out.splitlines() if "campaignKey" in l), "")
             sm.upsert_edition(edition, {"stage": "sent", "campaign_key": key})
             return {"stage": "sent", "campaign_key": key, "log": out.strip()}
