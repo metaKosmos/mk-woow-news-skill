@@ -44,7 +44,7 @@ gcloud iam service-accounts create woow-news-broker-runtime \
   --display-name="woow-news broker runtime" || true
 
 echo "==> secretAccessor nos 5 secrets (per-secret, nunca project-level)"
-for S in zoho-ma-client-id zoho-ma-client-secret zoho-ma-refresh-token gemini-api-newsletter-key firebase-service-account; do
+for S in ZOHO_MA_CLIENT_ID ZOHO_MA_CLIENT_SECRET ZOHO_MA_REFRESH_TOKEN GEMINI_API_NEWSLETTER_KEY firebase-service-account; do
   gcloud secrets add-iam-policy-binding "$S" \
     --member="serviceAccount:${SA}" --role="roles/secretmanager.secretAccessor"
 done

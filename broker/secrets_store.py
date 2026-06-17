@@ -10,11 +10,13 @@ from google.cloud import secretmanager
 
 PROJECT_ID = os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT", "mk-ai-first-ops")
 
+# Nomes dos secrets no GCP. David cadastrou usando os nomes do .envmk (MAIÚSCULO);
+# mantemos esses nomes aqui (override por env SECRET_* se mudar no futuro).
 SECRET_NAMES = {
-    "ZOHO_MA_CLIENT_ID": os.environ.get("SECRET_ZOHO_CLIENT_ID", "zoho-ma-client-id"),
-    "ZOHO_MA_CLIENT_SECRET": os.environ.get("SECRET_ZOHO_CLIENT_SECRET", "zoho-ma-client-secret"),
-    "ZOHO_MA_REFRESH_TOKEN": os.environ.get("SECRET_ZOHO_REFRESH", "zoho-ma-refresh-token"),
-    "GEMINI_API_NEWSLETTER_KEY": os.environ.get("SECRET_GEMINI_KEY", "gemini-api-newsletter-key"),
+    "ZOHO_MA_CLIENT_ID": os.environ.get("SECRET_ZOHO_CLIENT_ID", "ZOHO_MA_CLIENT_ID"),
+    "ZOHO_MA_CLIENT_SECRET": os.environ.get("SECRET_ZOHO_CLIENT_SECRET", "ZOHO_MA_CLIENT_SECRET"),
+    "ZOHO_MA_REFRESH_TOKEN": os.environ.get("SECRET_ZOHO_REFRESH", "ZOHO_MA_REFRESH_TOKEN"),
+    "GEMINI_API_NEWSLETTER_KEY": os.environ.get("SECRET_GEMINI_KEY", "GEMINI_API_NEWSLETTER_KEY"),
 }
 
 
