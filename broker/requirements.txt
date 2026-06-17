@@ -1,0 +1,8 @@
+functions-framework==3.*
+google-cloud-secret-manager
+google-cloud-storage
+firebase-admin
+google-auth
+pyyaml
+jinja2
+feedparser
