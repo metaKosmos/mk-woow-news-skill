@@ -28,13 +28,22 @@ mas use o formato de data para as novas.)
 - `python3 scripts/woow.py queue` — fila detalhada (JSON).
 - `python3 scripts/woow.py metrics` — métricas ZMA (open/click/bounce) + custo das últimas edições.
 - `python3 scripts/woow.py sync` — força o espelho do estado pro Firebase (o painel mkaifirst.web.app/#newsletter lê de lá).
+- `python3 scripts/woow.py list-lists` — lista as listas de envio do ZMA (nome + listkey + contatos) e marca (→) qual é o alvo do envio diário.
+- `python3 scripts/woow.py create-list --name "Time mK Daily Drops" --emails-file team.txt` — cria uma lista de envio no ZMA com os contatos (CSV via `--emails` também serve). Confirma antes de criar e devolve o `listkey`.
+- `python3 scripts/woow.py set-list --list-key <KEY>` (ou `--name "..."`) — troca a lista-alvo do envio diário. Mostra o alvo atual + o novo (com nº de contatos) e pede confirmação antes de gravar.
+
+## Listas e destinatários (ZMA, NÃO Zoho CRM)
+A lista de envio da newsletter vive no **Zoho Marketing Automation (ZMA)**, e a skill cria/lista/troca essas listas via broker (comandos acima). **Esta skill não usa Zoho CRM.** Se o seu ambiente Claude tiver algum conector `ZohoCRM_*` conectado, **ignore-o** — ele não tem nada a ver com a newsletter; criar algo no módulo "Campaigns" do CRM não vira lista de disparo. Para qualquer operação de lista, use sempre `scripts/woow.py` (list-lists / create-list / set-list), nunca ferramentas de CRM.
+
+Criar uma lista e trocar o destinatário do envio são **ações de operador** (você consegue fazer sozinho) — não precisam de admin nem de redeploy. O `set-list` grava o alvo em estado mutável; a `newsletter.yaml` é só o fallback.
 
 ## Checkpoint obrigatório
-O disparo (`send`) SEMPRE pede confirmação humana explícita. Nunca dispare sem o operador conferir o preview. Em validação, garanta que a lista aponta para a lista de teste antes do envio real.
+- **Disparo (`send`):** SEMPRE pede confirmação humana explícita. Nunca dispare sem conferir o preview. Antes do envio, confira em `list-lists` qual lista está marcada como alvo (→).
+- **Trocar destinatário (`set-list`):** redireciona QUEM recebe a news diária. O comando confirma antes; só responda `s` se for essa a lista certa.
 
 ## Papéis
 - Admin (david@): muda lógica, allowlist, deploy.
-- Operadores (joão@, patrick@): run, add-pauta, queue, metrics, sync.
+- Operadores (joão@, patrick@): run, add-pauta, queue, metrics, sync, **list-lists, create-list, set-list**.
 Erro 403 significa conta não autorizada ou rota de admin. Confira `python3 scripts/auth.py --status`.
 
 ## Onde as coisas moram

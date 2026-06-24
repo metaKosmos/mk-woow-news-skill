@@ -43,7 +43,10 @@ delivery:
   from_email: patrick@metakosmos.com.br   # sender verificado na org ZMA (david@ deu 6610)
   from_name: "WooW! Daily Drops"
   topic_id: "1487553000000047017"          # topic "Marketing"
-  list_name: "mK Newsletter Discovery Test"   # legado; list_key abaixo tem precedência
-  # Lista interna de teste WooW Daily Drops (4 contatos, dona Patrick). listkey é estável,
-  # evita falha de match por nome no getmailinglists.
-  list_key: "3zd6d14ba9f7905af73feb41e54d8d0e7060e65e18558d6211c1c5936e0053fb2a"
+  list_name: "Time mK Daily Drops"   # time mK (29 contatos, dona Patrick) — alvo do teste diário
+  # listkey estável (evita falha de match por nome no getmailinglists). Este é o FALLBACK:
+  # o alvo do envio também pode ser trocado em runtime pela skill (set-list -> settings.json
+  # no GCS, que tem precedência sobre este list_key).
+  # Lista de teste anterior (WooW Daily Drops Teste Interno, 4 contatos):
+  #   3zd6d14ba9f7905af73feb41e54d8d0e7060e65e18558d6211c1c5936e0053fb2a
+  list_key: "3z9f88d94bee99b44dae78c4c9f743d47d2d0ad8dab85efb1ef1dd51741895d469"

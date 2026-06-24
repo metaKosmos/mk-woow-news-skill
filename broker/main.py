@@ -11,6 +11,9 @@ Rotas:
   GET  /metrics       operador — métricas ZMA + custo das últimas edições
   POST /run           operador — orquestra estágio (research|generate|send)
   POST /add-pauta     operador — injeta pauta manual no próximo research
+  GET  /lists         operador — lista as mailing lists ZMA + alvo ativo do envio
+  POST /lists/create  operador — cria lista ZMA + contatos (addlistandleads)
+  POST /lists/set-active operador — troca a lista-alvo do envio diário (settings.json)
   POST /admin/reset   admin    — limpa/recria estado de uma edição
 """
 import os
@@ -106,6 +109,12 @@ def _handlers():
                 return j(orchestrator.run_stage(payload.get("edition"), payload.get("stage"), payload))
             if path == "/add-pauta" and method == "POST":
                 return j(orchestrator.add_pauta(payload.get("edition"), payload.get("pauta")))
+            if path == "/lists" and method == "GET":
+                return j(orchestrator.list_lists())
+            if path == "/lists/create" and method == "POST":
+                return j(orchestrator.create_list(payload))
+            if path == "/lists/set-active" and method == "POST":
+                return j(orchestrator.set_active_list({**payload, "_email": email}))
             if path == "/admin/reset" and method == "POST":
                 return j(orchestrator.reset_edition(payload.get("edition")))
             return j({"error": f"rota desconhecida: {path}"}, 404)

@@ -40,6 +40,11 @@ def add_pauta(edition, pauta):        return _req("POST", "/add-pauta", {"editio
 def queue():                          return _req("GET", "/queue")
 def metrics():                        return _req("GET", "/metrics")
 def sync():                           return _req("GET", "/sync")
+def list_lists():                     return _req("GET", "/lists")
+def create_list(name, emails, description=None):
+    return _req("POST", "/lists/create", {"name": name, "emails": emails, "description": description})
+def set_active_list(list_key, list_name=None):
+    return _req("POST", "/lists/set-active", {"list_key": list_key, "list_name": list_name})
 
 
 def version():
