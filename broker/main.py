@@ -14,12 +14,14 @@ Rotas:
   GET  /lists         operador — lista as mailing lists ZMA + alvo ativo do envio
   POST /lists/create  operador — cria lista ZMA + contatos (addlistandleads)
   POST /lists/set-active operador — troca a lista-alvo do envio diário (settings.json)
+  GET  /admin/roles   admin    — papéis atuais (admins/operadores + floor de env)
+  POST /admin/roles   admin    — promove/rebaixa (add/remove operador|admin) sem deploy
   POST /admin/reset   admin    — limpa/recria estado de uma edição
 """
 import os
 import re
 
-ADMIN_ONLY = {"/admin/reset"}
+ADMIN_ONLY = {"/admin/reset", "/admin/roles"}
 
 
 def _split_emails(raw):
@@ -46,11 +48,23 @@ def _handlers():
     ALLOWED_AUDIENCE = os.environ.get("OAUTH_CLIENT_ID", "")
     OAUTH_CLIENT_SECRET = os.environ.get("OAUTH_CLIENT_SECRET", "")
     ALLOWED_DOMAIN = os.environ.get("ALLOWED_DOMAIN", "metakosmos.com.br")
-    ADMINS = _split_emails(os.environ.get("ADMIN_EMAILS", "david@metakosmos.com.br"))
-    OPERATORS = _split_emails(os.environ.get("OPERATOR_EMAILS", "")) | ADMINS
+    ENV_ADMINS = _split_emails(os.environ.get("ADMIN_EMAILS", "david@metakosmos.com.br"))
+    ENV_OPERATORS = _split_emails(os.environ.get("OPERATOR_EMAILS", ""))
     CRON_TOKEN = os.environ.get("CRON_TOKEN", "")
     SKILL_VERSION = os.environ.get("SKILL_VERSION", "1.0.0")
     adapter = google_requests.Request()
+
+    def effective_roles():
+        """Papéis efetivos: env (floor de admin) + roles.json mutável do GCS.
+        Falha de leitura do GCS degrada para os papéis de env (David segue admin)."""
+        import roles
+        try:
+            import orchestrator
+            stored = orchestrator.read_roles()
+        except Exception as e:  # noqa: BLE001
+            print(f"[roles] fallback p/ env (leitura do roles.json falhou): {e}")
+            stored = None
+        return roles.resolve_effective(ENV_ADMINS, ENV_OPERATORS, stored)
 
     def j(body, status=200):
         return (json.dumps(body, ensure_ascii=False), status,
@@ -87,7 +101,8 @@ def _handlers():
                 email = verify(request)
             except PermissionError as e:
                 return j({"error": str(e)}, 403)
-            if not authorize(email, path, ADMINS, OPERATORS):
+            admins, operators = effective_roles()
+            if not authorize(email, path, admins, operators):
                 return j({"error": "não autorizado"}, 403)
             return j(orchestrator.do_sync())
 
@@ -95,7 +110,8 @@ def _handlers():
             email = verify(request)
         except PermissionError as e:
             return j({"error": str(e)}, 403)
-        if not authorize(email, path, ADMINS, OPERATORS):
+        admins, operators = effective_roles()
+        if not authorize(email, path, admins, operators):
             return j({"error": f"{email} não autorizado para {path}"}, 403)
 
         payload = request.get_json(silent=True) or {}
@@ -115,6 +131,10 @@ def _handlers():
                 return j(orchestrator.create_list(payload))
             if path == "/lists/set-active" and method == "POST":
                 return j(orchestrator.set_active_list({**payload, "_email": email}))
+            if path == "/admin/roles" and method == "GET":
+                return j(orchestrator.list_roles())
+            if path == "/admin/roles" and method == "POST":
+                return j(orchestrator.update_roles({**payload, "_email": email}))
             if path == "/admin/reset" and method == "POST":
                 return j(orchestrator.reset_edition(payload.get("edition")))
             return j({"error": f"rota desconhecida: {path}"}, 404)

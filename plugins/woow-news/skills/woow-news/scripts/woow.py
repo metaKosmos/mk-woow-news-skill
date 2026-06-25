@@ -11,6 +11,9 @@ Uso:
   python scripts/woow.py list-lists
   python scripts/woow.py create-list --name "Time mK Daily Drops" --emails-file team.txt
   python scripts/woow.py set-list --list-key <KEY>   # ou --name "Time mK Daily Drops"
+  python scripts/woow.py roles list                  # (admin) papéis atuais
+  python scripts/woow.py roles add-operator novo@metakosmos.com.br      # (admin)
+  python scripts/woow.py roles add-admin joao@metakosmos.com.br         # (admin)
 """
 import argparse, sys
 from collections import Counter
@@ -133,6 +136,35 @@ def cmd_set_list(a):
     print(bc.set_active_list(match["listkey"], match["listname"]))
 
 
+_ROLE_VERBO = {"add-operator": "adicionar como OPERADOR", "remove-operator": "remover de OPERADOR",
+               "add-admin": "PROMOVER A ADMIN", "remove-admin": "REBAIXAR de admin"}
+
+
+def cmd_roles(a):
+    if a.action == "list":
+        r = bc.list_roles()
+        print("Papéis WooW News\n" + "━" * 18)
+        print("Admins    :", ", ".join(r.get("admins", [])) or "—")
+        print("Operadores:", ", ".join(r.get("operators", [])) or "—")
+        print("\nAdmin-base (env, só muda por deploy):", ", ".join(r.get("floor_admins", [])) or "—")
+        if not r.get("materialized"):
+            print("(papéis ainda vêm das env vars; a 1ª alteração materializa o roles.json)")
+        return
+    if not a.email:
+        sys.exit(f"Uso: python scripts/woow.py roles {a.action} <email@metakosmos.com.br>")
+    print(f"Confirmar: {_ROLE_VERBO[a.action]} → {a.email}?")
+    print("(controla quem OPERA/ADMINISTRA a news; NÃO dá acesso a editar nem deployar a skill)")
+    if input("[s/N] ").strip().lower() != "s":
+        print("Cancelado."); return
+    r = bc.update_roles(a.action, a.email)
+    if r.get("ok"):
+        print(f"OK {a.action} {r.get('email')}")
+        print("Admins agora  :", ", ".join(r.get("admins", [])))
+        print("Operadores    :", ", ".join(r.get("operators", [])))
+    else:
+        print(r)
+
+
 def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -156,6 +188,11 @@ def main():
     sl = sub.add_parser("set-list")
     sl.add_argument("--list-key", default=None); sl.add_argument("--name", default=None)
     sl.set_defaults(fn=cmd_set_list)
+    rl = sub.add_parser("roles", help="(admin) lista/gerencia papéis de acesso")
+    rl.add_argument("action", choices=["list", "add-operator", "remove-operator",
+                                       "add-admin", "remove-admin"])
+    rl.add_argument("email", nargs="?", default=None)
+    rl.set_defaults(fn=cmd_roles)
     args = p.parse_args(); args.fn(args)
 
 

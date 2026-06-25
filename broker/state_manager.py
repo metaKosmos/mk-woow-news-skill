@@ -126,6 +126,14 @@ class StateManager:
                          json.dumps({"edition": edition, "stage": "empty"}))
         return self._rebuild_queue()
 
+    # -- papéis (admin/operador) — camada mutável sobre as env vars (ver roles.py) --
+    def read_roles(self):
+        raw = self.store.read("roles.json")
+        return json.loads(raw) if raw else None
+
+    def write_roles(self, data):
+        self.store.write("roles.json", json.dumps(data, ensure_ascii=False, indent=2))
+
     # -- espelho Firebase (produção; devolve erro estruturado se firebase_admin ausente) --
     def sync_to_firebase(self):
         try:

@@ -20,6 +20,7 @@ from state_manager import StateManager, GcsStore, BRT
 from cost_tracker import compute_cost
 import zma_metrics
 import secrets_store
+import roles as roles_lib
 
 BROKER_DIR = Path(__file__).resolve().parent
 PIPELINE = BROKER_DIR / "pipeline"
@@ -335,3 +336,47 @@ def do_sync():
 def reset_edition(edition):
     _sm().reset_edition(edition)
     return {"reset": edition}
+
+
+# --------------------------------------------------------------- papéis (admin/operador)
+def _env_role_sets():
+    """(admins, operadores) das env vars — o floor de admin e a semente inicial."""
+    return (roles_lib.split_emails(os.environ.get("ADMIN_EMAILS", "david@metakosmos.com.br")),
+            roles_lib.split_emails(os.environ.get("OPERATOR_EMAILS", "")))
+
+
+def read_roles():
+    """Dict {admins, operators} do roles.json (GCS) ou None se ainda não materializado.
+    Usado pelo main.py p/ resolver os papéis efetivos a cada request."""
+    return _sm().read_roles()
+
+
+def list_roles():
+    """Papéis efetivos atuais + o floor de env (admins de env, não removíveis pela skill)."""
+    env_admins, env_operators = _env_role_sets()
+    stored = _sm().read_roles()
+    admins, operators = roles_lib.resolve_effective(env_admins, env_operators, stored)
+    return {"admins": sorted(admins), "operators": sorted(operators),
+            "floor_admins": sorted(env_admins), "materialized": stored is not None}
+
+
+def update_roles(payload):
+    """Aplica uma mudança de papel (add/remove operador|admin). Só admin chega aqui
+    (gate no main.py). Materializa o roles.json a partir das env vars na 1ª mutação."""
+    payload = payload or {}
+    env_admins, env_operators = _env_role_sets()
+    sm = _sm()
+    stored = sm.read_roles()
+    if stored is None:
+        stored = roles_lib.seed_from_env(env_admins, env_operators)
+    new = roles_lib.apply_change(
+        stored, payload.get("action"), payload.get("email"), env_admins,
+        domain=os.environ.get("ALLOWED_DOMAIN", "metakosmos.com.br"))
+    new["updated_by"] = payload.get("_email", "")
+    new["updated_at"] = datetime.now(BRT).isoformat(timespec="seconds")
+    sm.write_roles(new)
+    admins, operators = roles_lib.resolve_effective(env_admins, env_operators, new)
+    return {"ok": True, "action": payload.get("action"),
+            "email": roles_lib.normalize(payload.get("email")),
+            "admins": sorted(admins), "operators": sorted(operators),
+            "updated_by": new["updated_by"], "updated_at": new["updated_at"]}

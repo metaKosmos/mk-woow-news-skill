@@ -31,6 +31,7 @@ mas use o formato de data para as novas.)
 - `python3 scripts/woow.py list-lists` — lista as listas de envio do ZMA (nome + listkey + contatos) e marca (→) qual é o alvo do envio diário.
 - `python3 scripts/woow.py create-list --name "Time mK Daily Drops" --emails-file team.txt` — cria uma lista de envio no ZMA com os contatos (CSV via `--emails` também serve). Confirma antes de criar e devolve o `listkey`.
 - `python3 scripts/woow.py set-list --list-key <KEY>` (ou `--name "..."`) — troca a lista-alvo do envio diário. Mostra o alvo atual + o novo (com nº de contatos) e pede confirmação antes de gravar.
+- `python3 scripts/woow.py roles list` — **(admin)** mostra admins e operadores atuais + o admin-base de env. `roles add-operator <email>` / `roles remove-operator <email>` / `roles add-admin <email>` / `roles remove-admin <email>` gerenciam acesso sem redeploy (confirma antes). Só admin executa.
 
 ## Listas e destinatários (ZMA, NÃO Zoho CRM)
 A lista de envio da newsletter vive no **Zoho Marketing Automation (ZMA)**, e a skill cria/lista/troca essas listas via broker (comandos acima). **Esta skill não usa Zoho CRM.** Se o seu ambiente Claude tiver algum conector `ZohoCRM_*` conectado, **ignore-o** — ele não tem nada a ver com a newsletter; criar algo no módulo "Campaigns" do CRM não vira lista de disparo. Para qualquer operação de lista, use sempre `scripts/woow.py` (list-lists / create-list / set-list), nunca ferramentas de CRM.
@@ -42,9 +43,12 @@ Criar uma lista e trocar o destinatário do envio são **ações de operador** (
 - **Trocar destinatário (`set-list`):** redireciona QUEM recebe a news diária. O comando confirma antes; só responda `s` se for essa a lista certa.
 
 ## Papéis
-- Admin (david@): muda lógica, allowlist, deploy.
-- Operadores (joão@, patrick@): run, add-pauta, queue, metrics, sync, **list-lists, create-list, set-list**.
-Erro 403 significa conta não autorizada ou rota de admin. Confira `python3 scripts/auth.py --status`.
+Dois níveis, com uma separação importante: **administrar acesso ≠ atualizar a skill.**
+- **Operador** (run, add-pauta, queue, metrics, sync, **list-lists, create-list, set-list**): toca toda a operação e o ZMA, mas não as rotas de admin.
+- **Admin**: tudo do operador + **gerência de acesso pela própria skill** (`roles ...`: promover/rebaixar operador e admin, sem redeploy) + `/admin/reset`. Admin **NÃO** atualiza a skill: mexer no template/prompt/lógica/SKILL.md é commit no GitHub + deploy do broker, que exige credencial de GitHub/GCP fora da skill.
+- **Admin-base** (`ADMIN_EMAILS` de env, ex.: david@): sempre admin, anti-lockout, não é removível por `roles remove-admin` (só por deploy). É a chave-mestra de break-glass.
+
+Os papéis vivem no `roles.json` (GCS, mutável pela skill); enquanto ninguém usa `roles`, valem as env vars (`ADMIN_EMAILS`/`OPERATOR_EMAILS`). Erro 403 = conta não autorizada ou rota de admin. Confira `python3 scripts/auth.py --status`.
 
 ## Onde as coisas moram
 Estado autoritativo: bucket GCS (via broker). Painel: espelho Firebase. Schema dos arquivos em `references/schema.md`.
