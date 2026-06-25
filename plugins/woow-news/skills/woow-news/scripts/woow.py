@@ -8,6 +8,12 @@ Uso:
   python scripts/woow.py run --edition 2026-06-17 [--stage research|generate|send]
   python scripts/woow.py add-pauta --edition 2026-06-17 --title "..." --content "..." --link "..."
   python scripts/woow.py sync
+  python scripts/woow.py list-lists
+  python scripts/woow.py create-list --name "Time mK Daily Drops" --emails-file team.txt
+  python scripts/woow.py set-list --list-key <KEY>   # ou --name "Time mK Daily Drops"
+  python scripts/woow.py roles list                  # (admin) papéis atuais
+  python scripts/woow.py roles add-operator novo@metakosmos.com.br      # (admin)
+  python scripts/woow.py roles add-admin joao@metakosmos.com.br         # (admin)
 """
 import argparse, sys
 from collections import Counter
@@ -69,6 +75,96 @@ def cmd_sync(_):
     print(bc.sync())
 
 
+def _read_emails(csv, file):
+    raw = Path(file).read_text(encoding="utf-8") if file else (csv or "")
+    if not raw:
+        sys.exit("Forneça --emails \"a@x,b@x\" ou --emails-file caminho.txt")
+    out, seen = [], set()
+    for tok in raw.replace(",", "\n").splitlines():
+        e = tok.strip().strip(",").strip()
+        if e and "@" in e and e.lower() not in seen:
+            seen.add(e.lower()); out.append(e)
+    if not out:
+        sys.exit("Nenhum email válido (precisa de '@').")
+    return out
+
+
+def cmd_list_lists(_):
+    r = bc.list_lists()
+    active = (r.get("active") or {})
+    akey = active.get("list_key")
+    print("Listas ZMA  (→ = alvo do envio diário)\n" + "━" * 38)
+    for it in r.get("lists", []):
+        mark = "→ " if it["listkey"] == akey else "  "
+        cnt = f"{it.get('count','?')} cont." if it.get("count") is not None else ""
+        print(f"{mark}{(it['listname'] or '')!r:34} {cnt:9} {it['listkey']}")
+    print(f"\nAlvo atual do envio diário: {active.get('list_name')!r} ({active.get('source')})")
+
+
+def cmd_create_list(a):
+    emails = _read_emails(a.emails, a.emails_file)
+    print(f"Criar a lista ZMA {a.name!r} com {len(emails)} contato(s)?")
+    if input("[s/N] ").strip().lower() != "s":
+        print("Cancelado."); return
+    r = bc.create_list(a.name, emails, a.description)
+    if r.get("listkey"):
+        print(f"OK lista criada — listkey: {r['listkey']} ({r.get('count')} contatos)")
+        print(f"Para apontar a news diária pra ela: "
+              f"python scripts/woow.py set-list --list-key {r['listkey']}")
+    else:
+        print(r)
+
+
+def cmd_set_list(a):
+    if not a.list_key and not a.name:
+        sys.exit("Forneça --list-key KEY ou --name \"Nome da lista\"")
+    r = bc.list_lists()
+    lists = r.get("lists", [])
+    if a.list_key:
+        match = next((x for x in lists if x["listkey"] == a.list_key), None)
+    else:
+        match = next((x for x in lists if (x["listname"] or "").strip() == a.name.strip()), None)
+    if not match:
+        sys.exit("Lista não encontrada no ZMA. Rode: python scripts/woow.py list-lists")
+    cur = (r.get("active") or {})
+    cnt = f" ({match.get('count')} contatos)" if match.get("count") is not None else ""
+    print(f"Alvo atual : {cur.get('list_name')!r}")
+    print(f"Novo alvo  : {(match['listname'] or '').strip()!r}{cnt}")
+    print("\nTrocar o destinatário do ENVIO DIÁRIO da news para esta lista?")
+    if input("[s/N] ").strip().lower() != "s":
+        print("Cancelado."); return
+    print(bc.set_active_list(match["listkey"], match["listname"]))
+
+
+_ROLE_VERBO = {"add-operator": "adicionar como OPERADOR", "remove-operator": "remover de OPERADOR",
+               "add-admin": "PROMOVER A ADMIN", "remove-admin": "REBAIXAR de admin"}
+
+
+def cmd_roles(a):
+    if a.action == "list":
+        r = bc.list_roles()
+        print("Papéis WooW News\n" + "━" * 18)
+        print("Admins    :", ", ".join(r.get("admins", [])) or "—")
+        print("Operadores:", ", ".join(r.get("operators", [])) or "—")
+        print("\nAdmin-base (env, só muda por deploy):", ", ".join(r.get("floor_admins", [])) or "—")
+        if not r.get("materialized"):
+            print("(papéis ainda vêm das env vars; a 1ª alteração materializa o roles.json)")
+        return
+    if not a.email:
+        sys.exit(f"Uso: python scripts/woow.py roles {a.action} <email@metakosmos.com.br>")
+    print(f"Confirmar: {_ROLE_VERBO[a.action]} → {a.email}?")
+    print("(controla quem OPERA/ADMINISTRA a news; NÃO dá acesso a editar nem deployar a skill)")
+    if input("[s/N] ").strip().lower() != "s":
+        print("Cancelado."); return
+    r = bc.update_roles(a.action, a.email)
+    if r.get("ok"):
+        print(f"OK {a.action} {r.get('email')}")
+        print("Admins agora  :", ", ".join(r.get("admins", [])))
+        print("Operadores    :", ", ".join(r.get("operators", [])))
+    else:
+        print(r)
+
+
 def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -82,6 +178,21 @@ def main():
     ap.add_argument("--edition", required=True); ap.add_argument("--title", required=True)
     ap.add_argument("--content", default=""); ap.add_argument("--link", default="")
     ap.set_defaults(fn=cmd_add_pauta)
+    sub.add_parser("list-lists").set_defaults(fn=cmd_list_lists)
+    cl = sub.add_parser("create-list")
+    cl.add_argument("--name", required=True)
+    cl.add_argument("--emails", default=None, help="CSV de emails")
+    cl.add_argument("--emails-file", default=None, help="arquivo (1 por linha ou CSV)")
+    cl.add_argument("--description", default=None)
+    cl.set_defaults(fn=cmd_create_list)
+    sl = sub.add_parser("set-list")
+    sl.add_argument("--list-key", default=None); sl.add_argument("--name", default=None)
+    sl.set_defaults(fn=cmd_set_list)
+    rl = sub.add_parser("roles", help="(admin) lista/gerencia papéis de acesso")
+    rl.add_argument("action", choices=["list", "add-operator", "remove-operator",
+                                       "add-admin", "remove-admin"])
+    rl.add_argument("email", nargs="?", default=None)
+    rl.set_defaults(fn=cmd_roles)
     args = p.parse_args(); args.fn(args)
 
 

@@ -133,7 +133,7 @@ gcloud functions deploy woow-news-broker \
   --trigger-http \
   --allow-unauthenticated \
   --service-account=$RUNTIME_SA \
-  --set-env-vars="ALLOWED_DOMAIN=metakosmos.com.br,OAUTH_CLIENT_ID=SEU_CLIENT_ID.apps.googleusercontent.com,OAUTH_CLIENT_SECRET=GOCSPX-...,ADMIN_EMAILS=david@metakosmos.com.br,OPERATOR_EMAILS=joao@metakosmos.com.br;patrick@metakosmos.com.br,CRON_TOKEN=$CRON_TOKEN,STATE_BUCKET=mk-woow-news-state,PUBLIC_BUCKET=mk-woow-news-public,FIREBASE_DB_URL=https://mk-ai-first-ops.firebaseio.com,SKILL_VERSION=1.0.0,BRL_RATE=5.70"
+  --set-env-vars="ALLOWED_DOMAIN=metakosmos.com.br,OAUTH_CLIENT_ID=SEU_CLIENT_ID.apps.googleusercontent.com,OAUTH_CLIENT_SECRET=GOCSPX-...,ADMIN_EMAILS=david@metakosmos.com.br,OPERATOR_EMAILS=joao@metakosmos.com.br;patrick@metakosmos.com.br,CRON_TOKEN=$CRON_TOKEN,STATE_BUCKET=mk-woow-news-state,PUBLIC_BUCKET=mk-woow-news-public,FIREBASE_DB_URL=https://mk-ai-first-ops.firebaseio.com,SKILL_VERSION=1.2.0,BRL_RATE=5.70"
 ```
 
 > Os emails em `OPERATOR_EMAILS` são separados por ponto e vírgula porque o
@@ -190,20 +190,29 @@ gcloud functions logs read woow-news-broker --gen2 --region=$REGION --limit=20
 
 ## Papéis e allowlist
 
-Dois níveis de acesso, ambos em env vars do broker:
+Dois níveis: **operador** (operação + ZMA) e **admin** (tudo + gerência de acesso +
+`/admin/reset`). A separação que importa: **administrar acesso ≠ atualizar a skill.**
+Admin gerencia quem opera/administra, mas mexer no template/prompt/lógica continua sendo
+commit no GitHub + deploy (esta seção), que exige credencial fora da skill.
 
-- **`ADMIN_EMAILS`** (david): mudanças exigem redeploy (passo 5) ou
-  `gcloud functions deploy ... --update-env-vars="ADMIN_EMAILS=..."`.
-- **`OPERATOR_EMAILS`** (joão, patrick): gerenciados sem rebuild por
-  `manage-roles.sh`, que sobe uma nova revisão do Cloud Run (~15s):
-  ```bash
-  bash broker/manage-roles.sh list
-  bash broker/manage-roles.sh add-operator novo@metakosmos.com.br
-  bash broker/manage-roles.sh remove-operator antigo@metakosmos.com.br
+A partir da v1.2.0 os papéis têm duas camadas:
+
+- **`ADMIN_EMAILS`** (env, ex.: david): **floor de admin** — sempre admin, anti-lockout,
+  NÃO removível pela skill. Só muda por redeploy (passo 5) ou
+  `gcloud functions deploy ... --update-env-vars="ADMIN_EMAILS=..."`. É o break-glass.
+- **`roles.json`** (GCS, bucket de estado): camada mutável e autoritativa, gerenciada
+  **pela própria skill** por um admin, sem gcloud nem redeploy:
   ```
+  python3 scripts/woow.py roles list
+  python3 scripts/woow.py roles add-admin    joao@metakosmos.com.br
+  python3 scripts/woow.py roles add-operator novo@metakosmos.com.br
+  python3 scripts/woow.py roles remove-operator antigo@metakosmos.com.br
+  ```
+  Enquanto ninguém usa `roles`, valem as env vars (`ADMIN_EMAILS`/`OPERATOR_EMAILS` do
+  deploy); a 1ª mutação materializa o `roles.json` a partir delas.
 
-O `manage-allowlist.sh` (herdado do blog-mk) continua disponível para a env var
-`ALLOWLIST_EMAILS` caso o broker use esse modelo simples em vez de papéis.
+`manage-roles.sh` (edita as env vars via gcloud) continua como break-glass para o floor.
+`manage-allowlist.sh` (herdado do blog-mk) segue disponível para `ALLOWLIST_EMAILS`.
 
 ---
 

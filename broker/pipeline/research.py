@@ -24,11 +24,12 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-try:
-    import yaml
+import yaml
+
+try:  # feedparser só é preciso p/ baixar feeds; funções puras (build_health) importam sem ele
     import feedparser
 except ImportError:
-    sys.exit("Faltam dependências. Rode: pip3 install pyyaml feedparser")
+    feedparser = None
 
 BASE = Path(__file__).resolve().parent
 CONFIG = BASE / "config"
@@ -41,6 +42,7 @@ USER_AGENT = (
 )
 
 TAG_RE = re.compile(r"<[^>]+>")
+BRT = timezone(timedelta(hours=-3))
 
 
 def load_yaml(name):
@@ -148,6 +150,19 @@ def dedup(items):
     return out
 
 
+def build_health(report, candidates):
+    """Resumo de saúde da pesquisa para o painel: nº de candidatos, total de feeds e os
+    que erraram (403/timeout/etc.). Função pura — testável sem rede. `report` é a lista
+    de tuplas (source, encontrados, dentro_da_janela, erro) devolvida por collect()."""
+    feed_errors = [{"source": s, "error": err} for (s, _f, _k, err) in report if err]
+    return {
+        "candidates": len(candidates),
+        "feeds_total": len(report),
+        "feed_errors": feed_errors,
+        "researched_at": datetime.now(BRT).isoformat(timespec="seconds"),
+    }
+
+
 def write_research_md(path, edition, days, candidates, report):
     lines = [f"# Pauta WooW! Daily Drops — {edition}", ""]
     lines.append(f"Janela: últimos {days} dias. Candidatos após dedup: **{len(candidates)}**.")
@@ -184,6 +199,9 @@ def main():
     ap.add_argument("--days", type=int, default=None, help="override da janela de recência")
     args = ap.parse_args()
 
+    if feedparser is None:
+        sys.exit("Faltam dependências. Rode: pip3 install pyyaml feedparser")
+
     feeds_cfg = load_yaml("feeds.yaml")
     nl_cfg = load_yaml("newsletter.yaml")
     feeds = feeds_cfg["feeds"]
@@ -198,6 +216,9 @@ def main():
     md_path = CONTENT / f"{args.edition}.research.md"
     json_path.write_text(json.dumps(candidates, ensure_ascii=False, indent=2), encoding="utf-8")
     write_research_md(md_path, args.edition, days, candidates, report)
+    health_path = CONTENT / f"{args.edition}.research.health.json"
+    health_path.write_text(json.dumps(build_health(report, candidates), ensure_ascii=False, indent=2),
+                           encoding="utf-8")
 
     erros = [r for r in report if r[3]]
     print(f"OK research: {len(candidates)} candidatos -> {json_path.name} + {md_path.name}")

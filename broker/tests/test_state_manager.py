@@ -38,3 +38,18 @@ def test_stage_never_downgrades(tmp_path):
     sm.upsert_edition("2026-w27", {"stage": "sent"})
     sm.upsert_edition("2026-w27", {"stage": "ready"})  # tentativa de rebaixar
     assert sm.get_state("2026-w27")["stage"] == "sent"
+
+def test_health_and_metrics_coexist(tmp_path):
+    # O merge raso não pode deixar metrics apagar health (nem vice-versa).
+    sm = StateManager(LocalStore(tmp_path))
+    sm.upsert_edition("2026-06-17", {"stage": "researched",
+                                     "health": {"candidates": 46, "feed_errors": []}})
+    sm.upsert_edition("2026-06-17", {"metrics": {"open_rate": 0.5, "clicked": 0}})
+    st = sm.get_state("2026-06-17")
+    assert st["health"]["candidates"] == 46
+    assert st["metrics"]["open_rate"] == 0.5
+    # ordem inversa: gravar health depois preserva metrics.
+    sm.upsert_edition("2026-06-17", {"health": {"candidates": 50, "feed_errors": []}})
+    st = sm.get_state("2026-06-17")
+    assert st["metrics"]["open_rate"] == 0.5
+    assert st["health"]["candidates"] == 50
