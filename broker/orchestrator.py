@@ -26,6 +26,18 @@ PIPELINE = BROKER_DIR / "pipeline"
 CONFIG = BROKER_DIR / "config"
 PUBLIC_BUCKET = os.environ.get("PUBLIC_BUCKET", "mk-woow-news-public")
 
+# Agendamento (schedule.json no GCS, mesmo padrão de settings.json). weekdays: 0=seg..6=dom
+# (datetime.weekday()). Default desligado e em modo revisão (auto_send=False -> não dispara).
+SCHEDULE_DEFAULTS = {
+    "enabled": False,
+    "send_time": "10:00",          # HH:MM em BRT
+    "weekdays": [0, 1, 2, 3, 4, 5, 6],
+    "auto_send": False,
+    "until": None,                 # "YYYY-MM-DD" opcional (janela, ex.: piloto de 7 dias)
+    "last_run_date": None,
+}
+_SCHEDULE_SET_FIELDS = {"enabled", "send_time", "weekdays", "auto_send", "until"}
+
 
 def _sm():
     return StateManager(GcsStore())
@@ -335,3 +347,113 @@ def do_sync():
 def reset_edition(edition):
     _sm().reset_edition(edition)
     return {"reset": edition}
+
+
+# --------------------------------------------------------------- agendamento
+def get_schedule(sm=None):
+    """Lê o agendamento de schedule.json (GCS); preenche os defaults se ausente."""
+    sm = sm or _sm()
+    raw = sm.store.read("schedule.json")
+    s = json.loads(raw) if raw else {}
+    return {**SCHEDULE_DEFAULTS, **s}
+
+
+def _validate_schedule(s):
+    """Valida send_time (HH:MM), weekdays (lista de int 0..6) e until (YYYY-MM-DD|None)."""
+    try:
+        hh, mm = str(s["send_time"]).split(":")
+        h, m = int(hh), int(mm)
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            raise ValueError
+    except Exception:  # noqa: BLE001
+        raise ValueError(f"send_time inválido (use HH:MM): {s.get('send_time')!r}")
+    wd = s.get("weekdays")
+    if (not isinstance(wd, list) or not wd
+            or any(not isinstance(d, int) or d < 0 or d > 6 for d in wd)):
+        raise ValueError(f"weekdays inválido (lista de int 0=seg..6=dom): {wd!r}")
+    until = s.get("until")
+    if until not in (None, "") and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(until)):
+        raise ValueError(f"until inválido (use YYYY-MM-DD): {until!r}")
+
+
+def set_schedule(payload):
+    """Grava o agendamento em schedule.json (GCS). Operador edita sem redeploy. Só os
+    campos do agendamento são mexidos; last_run_date é preservado (dedup do tick)."""
+    payload = payload or {}
+    sm = _sm()
+    cur = json.loads(sm.store.read("schedule.json") or "{}")
+    s = {**SCHEDULE_DEFAULTS, **cur}
+    for k in _SCHEDULE_SET_FIELDS:
+        if k in payload:
+            s[k] = payload[k]
+    if s.get("until") == "":
+        s["until"] = None
+    _validate_schedule(s)
+    s["set_by"] = payload.get("_email", "")
+    s["set_at"] = datetime.now(BRT).isoformat(timespec="seconds")
+    sm.store.write("schedule.json", json.dumps(s, ensure_ascii=False, indent=2))
+    return s
+
+
+def _mark_schedule_run(sm, date_str):
+    """Marca o dia como já rodado (claim) em schedule.json, preservando o resto."""
+    s = {**SCHEDULE_DEFAULTS, **json.loads(sm.store.read("schedule.json") or "{}")}
+    s["last_run_date"] = date_str
+    sm.store.write("schedule.json", json.dumps(s, ensure_ascii=False, indent=2))
+
+
+def _should_run_now(sched, now_brt, edition_stage):
+    """Função pura: decide se o tick deve rodar a edição de hoje. Devolve (bool, motivo).
+    now_brt é um datetime em BRT; weekday() dá 0=seg..6=dom."""
+    if not sched.get("enabled"):
+        return False, "agendamento desligado"
+    today = now_brt.strftime("%Y-%m-%d")
+    if now_brt.weekday() not in (sched.get("weekdays") or []):
+        return False, f"hoje ({now_brt.weekday()}) fora dos dias do agendamento"
+    until = sched.get("until")
+    if until and today > str(until):
+        return False, f"fora da janela (until={until})"
+    hh, mm = str(sched.get("send_time", "10:00")).split(":")
+    if (now_brt.hour * 60 + now_brt.minute) < (int(hh) * 60 + int(mm)):
+        return False, f"ainda não deu o horário ({sched.get('send_time')} BRT)"
+    if sched.get("last_run_date") == today:
+        return False, "já rodou hoje"
+    done = ("sent",) if sched.get("auto_send") else ("ready", "sent")
+    if edition_stage in done:
+        return False, f"edição já em '{edition_stage}'"
+    return True, "ok"
+
+
+def run_daily(edition, auto_send=False):
+    """Pipeline do dia: research -> generate -> (send se auto_send). Reaproveita run_stage;
+    a monotonia de stage no StateManager evita rebaixar/duplicar. Pula se já enviada."""
+    sm = _sm()
+    if sm.get_state(edition).get("stage") == "sent":
+        return {"skipped": "já enviada", "edition": edition, "stage": "sent"}
+    run_stage(edition, "research", {})
+    run_stage(edition, "generate", {})
+    if auto_send:
+        run_stage(edition, "send", {})
+    return {"edition": edition, "auto_send": bool(auto_send),
+            "stage": sm.get_state(edition).get("stage")}
+
+
+def cron_tick():
+    """Bate pelo Cloud Scheduler (cron-token). Lê o agendamento, decide se roda hoje e,
+    se sim, claima o dia ANTES (evita tick duplo / re-send) e roda o pipeline. Ao fim
+    espelha o estado pro Firebase para o painel refletir na hora."""
+    sm = _sm()
+    sched = get_schedule(sm)
+    now = datetime.now(BRT)
+    edition = _resolve_edition_date(None)  # hoje em BRT
+    stage = sm.get_state(edition).get("stage", "empty")
+    ok, reason = _should_run_now(sched, now, stage)
+    if not ok:
+        return {"ran": False, "reason": reason, "edition": edition, "stage": stage}
+    _mark_schedule_run(sm, now.strftime("%Y-%m-%d"))  # claim: não re-tenta no mesmo dia
+    try:
+        result = run_daily(edition, sched.get("auto_send"))
+    except Exception as e:  # noqa: BLE001 — dia já claimado; erro fica no health, sem 500/retry
+        result = {"edition": edition, "error": str(e)[:500]}
+    sm.sync_to_firebase()
+    return {"ran": True, **result}

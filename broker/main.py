@@ -7,6 +7,9 @@ Rotas:
   GET  /version       público — versão publicada (checagem de versão da skill)
   GET  /oauth-config  público — client_id/secret de Desktop (molde blog-mk)
   GET  /sync          operador OU token de cron — espelha estado -> Firebase
+  POST /cron/tick     token de cron (OU operador) — roda o agendamento se for a hora
+  GET  /schedule      operador — devolve o agendamento (schedule.json)
+  POST /schedule/set  operador — grava o agendamento (horário/dias/auto-send/janela)
   GET  /queue         operador — devolve queue.json
   GET  /metrics       operador — métricas ZMA + custo das últimas edições
   POST /run           operador — orquestra estágio (research|generate|send)
@@ -91,6 +94,18 @@ def _handlers():
                 return j({"error": "não autorizado"}, 403)
             return j(orchestrator.do_sync())
 
+        if path == "/cron/tick" and method == "POST":
+            import orchestrator
+            if CRON_TOKEN and request.headers.get("X-Cron-Token") == CRON_TOKEN:
+                return j(orchestrator.cron_tick())
+            try:
+                email = verify(request)  # fallback: operador pode disparar o tick na mão
+            except PermissionError as e:
+                return j({"error": str(e)}, 403)
+            if not authorize(email, path, ADMINS, OPERATORS):
+                return j({"error": "não autorizado"}, 403)
+            return j(orchestrator.cron_tick())
+
         try:
             email = verify(request)
         except PermissionError as e:
@@ -115,6 +130,10 @@ def _handlers():
                 return j(orchestrator.create_list(payload))
             if path == "/lists/set-active" and method == "POST":
                 return j(orchestrator.set_active_list({**payload, "_email": email}))
+            if path == "/schedule" and method == "GET":
+                return j(orchestrator.get_schedule())
+            if path == "/schedule/set" and method == "POST":
+                return j(orchestrator.set_schedule({**payload, "_email": email}))
             if path == "/admin/reset" and method == "POST":
                 return j(orchestrator.reset_edition(payload.get("edition")))
             return j({"error": f"rota desconhecida: {path}"}, 404)

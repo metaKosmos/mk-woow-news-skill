@@ -45,6 +45,8 @@ def create_list(name, emails, description=None):
     return _req("POST", "/lists/create", {"name": name, "emails": emails, "description": description})
 def set_active_list(list_key, list_name=None):
     return _req("POST", "/lists/set-active", {"list_key": list_key, "list_name": list_name})
+def get_schedule():                   return _req("GET", "/schedule")
+def set_schedule(cfg):                return _req("POST", "/schedule/set", cfg)
 
 
 def version():
