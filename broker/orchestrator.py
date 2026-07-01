@@ -148,12 +148,48 @@ def _clear_stage_error(sm, edition):
                                                if k != "last_error"}})
 
 
-def _publish_manual_html(wd, edition, html):
-    """Escreve o HTML da edição no renders/ e publica pelo mesmo caminho do news_auto
-    (_publish_public). Devolve a URL pública. Reusado por manual_html e pelo set-html."""
+HTML_HISTORY_MAX = 20  # teto do histórico por edição (evita crescimento sem limite no estado)
+
+
+def _write_render_html(wd, edition, html):
+    """Escreve o HTML da edição em renders/ (de onde _publish_public/versioned leem)."""
     (wd / "renders" / f"woow-{edition}.html").write_text(html, encoding="utf-8")
-    html_url, _ = _publish_public(wd, edition)  # sem imagem no fluxo manual -> img_url=""
-    return html_url
+
+
+def _publish_html_version(wd, edition, stamp):
+    """Sobe uma cópia IMUTÁVEL do HTML atual em nl/hist/<ed>/<stamp>.html (histórico) e
+    devolve a URL pública. Diferente do nl/<ed>.html (latest), este objeto nunca é
+    sobrescrito — é o snapshot que o painel lista como versão."""
+    from google.cloud import storage
+    bucket = storage.Client().bucket(PUBLIC_BUCKET)
+    key = f"nl/hist/{edition}/{stamp}.html"
+    bucket.blob(key).upload_from_filename(
+        str(wd / "renders" / f"woow-{edition}.html"), content_type="text/html; charset=utf-8")
+    return f"https://storage.googleapis.com/{PUBLIC_BUCKET}/{key}"
+
+
+def _append_html_history(sm, edition, url, source, by, stamp):
+    """Anexa uma versão de HTML ao html_history da edição (merge lê-anexa-grava; o
+    upsert_edition faz merge raso, então a lista inteira é reescrita). Cortada em
+    HTML_HISTORY_MAX (mantém as mais recentes)."""
+    hist = list(sm.get_state(edition).get("html_history") or [])
+    hist.append({"url": url, "at": datetime.now(BRT).isoformat(timespec="seconds"),
+                 "source": source, "by": by or "", "stamp": stamp})
+    hist = hist[-HTML_HISTORY_MAX:]
+    sm.upsert_edition(edition, {"html_history": hist})
+    return hist
+
+
+def _publish_edition_html(sm, wd, edition, source, by=""):
+    """Publica o HTML de renders/woow-<ed>.html: atualiza o 'latest' estável (nl/<ed>.html,
+    o que vai no envio) E grava um snapshot imutável versionado, registrando-o no
+    html_history do estado (espelhado pro painel). Devolve (latest_url, img_url)."""
+    html_url, img_url = _publish_public(wd, edition)     # latest estável + imagem
+    # microssegundos no stamp: 2 publicações no mesmo segundo não colidem no path imutável
+    stamp = datetime.now(BRT).strftime("%Y%m%dT%H%M%S%f")
+    ver_url = _publish_html_version(wd, edition, stamp)   # snapshot imutável
+    _append_html_history(sm, edition, ver_url, source, by, stamp)
+    return html_url, img_url
 
 
 def _generate_manual_html(sm, wd, edition, payload):
@@ -167,7 +203,8 @@ def _generate_manual_html(sm, wd, edition, payload):
     preheader = payload.get("preheader", "")
     if not html or not subject:
         raise ValueError("manual_html exige 'html' (conteúdo) e 'subject' no payload")
-    html_url = _publish_manual_html(wd, edition, html)
+    _write_render_html(wd, edition, html)
+    html_url, _ = _publish_edition_html(sm, wd, edition, "manual_html", by=payload.get("_email", ""))
     # front-matter mínimo p/ o send_zma.py ler o subject (o corpo do .md é ignorado no send;
     # o conteúdo real do email é o HTML público via --content-url).
     fm = "---\n" + yaml.safe_dump({"subject": subject}, allow_unicode=True) + "---\n"
@@ -235,7 +272,7 @@ def run_stage(edition, stage, payload):
             usage = json.loads((wd / "content" / f"{edition}.usage.json").read_text(encoding="utf-8"))
             cost = compute_cost(usage, _rates())
             meta = json.loads((wd / "content" / f"{edition}.json").read_text(encoding="utf-8")).get("meta", {})
-            html_url, img_url = _publish_public(wd, edition)
+            html_url, img_url = _publish_edition_html(sm, wd, edition, "news_auto")
             _persist_content(sm, wd, edition)
             sm.upsert_edition(edition, {"stage": "ready", "subject": meta.get("subject", ""),
                                         "image_ready": True, "tokens": usage, "cost": cost,
@@ -462,11 +499,13 @@ def set_html(payload):
     wd = Path(tempfile.mkdtemp(prefix=f"woow-sethtml-{edition}-"))
     (wd / "renders").mkdir()
     try:
-        html_url = _publish_manual_html(wd, edition, html)
+        _write_render_html(wd, edition, html)
+        html_url, _ = _publish_edition_html(sm, wd, edition, "set_html", by=payload.get("_email", ""))
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     sm.upsert_edition(edition, {"preview_url": html_url})
-    out = {"edition": edition, "preview_url": html_url, "stage": st.get("stage", "empty")}
+    out = {"edition": edition, "preview_url": html_url, "stage": st.get("stage", "empty"),
+           "versions": len(sm.get_state(edition).get("html_history") or [])}
     if st.get("stage") == "sent":
         out["warning"] = "edição já foi ENVIADA; o override altera só o preview, não reenvia."
     return out

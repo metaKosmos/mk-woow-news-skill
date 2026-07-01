@@ -36,8 +36,12 @@ def cmd_status(_):
     print("WooW! Daily Drops — Gaveta\n" + "━" * 26)
     for e in q["editions"]:
         glyph = STAGE_GLYPH.get(e["stage"], e["stage"])
-        extra = f"open {round(e['open_rate']*100)}%" if e.get("open_rate") else ""
-        print(f"{glyph} {e['edition']}   {e.get('date',''):10}   {extra}")
+        bits = []
+        if e.get("open_rate"):
+            bits.append(f"open {round(e['open_rate']*100)}%")
+        if e.get("html_versions", 0) > 1:
+            bits.append(f"{e['html_versions']} versões HTML")
+        print(f"{glyph} {e['edition']}   {e.get('date',''):10}   {'  ·  '.join(bits)}")
     c = Counter(e["stage"] for e in q["editions"])
     print(f"\nCobertura: {c.get('ready',0)} pronto · {c.get('generated',0)} gerado · "
           f"{c.get('researched',0)} pesquisado · {c.get('sent',0)} enviado")
@@ -315,6 +319,8 @@ def cmd_set_html(a):
     r = bc.set_html(a.edition, html)
     print(f"HTML da edição {a.edition!r} republicado.")
     print(f"Preview: {r.get('preview_url')}")
+    if r.get("versions"):
+        print(f"Versões no histórico: {r['versions']} (visíveis no painel)")
     if r.get("warning"):
         print(f"⚠ {r['warning']}")
 

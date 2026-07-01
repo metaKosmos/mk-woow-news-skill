@@ -66,15 +66,21 @@ def _manual_wd(tmp_path):
     (wd / "content").mkdir(parents=True)
     return wd
 
+def _patch_publish(monkeypatch):
+    """Stub das duas etapas de publicação (latest estável + snapshot versionado imutável)."""
+    monkeypatch.setattr(orchestrator, "_publish_public",
+                        lambda w, ed: (f"https://pub/nl/{ed}.html", ""))
+    monkeypatch.setattr(orchestrator, "_publish_html_version",
+                        lambda w, ed, stamp: f"https://pub/nl/hist/{ed}/{stamp}.html")
+
 def test_generate_manual_html_publishes_and_marks_ready(tmp_path, monkeypatch):
     sm = StateManager(LocalStore(tmp_path))
     wd = _manual_wd(tmp_path)
-    monkeypatch.setattr(orchestrator, "_publish_public",
-                        lambda w, ed: (f"https://pub/nl/{ed}.html", ""))
+    _patch_publish(monkeypatch)
     out = orchestrator._generate_manual_html(
         sm, wd, "2026-07-06",
         {"html": "<html>oi mK</html>", "subject": "Assunto WooW!",
-         "preheader": "prévia", "list_key": "LK123"})
+         "preheader": "prévia", "list_key": "LK123", "_email": "patrick@metakosmos.com.br"})
     assert out["stage"] == "ready" and out["type"] == "manual_html"
     assert out["preview_url"] == "https://pub/nl/2026-07-06.html"
     # HTML escrito no renders/ (o que o _publish_public consome)
@@ -86,6 +92,15 @@ def test_generate_manual_html_publishes_and_marks_ready(tmp_path, monkeypatch):
     assert st["preheader"] == "prévia"
     assert st["preview_url"] == "https://pub/nl/2026-07-06.html"
     assert st["list_key"] == "LK123"  # lista por campanha gravada no estado
+    # histórico registrou a versão (snapshot imutável, source e autor)
+    hist = st["html_history"]
+    assert len(hist) == 1
+    assert hist[0]["source"] == "manual_html"
+    assert hist[0]["by"] == "patrick@metakosmos.com.br"
+    assert hist[0]["url"].startswith("https://pub/nl/hist/2026-07-06/")
+    # queue expõe a contagem de versões p/ o painel
+    row = [e for e in sm.get_queue()["editions"] if e["edition"] == "2026-07-06"][0]
+    assert row["html_versions"] == 1
     # .md com front-matter mínimo persistido no store
     md = sm.store.read("content/2026-07-06.md")
     assert md.startswith("---") and "Assunto WooW!" in md
@@ -93,7 +108,7 @@ def test_generate_manual_html_publishes_and_marks_ready(tmp_path, monkeypatch):
 def test_generate_manual_html_requires_html_and_subject(tmp_path, monkeypatch):
     sm = StateManager(LocalStore(tmp_path))
     wd = _manual_wd(tmp_path)
-    monkeypatch.setattr(orchestrator, "_publish_public", lambda w, ed: ("u", ""))
+    _patch_publish(monkeypatch)
     with pytest.raises(ValueError):
         orchestrator._generate_manual_html(sm, wd, "e", {"subject": "só subject"})
     with pytest.raises(ValueError):
@@ -102,7 +117,7 @@ def test_generate_manual_html_requires_html_and_subject(tmp_path, monkeypatch):
 def test_generate_manual_html_no_list_key_leaves_state_clean(tmp_path, monkeypatch):
     sm = StateManager(LocalStore(tmp_path))
     wd = _manual_wd(tmp_path)
-    monkeypatch.setattr(orchestrator, "_publish_public", lambda w, ed: ("u", ""))
+    _patch_publish(monkeypatch)
     orchestrator._generate_manual_html(sm, wd, "no-lk", {"html": "<p>x</p>", "subject": "S"})
     assert "list_key" not in sm.get_state("no-lk")
 
@@ -111,7 +126,7 @@ def test_manual_md_parses_in_send_zma_read_meta(tmp_path, monkeypatch):
     import send_zma
     sm = StateManager(LocalStore(tmp_path))
     wd = _manual_wd(tmp_path)
-    monkeypatch.setattr(orchestrator, "_publish_public", lambda w, ed: ("u", ""))
+    _patch_publish(monkeypatch)
     orchestrator._generate_manual_html(sm, wd, "2026-07-07",
                                        {"html": "<p>x</p>", "subject": "Olá WooW!"})
     meta = send_zma.read_meta(wd / "content" / "2026-07-07.md")

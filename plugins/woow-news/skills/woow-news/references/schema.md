@@ -9,10 +9,11 @@ Daily Drops: `edition` = data de publicação `YYYY-MM-DD` (uma edição por dia
   "updated_at": "2026-06-17T08:00:00-03:00",
   "editions": [
     {"edition": "2026-06-17", "type": "news_auto", "date": "2026-06-17", "stage": "sent",
-     "subject": "Assunto", "image_ready": true, "open_rate": 0.31}
+     "subject": "Assunto", "image_ready": true, "open_rate": 0.31, "html_versions": 2}
   ]
 }
 ```
+`html_versions` = nº de versões de HTML publicadas da edição (badge do histórico no painel).
 `stage` ∈ `empty | researched | generated | ready | sent` (progresso da gaveta).
 `type` ∈ `news_auto | manual_html` (tipo da campanha; campo, não estágio). Edições legadas
 sem `type` são lidas como `news_auto` (retrocompat).
@@ -36,6 +37,21 @@ quando o relatório do ZMA as fornece; o painel usa `clicked` para o total de cl
 
 Campos por campanha (usados em `manual_html`): `type`, `preheader` (preview text) e `list_key`
 (lista ZMA por campanha, override do alvo global no `send`).
+
+**Histórico de HTML** (`html_history`): cada publicação de HTML (news_auto, manual_html ou
+`set-html`) grava um snapshot **imutável** em `nl/hist/<ed>/<stamp>.html` no bucket público e
+anexa uma entrada aqui. O `preview_url` sempre aponta para o "latest" estável (`nl/<ed>.html`);
+o histórico guarda as versões anteriores para o painel listar. Cortado nas últimas 20.
+```json
+  "preview_url": "https://storage.googleapis.com/mk-woow-news-public/nl/2026-06-17.html",
+  "html_history": [
+    {"url": ".../nl/hist/2026-06-17/20260617T101500.html", "at": "2026-06-17T10:15:00-03:00",
+     "source": "manual_html", "by": "patrick@metakosmos.com.br", "stamp": "20260617T101500"},
+    {"url": ".../nl/hist/2026-06-17/20260617T143000.html", "at": "2026-06-17T14:30:00-03:00",
+     "source": "set_html", "by": "patrick@metakosmos.com.br", "stamp": "20260617T143000"}
+  ]
+```
+`source` ∈ `news_auto | manual_html | set_html` (de onde veio aquela versão).
 
 ## settings.json (no GCS) — config mutável de envio
 ```json

@@ -34,7 +34,7 @@ mas use o formato de data para as novas.)
 - `python3 scripts/woow.py create-campaign --edition <ID> --type manual_html --html arquivo.html --subject "..." --preheader "..." --list-key <KEY>` — cria uma **campanha manual**: sobe um HTML pronto + a copy, publica, mostra o preview e pergunta se dispara (checkpoint humano). `--type news_auto` (default) só registra a edição para o pipeline de notícias. `--list-key` escolhe a lista ZMA por campanha (override do alvo global).
 - `python3 scripts/woow.py list-senders` — lista os Senders do ZMA (✓ = verificado) + o remetente ativo do envio.
 - `python3 scripts/woow.py set-sender --from-email <email> [--from-name "..."]` — troca o **remetente** de TODOS os envios (news diária + campanhas). Avisa se o endereço não estiver verificado no ZMA (erro 6610) e pede confirmação. Autosserviço, sem redeploy.
-- `python3 scripts/woow.py set-html --edition <ID> --html arquivo.html` — substitui o HTML publicado (preview) de uma edição, sem redeploy. O template versionado no Git segue como fonte canônica; isto é override pontual por edição.
+- `python3 scripts/woow.py set-html --edition <ID> --html arquivo.html` — substitui o HTML publicado (preview) de uma edição, sem redeploy. Cada troca guarda um snapshot **imutável** no histórico (visível no painel); o `preview_url` aponta pro mais recente. O template versionado no Git segue como fonte canônica; isto é override pontual por edição.
 - `python3 scripts/woow.py schedule status` — mostra o agendamento (ligado?, horário, dias, modo, janela, alvo).
 - `python3 scripts/woow.py schedule set --time 10:00 --days diario [--until 2026-07-07]` — grava horário/dias/janela. `--days` aceita `diario`, `util` (seg-sex) ou nomes (`seg,ter,qua,qui,sex,sab,dom`).
 - `python3 scripts/woow.py schedule on | off` — liga/desliga o agendamento.
@@ -64,7 +64,9 @@ Trocar o **remetente** e trocar o **HTML** de uma edição deixaram de ser taref
   consta como verificado. Cuidado: setar um remetente não verificado quebra também o auto-send
   agendado (o erro fica no `health`, sem notificação ativa) — confira com `list-senders` e valide em
   DRAFT antes de ligar o auto-send.
-- **`set-html`** republica o HTML de uma edição (override por edição). O template no Git segue canônico.
+- **`set-html`** republica o HTML de uma edição (override por edição). O template no Git segue
+  canônico. **Cada versão fica registrada** (snapshot imutável em `nl/hist/<ed>/`); o painel lista
+  o histórico de HTML da edição e o `preview_url` sempre aponta pro mais recente.
 
 ## Agendamento (automação de envio)
 A News pode rodar sozinha, todo dia no horário, sem sessão Claude logada. O agendamento

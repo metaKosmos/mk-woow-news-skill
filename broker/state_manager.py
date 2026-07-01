@@ -104,6 +104,7 @@ class StateManager:
                 "subject": st.get("subject", ""),
                 "image_ready": st.get("image_ready", False),
                 "open_rate": (st.get("metrics") or {}).get("open_rate"),
+                "html_versions": len(st.get("html_history") or []),  # nº de versões p/ o painel
             })
         rows.sort(key=lambda r: r["edition"])
         queue = {"updated_at": _now_brt(), "editions": rows}
