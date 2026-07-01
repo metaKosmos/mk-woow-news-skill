@@ -11,6 +11,11 @@ Uso:
   python scripts/woow.py list-lists
   python scripts/woow.py create-list --name "Time mK Daily Drops" --emails-file team.txt
   python scripts/woow.py set-list --list-key <KEY>   # ou --name "Time mK Daily Drops"
+  python scripts/woow.py create-campaign --edition 2026-07-01 --type manual_html \
+      --html campanha.html --subject "..." --preheader "..." --list-key <KEY>
+  python scripts/woow.py list-senders
+  python scripts/woow.py set-sender --from-email patrick@metakosmos.com.br --from-name "WooW!"
+  python scripts/woow.py set-html --edition 2026-07-01 --html novo.html
   python scripts/woow.py schedule status
   python scripts/woow.py schedule set --time 10:00 --days diario [--until 2026-07-07]
   python scripts/woow.py schedule on | off
@@ -228,6 +233,92 @@ def cmd_schedule_autosend(a):
         _render_schedule(bc.set_schedule({"auto_send": False}))
 
 
+def cmd_create_campaign(a):
+    edition = a.edition
+    if a.type == "news_auto":
+        r = bc.create_campaign(edition, "news_auto")
+        print(f"Campanha {edition!r} registrada como news_auto (stage {r.get('stage')}).")
+        print(f"Rode o pipeline: python scripts/woow.py run --edition {edition}")
+        return
+    # manual_html: sobe HTML pronto + copy, publica, mostra preview e pergunta se dispara
+    if not a.html or not a.subject:
+        sys.exit("manual_html exige --html arquivo.html e --subject \"...\"")
+    html = Path(a.html).read_text(encoding="utf-8")
+    if not html.strip():
+        sys.exit(f"Arquivo HTML vazio: {a.html}")
+    bc.create_campaign(edition, "manual_html")
+    g = bc.run(edition, "generate", {"html": html, "subject": a.subject,
+                                     "preheader": a.preheader or "", "list_key": a.list_key})
+    print(f"Campanha manual {edition!r} pronta.")
+    print(f"Assunto : {a.subject}")
+    print(f"Preview : {g.get('preview_url')}")
+    if a.list_key:
+        print(f"Lista   : {a.list_key} (override por campanha)")
+    print("\nConfira o preview no navegador antes de disparar.")
+    if input("\nDisparar agora? [s/N] ").strip().lower() == "s":
+        print(bc.run(edition, "send"))
+    else:
+        print(f"Campanha em 'ready' (não enviada). Para disparar depois: "
+              f"python scripts/woow.py run --edition {edition} --stage send")
+
+
+def _sender_verified(senders_resp, email):
+    """True se `email` consta como verificado na resposta do /senders (listagem ZMA ou,
+    se indisponível, allowlist configurada)."""
+    email = (email or "").strip().lower()
+    senders = senders_resp.get("senders")
+    if senders:
+        return email in {(s.get("email") or "").strip().lower() for s in senders if s.get("verified")}
+    allow = senders_resp.get("verified_senders") or []
+    return email in {e.strip().lower() for e in allow}
+
+
+def cmd_list_senders(_):
+    r = bc.get_senders()
+    active = (r.get("active") or {})
+    print("Senders ZMA  (✓ = verificado)\n" + "━" * 29)
+    senders = r.get("senders")
+    if senders:
+        for s in senders:
+            print(f"{'✓' if s.get('verified') else '·'} {s.get('email')}")
+    else:
+        print("(ZMA não expôs a listagem; usando allowlist configurada)")
+        for e in (r.get("verified_senders") or []):
+            print(f"✓ {e}")
+        if r.get("note"):
+            print(f"nota: {r['note']}")
+    print(f"\nRemetente ativo do envio: {active.get('from_email')!r} ({active.get('source')})")
+
+
+def cmd_set_sender(a):
+    try:
+        sr = bc.get_senders()
+    except Exception:  # noqa: BLE001 — verificação é informativa; não trava a troca
+        sr = {}
+    cur = (sr.get("active") or {})
+    verified = _sender_verified(sr, a.from_email)
+    print(f"Remetente atual: {cur.get('from_email')!r}")
+    print(f"Novo remetente : {a.from_email!r}" + (f" — {a.from_name}" if a.from_name else ""))
+    if not verified:
+        print(f"\n⚠ {a.from_email} NÃO consta como Sender verificado no ZMA.")
+        print("  Se não estiver verificado no painel ZMA, o disparo falha com erro 6610.")
+    print("\nTrocar o REMETENTE de TODOS os envios (news diária + campanhas manuais)?")
+    if input("[s/N] ").strip().lower() != "s":
+        print("Cancelado."); return
+    print(bc.set_sender(a.from_email, a.from_name))
+
+
+def cmd_set_html(a):
+    html = Path(a.html).read_text(encoding="utf-8")
+    if not html.strip():
+        sys.exit(f"Arquivo HTML vazio: {a.html}")
+    r = bc.set_html(a.edition, html)
+    print(f"HTML da edição {a.edition!r} republicado.")
+    print(f"Preview: {r.get('preview_url')}")
+    if r.get("warning"):
+        print(f"⚠ {r['warning']}")
+
+
 def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -251,6 +342,23 @@ def main():
     sl = sub.add_parser("set-list")
     sl.add_argument("--list-key", default=None); sl.add_argument("--name", default=None)
     sl.set_defaults(fn=cmd_set_list)
+    cc = sub.add_parser("create-campaign")
+    cc.add_argument("--edition", required=True)
+    cc.add_argument("--type", choices=["news_auto", "manual_html"], default="news_auto")
+    cc.add_argument("--html", default=None, help="arquivo HTML pronto (manual_html)")
+    cc.add_argument("--subject", default=None, help="assunto do email (manual_html)")
+    cc.add_argument("--preheader", default=None, help="preheader/preview text (manual_html)")
+    cc.add_argument("--list-key", default=None, help="lista ZMA por campanha (override do alvo global)")
+    cc.set_defaults(fn=cmd_create_campaign)
+    sub.add_parser("list-senders").set_defaults(fn=cmd_list_senders)
+    ss = sub.add_parser("set-sender")
+    ss.add_argument("--from-email", required=True)
+    ss.add_argument("--from-name", default=None)
+    ss.set_defaults(fn=cmd_set_sender)
+    sh = sub.add_parser("set-html")
+    sh.add_argument("--edition", required=True)
+    sh.add_argument("--html", required=True, help="arquivo HTML que substitui o preview da edição")
+    sh.set_defaults(fn=cmd_set_html)
     sch = sub.add_parser("schedule")
     ssub = sch.add_subparsers(dest="schedule_cmd", required=True)
     ssub.add_parser("status").set_defaults(fn=cmd_schedule_status)

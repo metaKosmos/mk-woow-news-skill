@@ -148,6 +148,60 @@ def _clear_stage_error(sm, edition):
                                                if k != "last_error"}})
 
 
+def _publish_manual_html(wd, edition, html):
+    """Escreve o HTML da edição no renders/ e publica pelo mesmo caminho do news_auto
+    (_publish_public). Devolve a URL pública. Reusado por manual_html e pelo set-html."""
+    (wd / "renders" / f"woow-{edition}.html").write_text(html, encoding="utf-8")
+    html_url, _ = _publish_public(wd, edition)  # sem imagem no fluxo manual -> img_url=""
+    return html_url
+
+
+def _generate_manual_html(sm, wd, edition, payload):
+    """Estágio 'generate' de campanhas manual_html: pula research/generate, recebe o HTML
+    pronto (o CLI lê o arquivo local e manda o conteúdo no payload), publica no bucket
+    público e marca 'ready'. `wd` já vem pronto (workdir do run_stage) — assinatura pensada
+    para teste isolado (basta mockar _publish_public)."""
+    payload = payload or {}
+    html = payload.get("html")
+    subject = payload.get("subject")
+    preheader = payload.get("preheader", "")
+    if not html or not subject:
+        raise ValueError("manual_html exige 'html' (conteúdo) e 'subject' no payload")
+    html_url = _publish_manual_html(wd, edition, html)
+    # front-matter mínimo p/ o send_zma.py ler o subject (o corpo do .md é ignorado no send;
+    # o conteúdo real do email é o HTML público via --content-url).
+    fm = "---\n" + yaml.safe_dump({"subject": subject}, allow_unicode=True) + "---\n"
+    (wd / "content" / f"{edition}.md").write_text(fm, encoding="utf-8")
+    _persist_content(sm, wd, edition)
+    patch = {"stage": "ready", "type": "manual_html", "subject": subject,
+             "preheader": preheader, "preview_url": html_url,
+             "date": _resolve_edition_date(edition)}
+    if payload.get("list_key"):
+        patch["list_key"] = payload["list_key"]  # lista por campanha (override no send)
+    sm.upsert_edition(edition, patch)
+    _clear_stage_error(sm, edition)
+    return {"stage": "ready", "type": "manual_html", "preview_url": html_url, "subject": subject}
+
+
+def _build_send_args(edition, st, deliv, sender, active_list):
+    """Monta os args do send_zma.py (função pura, testável). Lista: list_key por campanha
+    (estado) tem precedência sobre a lista-alvo ativa (settings > config). Remetente:
+    sender resolvido por get_active_sender (settings > config). manual_html ganha um
+    --campaign-name distinto do Daily Drops; news_auto mantém o default do send_zma."""
+    args = [f"content/{edition}.md", "--content-url", st.get("preview_url"), "--send",
+            "--from-email", sender["from_email"], "--from-name", sender["from_name"],
+            "--topic-id", str(deliv["topic_id"])]
+    if st.get("type") == "manual_html":
+        args += ["--campaign-name", st.get("campaign_name") or f"mK Campanha {edition}"]
+    if st.get("list_key"):
+        args += ["--list-key", st["list_key"]]
+    elif active_list.get("list_key"):
+        args += ["--list-key", active_list["list_key"]]
+    elif active_list.get("list_name"):
+        args += ["--list-name", active_list["list_name"]]
+    return args
+
+
 def run_stage(edition, stage, payload):
     sm = _sm()
     wd = _workdir(edition)
@@ -166,6 +220,9 @@ def run_stage(edition, stage, payload):
             return {"stage": "researched", "summary": summary, "log": out.strip()}
 
         if stage == "generate":
+            etype = sm.get_state(edition).get("type", "news_auto")
+            if etype == "manual_html":
+                return _generate_manual_html(sm, wd, edition, payload)
             _run_script(wd, "generate_content.py", ["--edition", edition])
             _run_script(wd, "generate_image.py", ["--edition", edition])
             img_ext = next((e for e in ("jpg", "png")
@@ -189,16 +246,9 @@ def run_stage(edition, stage, payload):
                     "subject": meta.get("subject", ""), "cost_brl": round(cost["total_brl"], 4)}
 
         if stage == "send":
-            html_url = sm.get_state(edition).get("preview_url")
-            deliv = _delivery()
-            target = get_active_list(sm)  # estado mutável tem precedência; cai p/ config
-            send_args = [f"content/{edition}.md", "--content-url", html_url, "--send",
-                         "--from-email", deliv["from_email"], "--from-name", deliv["from_name"],
-                         "--topic-id", str(deliv["topic_id"])]
-            if target.get("list_key"):
-                send_args += ["--list-key", target["list_key"]]
-            elif target.get("list_name"):
-                send_args += ["--list-name", target["list_name"]]
+            st = sm.get_state(edition)
+            send_args = _build_send_args(edition, st, _delivery(),
+                                         get_active_sender(sm), get_active_list(sm))
             out = _run_script(wd, "send_zma.py", send_args)
             key = next((l.split(":")[-1].strip() for l in out.splitlines() if "campaignKey" in l), "")
             sm.upsert_edition(edition, {"stage": "sent", "campaign_key": key})
@@ -224,6 +274,34 @@ def add_pauta(edition, pauta):
                      "categories": ""})
     sm.store.write(f"content/{edition}.research.json", json.dumps(items, ensure_ascii=False, indent=2))
     return {"ok": True, "candidates": len(items)}
+
+
+# --------------------------------------------------------------- campanhas (type)
+CAMPAIGN_TYPES = ("news_auto", "manual_html")
+
+
+def create_campaign(payload):
+    """Registra a edição como campanha de um `type` (news_auto | manual_html). `type` é
+    CAMPO no estado, não estágio: não mexe em STAGE_RANK. Bloqueia recriar com type
+    divergente se a edição já saiu de 'empty' (evita estado híbrido). O conteúdo (HTML,
+    subject) entra depois, no estágio generate (manual_html) ou no pipeline (news_auto)."""
+    payload = payload or {}
+    edition = payload.get("edition")
+    if not edition:
+        raise ValueError("campo 'edition' obrigatório")
+    etype = payload.get("type", "news_auto")
+    if etype not in CAMPAIGN_TYPES:
+        raise ValueError(f"type inválido: {etype!r} (use {' | '.join(CAMPAIGN_TYPES)})")
+    sm = _sm()
+    st = sm.get_state(edition)
+    cur_type = st.get("type", "news_auto")
+    cur_stage = st.get("stage", "empty")
+    if cur_stage != "empty" and cur_type != etype:
+        raise ValueError(
+            f"edição {edition} já existe como '{cur_type}' em stage '{cur_stage}'; "
+            f"resete antes de recriar como '{etype}' (admin: reset).")
+    sm.upsert_edition(edition, {"type": etype})  # sem stage:empty (no-op pela monotonia)
+    return {"edition": edition, "type": etype, "stage": cur_stage}
 
 
 # --------------------------------------------------------------- listas (ZMA)
@@ -276,6 +354,121 @@ def set_active_list(payload):
     sm.store.write("settings.json", json.dumps(s, ensure_ascii=False, indent=2))
     return {"active_list_key": s["active_list_key"], "active_list_name": s["active_list_name"],
             "set_by": s["set_by"], "set_at": s["set_at"]}
+
+
+# --------------------------------------------------------------- remetente (sender)
+def _verified_senders():
+    """Allowlist de senders sabidamente verificados no ZMA (fallback offline quando o
+    ZMA não expõe listagem de Senders). Config em newsletter.yaml delivery.verified_senders;
+    default: o from_email do delivery (hoje patrick@)."""
+    deliv = _delivery()
+    vs = deliv.get("verified_senders")
+    if isinstance(vs, str):
+        vs = [vs]
+    return [e.strip().lower() for e in (vs or [deliv.get("from_email", "")]) if e and e.strip()]
+
+
+def _check_sender_verified(from_email):
+    """Diz se `from_email` consta como verificado. Tenta a listagem de Senders do ZMA ao
+    vivo (send_zma --list-senders); se indisponível, cai na allowlist configurada. Devolve
+    (verified: True|False, source). source='zma' quando confirmado ao vivo, 'allowlist' senão."""
+    email = (from_email or "").strip().lower()
+    try:  # tentativa ao vivo (endpoint real do ZMA — confirmar por probe)
+        senders = (_run_manage_or_send_senders() or {}).get("senders")
+        if isinstance(senders, list) and senders:
+            verified = {(s.get("email") or "").strip().lower()
+                        for s in senders if s.get("verified")}
+            return (email in verified, "zma")
+    except Exception as exc:  # noqa: BLE001 — endpoint pode não existir; cai na allowlist
+        print(f"[sender] listagem ZMA indisponível ({exc}); usando allowlist")
+    return (email in _verified_senders(), "allowlist")
+
+
+def get_active_sender(sm=None):
+    """Remetente do envio (GLOBAL: vale p/ news_auto e manual). Estado mutável
+    (settings.json) tem precedência; cai para delivery.from_email/from_name do
+    newsletter.yaml. Espelha get_active_list."""
+    sm = sm or _sm()
+    s = json.loads(sm.store.read("settings.json") or "{}")
+    deliv = _delivery()
+    return {"from_email": s.get("active_from_email") or deliv.get("from_email"),
+            "from_name": s.get("active_from_name") or deliv.get("from_name"),
+            "source": "settings" if s.get("active_from_email") else "config"}
+
+
+def set_sender(payload):
+    """Grava o remetente ativo (from_email/from_name) em settings.json (GCS), preservando
+    a lista-alvo (active_list_key). Vale para TODOS os envios (news diária + manuais). NÃO
+    bloqueia sender não verificado: grava e avisa (o ZMA barra no envio com 6610). O CLI
+    confirma antes quando verified=False."""
+    payload = payload or {}
+    from_email = (payload.get("from_email") or "").strip()
+    if not from_email or "@" not in from_email:
+        raise ValueError("campo 'from_email' obrigatório (email válido)")
+    sm = _sm()
+    s = json.loads(sm.store.read("settings.json") or "{}")
+    s["active_from_email"] = from_email
+    s["active_from_name"] = payload.get("from_name") or s.get("active_from_name") or ""
+    s["sender_set_by"] = payload.get("_email", "")
+    s["sender_set_at"] = datetime.now(BRT).isoformat(timespec="seconds")
+    sm.store.write("settings.json", json.dumps(s, ensure_ascii=False, indent=2))
+    verified, source = _check_sender_verified(from_email)
+    out = {"active_from_email": s["active_from_email"], "active_from_name": s["active_from_name"],
+           "verified": verified, "verified_source": source,
+           "set_by": s["sender_set_by"], "set_at": s["sender_set_at"]}
+    if verified is not True:
+        out["warning"] = (f"'{from_email}' não consta como Sender verificado no ZMA; se o "
+                          f"envio falhar com erro 6610, verifique o remetente no painel ZMA.")
+    return out
+
+
+def get_senders():
+    """Senders do ZMA (best-effort) + o remetente ativo do envio. Se a listagem ao vivo do
+    ZMA não estiver disponível, devolve a allowlist configurada como verified_senders."""
+    active = get_active_sender()
+    try:
+        res = _run_manage_or_send_senders()
+    except Exception as exc:  # noqa: BLE001
+        res = {"senders": None, "note": f"listagem ZMA indisponível: {exc}"}
+    if not res.get("senders"):
+        res["verified_senders"] = _verified_senders()
+    res["active"] = active
+    return res
+
+
+def _run_manage_or_send_senders():
+    """Roda send_zma.py --list-senders num workdir com .envmk e devolve o JSON."""
+    wd = _envmk_workdir()
+    try:
+        out = _run_script(wd, "send_zma.py", ["--list-senders"])
+        lines = [l for l in out.splitlines() if l.strip().startswith("{")]
+        return json.loads(lines[-1]) if lines else {"senders": None}
+    finally:
+        shutil.rmtree(wd, ignore_errors=True)
+
+
+def set_html(payload):
+    """Override de HTML por edição, sem redeploy: republica o HTML no bucket público e
+    atualiza o preview_url da edição. NÃO mexe em stage/type — o template versionado no Git
+    segue canônico; isto é override pontual por edição. Avisa se a edição já foi enviada."""
+    payload = payload or {}
+    edition = payload.get("edition")
+    html = payload.get("html")
+    if not edition or not html:
+        raise ValueError("campos 'edition' e 'html' obrigatórios")
+    sm = _sm()
+    st = sm.get_state(edition)
+    wd = _workdir(edition)
+    try:
+        html_url = _publish_manual_html(wd, edition, html)
+        (wd / "content" / f"{edition}.html").write_text(html, encoding="utf-8")
+    finally:
+        shutil.rmtree(wd, ignore_errors=True)
+    sm.upsert_edition(edition, {"preview_url": html_url})
+    out = {"edition": edition, "preview_url": html_url, "stage": st.get("stage", "empty")}
+    if st.get("stage") == "sent":
+        out["warning"] = "edição já foi ENVIADA; o override altera só o preview, não reenvia."
+    return out
 
 
 def list_lists():

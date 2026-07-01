@@ -14,9 +14,13 @@ Rotas:
   GET  /metrics       operador — métricas ZMA + custo das últimas edições
   POST /run           operador — orquestra estágio (research|generate|send)
   POST /add-pauta     operador — injeta pauta manual no próximo research
+  POST /campaigns/create   operador — registra edição como campanha (type news_auto|manual_html)
+  POST /campaigns/set-html operador — override do HTML de uma edição (sem redeploy)
   GET  /lists         operador — lista as mailing lists ZMA + alvo ativo do envio
   POST /lists/create  operador — cria lista ZMA + contatos (addlistandleads)
   POST /lists/set-active operador — troca a lista-alvo do envio diário (settings.json)
+  GET  /senders       operador — Senders do ZMA (best-effort) + remetente ativo
+  POST /senders/set-active operador — troca o remetente ativo (settings.json, global)
   POST /admin/reset   admin    — limpa/recria estado de uma edição
 """
 import os
@@ -124,6 +128,14 @@ def _handlers():
                 return j(orchestrator.run_stage(payload.get("edition"), payload.get("stage"), payload))
             if path == "/add-pauta" and method == "POST":
                 return j(orchestrator.add_pauta(payload.get("edition"), payload.get("pauta")))
+            if path == "/campaigns/create" and method == "POST":
+                return j(orchestrator.create_campaign({**payload, "_email": email}))
+            if path == "/campaigns/set-html" and method == "POST":
+                return j(orchestrator.set_html({**payload, "_email": email}))
+            if path == "/senders" and method == "GET":
+                return j(orchestrator.get_senders())
+            if path == "/senders/set-active" and method == "POST":
+                return j(orchestrator.set_sender({**payload, "_email": email}))
             if path == "/lists" and method == "GET":
                 return j(orchestrator.list_lists())
             if path == "/lists/create" and method == "POST":

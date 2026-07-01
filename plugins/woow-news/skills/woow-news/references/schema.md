@@ -8,18 +8,21 @@ Daily Drops: `edition` = data de publicação `YYYY-MM-DD` (uma edição por dia
 {
   "updated_at": "2026-06-17T08:00:00-03:00",
   "editions": [
-    {"edition": "2026-06-17", "date": "2026-06-17", "stage": "sent",
+    {"edition": "2026-06-17", "type": "news_auto", "date": "2026-06-17", "stage": "sent",
      "subject": "Assunto", "image_ready": true, "open_rate": 0.31}
   ]
 }
 ```
 `stage` ∈ `empty | researched | generated | ready | sent` (progresso da gaveta).
+`type` ∈ `news_auto | manual_html` (tipo da campanha; campo, não estágio). Edições legadas
+sem `type` são lidas como `news_auto` (retrocompat).
 
 ## editions/<ed>.state.json (no GCS)
 ```json
 {
-  "edition": "2026-06-17", "date": "2026-06-17", "stage": "sent",
+  "edition": "2026-06-17", "type": "news_auto", "date": "2026-06-17", "stage": "sent",
   "subject": "Assunto", "image_ready": true, "campaign_key": "...", "preview_url": "...",
+  "preheader": "", "list_key": "3z...",
   "timestamps": {"researched_at": "...", "generated_at": "...", "ready_at": "...", "sent_at": "..."},
   "tokens": {"classify": {"input": 0, "output": 0}, "score": {}, "write": {}, "art_director": {}, "image": {}},
   "cost": {"per_step_brl": {}, "total_usd": 0.0, "total_brl": 0.0},
@@ -31,14 +34,20 @@ Daily Drops: `edition` = data de publicação `YYYY-MM-DD` (uma edição por dia
 As contagens absolutas em `metrics` (`sent/delivered/opened/clicked/bounced`) só aparecem
 quando o relatório do ZMA as fornece; o painel usa `clicked` para o total de cliques.
 
+Campos por campanha (usados em `manual_html`): `type`, `preheader` (preview text) e `list_key`
+(lista ZMA por campanha, override do alvo global no `send`).
+
 ## settings.json (no GCS) — config mutável de envio
 ```json
 {
   "active_list_key": "3z...", "active_list_name": "Time mK Daily Drops",
-  "set_by": "joao@metakosmos.com.br", "set_at": "2026-06-30T10:00:00-03:00"
+  "set_by": "joao@metakosmos.com.br", "set_at": "2026-06-30T10:00:00-03:00",
+  "active_from_email": "patrick@metakosmos.com.br", "active_from_name": "WooW! Daily Drops",
+  "sender_set_by": "joao@metakosmos.com.br", "sender_set_at": "2026-07-01T10:00:00-03:00"
 }
 ```
-Lista-alvo do envio diário (tem precedência sobre `newsletter.yaml`). Editado por `set-list`.
+Lista-alvo do envio diário (`active_list_*`, editado por `set-list`) e remetente ativo global
+(`active_from_*`, editado por `set-sender`). Ambos têm precedência sobre `newsletter.yaml`.
 
 ## schedule.json (no GCS) — agendamento do envio diário
 ```json

@@ -98,6 +98,7 @@ class StateManager:
             st = self.get_state(ed)
             rows.append({
                 "edition": ed,
+                "type": st.get("type", "news_auto"),  # campo, não estágio: edições legadas = news_auto
                 "date": st.get("date", ""),
                 "stage": st.get("stage", "empty"),
                 "subject": st.get("subject", ""),

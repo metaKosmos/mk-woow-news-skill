@@ -39,6 +39,30 @@ def test_stage_never_downgrades(tmp_path):
     sm.upsert_edition("2026-w27", {"stage": "ready"})  # tentativa de rebaixar
     assert sm.get_state("2026-w27")["stage"] == "sent"
 
+def test_queue_row_has_type_default_news_auto(tmp_path):
+    # MAR-176: toda row do queue carrega `type`; edição sem type declarado = news_auto.
+    sm = StateManager(LocalStore(tmp_path))
+    sm.upsert_edition("2026-07-01", {"stage": "researched"})
+    row = [e for e in sm.get_queue()["editions"] if e["edition"] == "2026-07-01"][0]
+    assert row["type"] == "news_auto"
+
+def test_queue_row_type_manual_html(tmp_path):
+    sm = StateManager(LocalStore(tmp_path))
+    sm.upsert_edition("2026-07-02", {"type": "manual_html", "stage": "ready"})
+    row = [e for e in sm.get_queue()["editions"] if e["edition"] == "2026-07-02"][0]
+    assert row["type"] == "manual_html"
+
+def test_legacy_state_without_type_is_news_auto(tmp_path):
+    # Retrocompat: state.json legado (v1.2.0) gravado SEM `type` deve virar news_auto na queue.
+    import json
+    sm = StateManager(LocalStore(tmp_path))
+    sm.store.write("editions/2026-06-13.state.json",
+                   json.dumps({"edition": "2026-06-13", "stage": "sent", "subject": "Legada"}))
+    sm._rebuild_queue()
+    row = [e for e in sm.get_queue()["editions"] if e["edition"] == "2026-06-13"][0]
+    assert row["type"] == "news_auto"
+    assert row["stage"] == "sent"
+
 def test_health_and_metrics_coexist(tmp_path):
     # O merge raso não pode deixar metrics apagar health (nem vice-versa).
     sm = StateManager(LocalStore(tmp_path))

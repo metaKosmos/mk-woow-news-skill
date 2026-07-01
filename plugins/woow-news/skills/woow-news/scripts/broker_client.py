@@ -47,6 +47,12 @@ def set_active_list(list_key, list_name=None):
     return _req("POST", "/lists/set-active", {"list_key": list_key, "list_name": list_name})
 def get_schedule():                   return _req("GET", "/schedule")
 def set_schedule(cfg):                return _req("POST", "/schedule/set", cfg)
+def create_campaign(edition, type, extra=None):
+    return _req("POST", "/campaigns/create", {"edition": edition, "type": type, **(extra or {})})
+def set_html(edition, html):          return _req("POST", "/campaigns/set-html", {"edition": edition, "html": html})
+def get_senders():                    return _req("GET", "/senders")
+def set_sender(from_email, from_name=None):
+    return _req("POST", "/senders/set-active", {"from_email": from_email, "from_name": from_name})
 
 
 def version():
