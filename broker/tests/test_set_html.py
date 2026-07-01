@@ -8,10 +8,9 @@ from state_manager import StateManager, LocalStore
 
 
 def _patch(tmp_path, monkeypatch):
+    # set_html usa um tempdir mínimo próprio (não _workdir/secrets); só stubamos _sm e o publish.
     sm = StateManager(LocalStore(tmp_path))
-    wd = tmp_path / "wd"; (wd / "renders").mkdir(parents=True); (wd / "content").mkdir()
     monkeypatch.setattr(orchestrator, "_sm", lambda: sm)
-    monkeypatch.setattr(orchestrator, "_workdir", lambda ed: wd)
     monkeypatch.setattr(orchestrator, "_publish_public",
                         lambda w, ed: (f"https://pub/nl/{ed}.html", ""))
     return sm

@@ -458,10 +458,11 @@ def set_html(payload):
         raise ValueError("campos 'edition' e 'html' obrigatórios")
     sm = _sm()
     st = sm.get_state(edition)
-    wd = _workdir(edition)
+    # tempdir mínimo: set_html só escreve o HTML e publica (não precisa dos secrets do _workdir).
+    wd = Path(tempfile.mkdtemp(prefix=f"woow-sethtml-{edition}-"))
+    (wd / "renders").mkdir()
     try:
         html_url = _publish_manual_html(wd, edition, html)
-        (wd / "content" / f"{edition}.html").write_text(html, encoding="utf-8")
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     sm.upsert_edition(edition, {"preview_url": html_url})
