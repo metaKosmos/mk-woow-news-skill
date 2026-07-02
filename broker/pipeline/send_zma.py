@@ -23,6 +23,7 @@ ZohoMarketingAutomation.campaign.ALL). from_email precisa estar em Senders.
 """
 import argparse
 import json
+import os
 import sys
 import urllib.parse
 import urllib.request
@@ -160,19 +161,81 @@ def send_campaign(token, campaignkey):
     return post_form(f"{ZMA_BASE}/sendcampaign", data, headers=auth_headers(token))
 
 
+# Endpoint de listagem de Senders do ZMA. A API v1 do Marketing Automation NÃO documenta
+# publicamente esse método (pesquisa jul/2026); este path é um CANDIDATO a confirmar por
+# probe ao vivo numa conta ZMA real (patrick@ como controle positivo). Sobrescreva por env
+# ZMA_SENDERS_PATH quando o probe revelar o path correto — sem redeploy do código. Se o
+# endpoint não existir/responder, quem chama (orchestrator) cai na allowlist configurada.
+SENDERS_PATH = os.environ.get("ZMA_SENDERS_PATH", "getfromaddress")
+
+
+def _parse_senders(resp):
+    """Normaliza a resposta de Senders do ZMA para [{email, verified}]. Tolerante a variações
+    de nome de campo; devolve None se não reconhecer nada parecido com senders (aí o probe
+    inspeciona a resposta crua)."""
+    if not isinstance(resp, dict):
+        return None
+    rows = (resp.get("from_address") or resp.get("fromaddress") or resp.get("senders")
+            or resp.get("from_addresses") or resp.get("list_of_details"))
+    if not isinstance(rows, list):
+        return None
+    out = []
+    for it in rows:
+        if isinstance(it, str):
+            out.append({"email": it, "verified": None})
+        elif isinstance(it, dict):
+            email = (it.get("email") or it.get("fromemail") or it.get("from_email")
+                     or it.get("emailid") or it.get("fromAddress"))
+            if "verified" in it:
+                verified = bool(it.get("verified"))
+            else:
+                verified = str(it.get("status") or it.get("verifystatus") or "").lower() \
+                    in ("verified", "1", "true", "active")
+            if email:
+                out.append({"email": email, "verified": verified})
+    return out or None
+
+
+def list_senders(token):
+    """Best-effort: lista os Senders (from-addresses) do ZMA + status de verificação.
+    Devolve {"senders": [{email, verified}, ...]} quando reconhece o formato; senão
+    {"senders": None, "raw": <resposta crua>} para o probe ao vivo inspecionar."""
+    try:
+        resp = get(f"{ZMA_BASE}/{SENDERS_PATH}?resfmt=JSON", headers=auth_headers(token))
+    except Exception as e:  # noqa: BLE001 — endpoint pode não existir
+        return {"senders": None, "error": str(e), "path": SENDERS_PATH}
+    senders = _parse_senders(resp)
+    return {"senders": senders} if senders is not None else {"senders": None, "raw": resp,
+                                                             "path": SENDERS_PATH}
+
+
 # ------------------------------------------------------------------------ main
 def main():
     ap = argparse.ArgumentParser(description="Disparo newsletter mK via Zoho Marketing Automation")
-    ap.add_argument("content", help="caminho do content/*.md (subject, list_name, etc.)")
-    ap.add_argument("--content-url", required=True, help="URL pública do HTML renderizado (content_url)")
+    ap.add_argument("content", nargs="?", help="caminho do content/*.md (subject, list_name, etc.)")
+    ap.add_argument("--content-url", help="URL pública do HTML renderizado (content_url)")
     ap.add_argument("--from-email", default=DEFAULT_FROM_EMAIL)
     ap.add_argument("--from-name", default=DEFAULT_FROM_NAME)
     ap.add_argument("--topic-id", default=None, help="topicId (se Topic Management estiver ativo)")
     ap.add_argument("--list-name", default=None, help="sobrescreve o list_name do front-matter")
     ap.add_argument("--list-key", default=None, help="listkey direto do ZMA (pula a resolução por nome)")
+    ap.add_argument("--campaign-name", default=None,
+                    help="nome da campanha no ZMA (default: 'mK Newsletter <stem>')")
+    ap.add_argument("--list-senders", action="store_true",
+                    help="lista os Senders do ZMA (JSON) e sai — não cria campanha")
     ap.add_argument("--send", action="store_true", help="dispara (default: só cria Draft)")
     args = ap.parse_args()
 
+    env = load_env()
+    token = get_access_token(env)
+    print("OK access_token obtido")
+
+    if args.list_senders:
+        print(json.dumps(list_senders(token), ensure_ascii=False))
+        return
+
+    if not args.content or not args.content_url:
+        sys.exit("Uso: send_zma.py <content.md> --content-url <URL> [--send]  (ou --list-senders)")
     content_path = Path(args.content)
     if not content_path.is_absolute():
         content_path = BASE / content_path
@@ -182,11 +245,7 @@ def main():
     list_name = args.list_name or meta.get("list_name")
     if not args.list_key and not list_name:
         sys.exit("Defina --list-key, ou list_name no front-matter / --list-name")
-    campaignname = f"mK Newsletter {content_path.stem}"
-
-    env = load_env()
-    token = get_access_token(env)
-    print("OK access_token obtido")
+    campaignname = args.campaign_name or f"mK Newsletter {content_path.stem}"
 
     if args.list_key:
         listkey = args.list_key

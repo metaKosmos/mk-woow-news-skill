@@ -98,11 +98,13 @@ class StateManager:
             st = self.get_state(ed)
             rows.append({
                 "edition": ed,
+                "type": st.get("type", "news_auto"),  # campo, não estágio: edições legadas = news_auto
                 "date": st.get("date", ""),
                 "stage": st.get("stage", "empty"),
                 "subject": st.get("subject", ""),
                 "image_ready": st.get("image_ready", False),
                 "open_rate": (st.get("metrics") or {}).get("open_rate"),
+                "html_versions": len(st.get("html_history") or []),  # nº de versões p/ o painel
             })
         rows.sort(key=lambda r: r["edition"])
         queue = {"updated_at": _now_brt(), "editions": rows}

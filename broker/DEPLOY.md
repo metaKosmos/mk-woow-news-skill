@@ -188,6 +188,37 @@ gcloud functions logs read woow-news-broker --gen2 --region=$REGION --limit=20
 
 ---
 
+## Cron tick (agendamento da News)
+
+O agendamento da News (horário/dias/auto-send) é dado mutável em `schedule.json` no bucket
+de estado, editado pela skill (`woow.py schedule ...`) sem redeploy. Quem **executa** é um
+único Cloud Scheduler que bate periodicamente no broker; o broker lê o `schedule.json` e
+roda a edição do dia quando dá o horário (dedup por dia). Reusa o `CRON_TOKEN` do `/sync`.
+
+```bash
+# 1) habilite o Cloud Scheduler (uma vez)
+gcloud services enable cloudscheduler.googleapis.com
+
+# 2) crie o job (a cada 15 min; o broker decide se é hora de rodar)
+BROKER_URL="$(gcloud functions describe woow-news-broker --gen2 --region=$REGION --format='value(serviceConfig.uri)')"
+gcloud scheduler jobs create http woow-news-tick \
+  --location=$REGION \
+  --schedule="*/15 * * * *" \
+  --uri="$BROKER_URL/cron/tick" \
+  --http-method=POST \
+  --headers="X-Cron-Token=$CRON_TOKEN" \
+  --attempt-deadline=900s
+```
+
+> O tick roda research → generate → (send se `auto_send`) **num único request**. Suba o
+> timeout e a memória da function para acomodar o pipeline:
+> ```bash
+> gcloud functions deploy woow-news-broker --gen2 --region=$REGION \
+>   --update-env-vars=... --timeout=900s --memory=1Gi
+> ```
+> Falha de um dia **não** re-tenta sozinha (o dia já foi "claimado"); um operador roda na
+> mão com `woow.py run --edition <hoje>`.
+
 ## Papéis e allowlist
 
 Dois níveis de acesso, ambos em env vars do broker:

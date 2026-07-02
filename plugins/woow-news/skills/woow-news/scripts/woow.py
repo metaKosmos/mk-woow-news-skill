@@ -11,6 +11,15 @@ Uso:
   python scripts/woow.py list-lists
   python scripts/woow.py create-list --name "Time mK Daily Drops" --emails-file team.txt
   python scripts/woow.py set-list --list-key <KEY>   # ou --name "Time mK Daily Drops"
+  python scripts/woow.py create-campaign --edition 2026-07-01 --type manual_html \
+      --html campanha.html --subject "..." --preheader "..." --list-key <KEY>
+  python scripts/woow.py list-senders
+  python scripts/woow.py set-sender --from-email patrick@metakosmos.com.br --from-name "WooW!"
+  python scripts/woow.py set-html --edition 2026-07-01 --html novo.html
+  python scripts/woow.py schedule status
+  python scripts/woow.py schedule set --time 10:00 --days diario [--until 2026-07-07]
+  python scripts/woow.py schedule on | off
+  python scripts/woow.py schedule auto-send on | off
 """
 import argparse, sys
 from collections import Counter
@@ -27,8 +36,12 @@ def cmd_status(_):
     print("WooW! Daily Drops — Gaveta\n" + "━" * 26)
     for e in q["editions"]:
         glyph = STAGE_GLYPH.get(e["stage"], e["stage"])
-        extra = f"open {round(e['open_rate']*100)}%" if e.get("open_rate") else ""
-        print(f"{glyph} {e['edition']}   {e.get('date',''):10}   {extra}")
+        bits = []
+        if e.get("open_rate"):
+            bits.append(f"open {round(e['open_rate']*100)}%")
+        if e.get("html_versions", 0) > 1:
+            bits.append(f"{e['html_versions']} versões HTML")
+        print(f"{glyph} {e['edition']}   {e.get('date',''):10}   {'  ·  '.join(bits)}")
     c = Counter(e["stage"] for e in q["editions"])
     print(f"\nCobertura: {c.get('ready',0)} pronto · {c.get('generated',0)} gerado · "
           f"{c.get('researched',0)} pesquisado · {c.get('sent',0)} enviado")
@@ -133,6 +146,185 @@ def cmd_set_list(a):
     print(bc.set_active_list(match["listkey"], match["listname"]))
 
 
+_DAYNAMES = ["seg", "ter", "qua", "qui", "sex", "sab", "dom"]  # 0=seg .. 6=dom
+
+
+def _parse_days(s):
+    s = (s or "").strip().lower()
+    if s in ("diario", "diária", "diaria", "todos", "*"):
+        return [0, 1, 2, 3, 4, 5, 6]
+    if s in ("util", "uteis", "úteis", "semana"):
+        return [0, 1, 2, 3, 4]
+    out = []
+    for tok in s.replace(";", ",").split(","):
+        t = tok.strip()[:3]
+        if t in _DAYNAMES:
+            out.append(_DAYNAMES.index(t))
+    if not out:
+        sys.exit("--days inválido. Use 'diario', 'util' ou nomes: seg,ter,qua,qui,sex,sab,dom")
+    return sorted(set(out))
+
+
+def _fmt_days(weekdays):
+    wd = sorted(weekdays or [])
+    if wd == [0, 1, 2, 3, 4, 5, 6]:
+        return "todos os dias"
+    if wd == [0, 1, 2, 3, 4]:
+        return "dias úteis (seg-sex)"
+    return ", ".join(_DAYNAMES[d] for d in wd) if wd else "(nenhum)"
+
+
+def _render_schedule(s):
+    print("WooW! Daily Drops — Agendamento\n" + "━" * 33)
+    print(f"Estado   : {'LIGADO' if s.get('enabled') else 'desligado'}")
+    print(f"Horário  : {s.get('send_time')} BRT")
+    print(f"Dias     : {_fmt_days(s.get('weekdays'))}")
+    print(f"Modo     : {'AUTO-SEND (dispara sozinho)' if s.get('auto_send') else 'revisão (gera, não dispara)'}")
+    if s.get("until"):
+        print(f"Janela   : até {s.get('until')}")
+    if s.get("last_run_date"):
+        print(f"Último run: {s.get('last_run_date')}")
+    try:
+        active = (bc.list_lists().get("active") or {})
+        print(f"Alvo     : {active.get('list_name')!r} ({active.get('source')})")
+    except Exception:  # noqa: BLE001 — alvo é informativo; não trava o status
+        pass
+    if not s.get("enabled"):
+        print("\nPara ligar: python scripts/woow.py schedule on")
+
+
+def cmd_schedule_status(_):
+    _render_schedule(bc.get_schedule())
+
+
+def cmd_schedule_set(a):
+    cfg = {}
+    if a.time is not None:
+        cfg["send_time"] = a.time
+    if a.days is not None:
+        cfg["weekdays"] = _parse_days(a.days)
+    if a.until is not None:
+        cfg["until"] = a.until or None
+    if not cfg:
+        sys.exit("Informe ao menos --time, --days ou --until.")
+    s = bc.set_schedule(cfg)
+    print("Agendamento atualizado.\n")
+    _render_schedule(s)
+
+
+def cmd_schedule_on(_):
+    print("Agendamento LIGADO.\n"); _render_schedule(bc.set_schedule({"enabled": True}))
+
+
+def cmd_schedule_off(_):
+    print("Agendamento desligado.\n"); _render_schedule(bc.set_schedule({"enabled": False}))
+
+
+def cmd_schedule_autosend(a):
+    if a.mode == "on":
+        print("AUTO-SEND liga o disparo SEM revisão humana: no horário, a News vai pra")
+        print("lista-alvo automaticamente, sem ninguém conferir o preview antes.")
+        try:
+            active = (bc.list_lists().get("active") or {})
+            print(f"Alvo atual do envio: {active.get('list_name')!r}")
+        except Exception:  # noqa: BLE001
+            pass
+        if input("\nLigar auto-send? [s/N] ").strip().lower() != "s":
+            print("Cancelado."); return
+        print("\nAUTO-SEND ligado.\n"); _render_schedule(bc.set_schedule({"auto_send": True}))
+    else:
+        print("AUTO-SEND desligado (volta ao modo revisão).\n")
+        _render_schedule(bc.set_schedule({"auto_send": False}))
+
+
+def cmd_create_campaign(a):
+    edition = a.edition
+    if a.type == "news_auto":
+        r = bc.create_campaign(edition, "news_auto")
+        print(f"Campanha {edition!r} registrada como news_auto (stage {r.get('stage')}).")
+        print(f"Rode o pipeline: python scripts/woow.py run --edition {edition}")
+        return
+    # manual_html: sobe HTML pronto + copy, publica, mostra preview e pergunta se dispara
+    if not a.html or not a.subject:
+        sys.exit("manual_html exige --html arquivo.html e --subject \"...\"")
+    html = Path(a.html).read_text(encoding="utf-8")
+    if not html.strip():
+        sys.exit(f"Arquivo HTML vazio: {a.html}")
+    bc.create_campaign(edition, "manual_html")
+    g = bc.run(edition, "generate", {"html": html, "subject": a.subject,
+                                     "preheader": a.preheader or "", "list_key": a.list_key})
+    print(f"Campanha manual {edition!r} pronta.")
+    print(f"Assunto : {a.subject}")
+    print(f"Preview : {g.get('preview_url')}")
+    if a.list_key:
+        print(f"Lista   : {a.list_key} (override por campanha)")
+    print("\nConfira o preview no navegador antes de disparar.")
+    if input("\nDisparar agora? [s/N] ").strip().lower() == "s":
+        print(bc.run(edition, "send"))
+    else:
+        print(f"Campanha em 'ready' (não enviada). Para disparar depois: "
+              f"python scripts/woow.py run --edition {edition} --stage send")
+
+
+def _sender_verified(senders_resp, email):
+    """True se `email` consta como verificado na resposta do /senders (listagem ZMA ou,
+    se indisponível, allowlist configurada)."""
+    email = (email or "").strip().lower()
+    senders = senders_resp.get("senders")
+    if senders:
+        return email in {(s.get("email") or "").strip().lower() for s in senders if s.get("verified")}
+    allow = senders_resp.get("verified_senders") or []
+    return email in {e.strip().lower() for e in allow}
+
+
+def cmd_list_senders(_):
+    r = bc.get_senders()
+    active = (r.get("active") or {})
+    print("Senders ZMA  (✓ = verificado)\n" + "━" * 29)
+    senders = r.get("senders")
+    if senders:
+        for s in senders:
+            print(f"{'✓' if s.get('verified') else '·'} {s.get('email')}")
+    else:
+        print("(ZMA não expôs a listagem; usando allowlist configurada)")
+        for e in (r.get("verified_senders") or []):
+            print(f"✓ {e}")
+        if r.get("note"):
+            print(f"nota: {r['note']}")
+    print(f"\nRemetente ativo do envio: {active.get('from_email')!r} ({active.get('source')})")
+
+
+def cmd_set_sender(a):
+    try:
+        sr = bc.get_senders()
+    except Exception:  # noqa: BLE001 — verificação é informativa; não trava a troca
+        sr = {}
+    cur = (sr.get("active") or {})
+    verified = _sender_verified(sr, a.from_email)
+    print(f"Remetente atual: {cur.get('from_email')!r}")
+    print(f"Novo remetente : {a.from_email!r}" + (f" — {a.from_name}" if a.from_name else ""))
+    if not verified:
+        print(f"\n⚠ {a.from_email} NÃO consta como Sender verificado no ZMA.")
+        print("  Se não estiver verificado no painel ZMA, o disparo falha com erro 6610.")
+    print("\nTrocar o REMETENTE de TODOS os envios (news diária + campanhas manuais)?")
+    if input("[s/N] ").strip().lower() != "s":
+        print("Cancelado."); return
+    print(bc.set_sender(a.from_email, a.from_name))
+
+
+def cmd_set_html(a):
+    html = Path(a.html).read_text(encoding="utf-8")
+    if not html.strip():
+        sys.exit(f"Arquivo HTML vazio: {a.html}")
+    r = bc.set_html(a.edition, html)
+    print(f"HTML da edição {a.edition!r} republicado.")
+    print(f"Preview: {r.get('preview_url')}")
+    if r.get("versions"):
+        print(f"Versões no histórico: {r['versions']} (visíveis no painel)")
+    if r.get("warning"):
+        print(f"⚠ {r['warning']}")
+
+
 def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -156,6 +348,36 @@ def main():
     sl = sub.add_parser("set-list")
     sl.add_argument("--list-key", default=None); sl.add_argument("--name", default=None)
     sl.set_defaults(fn=cmd_set_list)
+    cc = sub.add_parser("create-campaign")
+    cc.add_argument("--edition", required=True)
+    cc.add_argument("--type", choices=["news_auto", "manual_html"], default="news_auto")
+    cc.add_argument("--html", default=None, help="arquivo HTML pronto (manual_html)")
+    cc.add_argument("--subject", default=None, help="assunto do email (manual_html)")
+    cc.add_argument("--preheader", default=None, help="preheader/preview text (manual_html)")
+    cc.add_argument("--list-key", default=None, help="lista ZMA por campanha (override do alvo global)")
+    cc.set_defaults(fn=cmd_create_campaign)
+    sub.add_parser("list-senders").set_defaults(fn=cmd_list_senders)
+    ss = sub.add_parser("set-sender")
+    ss.add_argument("--from-email", required=True)
+    ss.add_argument("--from-name", default=None)
+    ss.set_defaults(fn=cmd_set_sender)
+    sh = sub.add_parser("set-html")
+    sh.add_argument("--edition", required=True)
+    sh.add_argument("--html", required=True, help="arquivo HTML que substitui o preview da edição")
+    sh.set_defaults(fn=cmd_set_html)
+    sch = sub.add_parser("schedule")
+    ssub = sch.add_subparsers(dest="schedule_cmd", required=True)
+    ssub.add_parser("status").set_defaults(fn=cmd_schedule_status)
+    sset = ssub.add_parser("set")
+    sset.add_argument("--time", default=None, help="HH:MM em BRT (ex.: 10:00)")
+    sset.add_argument("--days", default=None, help="diario | util | seg,ter,qua,qui,sex,sab,dom")
+    sset.add_argument("--until", default=None, help="YYYY-MM-DD (janela opcional; vazio limpa)")
+    sset.set_defaults(fn=cmd_schedule_set)
+    ssub.add_parser("on").set_defaults(fn=cmd_schedule_on)
+    ssub.add_parser("off").set_defaults(fn=cmd_schedule_off)
+    sas = ssub.add_parser("auto-send")
+    sas.add_argument("mode", choices=["on", "off"])
+    sas.set_defaults(fn=cmd_schedule_autosend)
     args = p.parse_args(); args.fn(args)
 
 
