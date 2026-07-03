@@ -7,13 +7,20 @@ Rotas:
   GET  /version       público — versão publicada (checagem de versão da skill)
   GET  /oauth-config  público — client_id/secret de Desktop (molde blog-mk)
   GET  /sync          operador OU token de cron — espelha estado -> Firebase
+  POST /cron/tick     token de cron (OU operador) — roda o agendamento se for a hora
+  GET  /schedule      operador — devolve o agendamento (schedule.json)
+  POST /schedule/set  operador — grava o agendamento (horário/dias/auto-send/janela)
   GET  /queue         operador — devolve queue.json
   GET  /metrics       operador — métricas ZMA + custo das últimas edições
   POST /run           operador — orquestra estágio (research|generate|send)
   POST /add-pauta     operador — injeta pauta manual no próximo research
+  POST /campaigns/create   operador — registra edição como campanha (type news_auto|manual_html)
+  POST /campaigns/set-html operador — override do HTML de uma edição (sem redeploy)
   GET  /lists         operador — lista as mailing lists ZMA + alvo ativo do envio
   POST /lists/create  operador — cria lista ZMA + contatos (addlistandleads)
   POST /lists/set-active operador — troca a lista-alvo do envio diário (settings.json)
+  GET  /senders       operador — Senders do ZMA (best-effort) + remetente ativo
+  POST /senders/set-active operador — troca o remetente ativo (settings.json, global)
   POST /admin/reset   admin    — limpa/recria estado de uma edição
 """
 import os
@@ -91,6 +98,18 @@ def _handlers():
                 return j({"error": "não autorizado"}, 403)
             return j(orchestrator.do_sync())
 
+        if path == "/cron/tick" and method == "POST":
+            import orchestrator
+            if CRON_TOKEN and request.headers.get("X-Cron-Token") == CRON_TOKEN:
+                return j(orchestrator.cron_tick())
+            try:
+                email = verify(request)  # fallback: operador pode disparar o tick na mão
+            except PermissionError as e:
+                return j({"error": str(e)}, 403)
+            if not authorize(email, path, ADMINS, OPERATORS):
+                return j({"error": "não autorizado"}, 403)
+            return j(orchestrator.cron_tick())
+
         try:
             email = verify(request)
         except PermissionError as e:
@@ -109,12 +128,24 @@ def _handlers():
                 return j(orchestrator.run_stage(payload.get("edition"), payload.get("stage"), payload))
             if path == "/add-pauta" and method == "POST":
                 return j(orchestrator.add_pauta(payload.get("edition"), payload.get("pauta")))
+            if path == "/campaigns/create" and method == "POST":
+                return j(orchestrator.create_campaign({**payload, "_email": email}))
+            if path == "/campaigns/set-html" and method == "POST":
+                return j(orchestrator.set_html({**payload, "_email": email}))
+            if path == "/senders" and method == "GET":
+                return j(orchestrator.get_senders())
+            if path == "/senders/set-active" and method == "POST":
+                return j(orchestrator.set_sender({**payload, "_email": email}))
             if path == "/lists" and method == "GET":
                 return j(orchestrator.list_lists())
             if path == "/lists/create" and method == "POST":
                 return j(orchestrator.create_list(payload))
             if path == "/lists/set-active" and method == "POST":
                 return j(orchestrator.set_active_list({**payload, "_email": email}))
+            if path == "/schedule" and method == "GET":
+                return j(orchestrator.get_schedule())
+            if path == "/schedule/set" and method == "POST":
+                return j(orchestrator.set_schedule({**payload, "_email": email}))
             if path == "/admin/reset" and method == "POST":
                 return j(orchestrator.reset_edition(payload.get("edition")))
             return j({"error": f"rota desconhecida: {path}"}, 404)

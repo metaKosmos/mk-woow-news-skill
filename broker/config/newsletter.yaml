@@ -42,6 +42,11 @@ media:
 delivery:
   from_email: patrick@metakosmos.com.br   # sender verificado na org ZMA (david@ deu 6610)
   from_name: "WooW! Daily Drops"
+  # Allowlist de senders sabidamente verificados no ZMA. Fallback quando o ZMA não expõe
+  # listagem de Senders (set-sender avisa, não bloqueia, se o from_email não estiver aqui).
+  # Ao verificar um novo remetente no painel ZMA, adicione-o nesta lista.
+  verified_senders:
+    - patrick@metakosmos.com.br
   topic_id: "1487553000000047017"          # topic "Marketing"
   list_name: "Time mK Daily Drops"   # time mK (29 contatos, dona Patrick) — alvo do teste diário
   # listkey estável (evita falha de match por nome no getmailinglists). Este é o FALLBACK:
