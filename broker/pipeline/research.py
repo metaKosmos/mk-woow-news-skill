@@ -3,6 +3,7 @@
 
 Uso:
     python3 research.py --edition 2026-w25 [--days 3]
+    python3 research.py --test-feeds            # só testa as fontes, não grava nada
 
 Lê config/feeds.yaml (fontes) e config/newsletter.yaml (janela de recência), baixa
 cada feed, filtra pelos itens dos últimos N dias, deduplica por link e título, e
@@ -150,6 +151,17 @@ def dedup(items):
     return out
 
 
+def enabled_feeds(feeds):
+    """Só as fontes ativas. `enabled` ausente vale True (retrocompat com o YAML antigo)."""
+    return [f for f in (feeds or []) if f.get("enabled", True)]
+
+
+def report_as_dicts(report):
+    """Converte o report de collect() em JSON serializável (uma linha por fonte)."""
+    return [{"source": s, "found": found, "kept": kept, "error": err}
+            for (s, found, kept, err) in report]
+
+
 def build_health(report, candidates):
     """Resumo de saúde da pesquisa para o painel: nº de candidatos, total de feeds e os
     que erraram (403/timeout/etc.). Função pura — testável sem rede. `report` é a lista
@@ -195,8 +207,10 @@ def write_research_md(path, edition, days, candidates, report):
 
 def main():
     ap = argparse.ArgumentParser(description="Ingestão RSS da WooW! Daily Drops")
-    ap.add_argument("--edition", required=True, help="rótulo da edição, ex: 2026-w25")
+    ap.add_argument("--edition", default=None, help="rótulo da edição, ex: 2026-w25")
     ap.add_argument("--days", type=int, default=None, help="override da janela de recência")
+    ap.add_argument("--test-feeds", action="store_true",
+                    help="baixa cada fonte e imprime o relatório em JSON; não grava nada")
     args = ap.parse_args()
 
     if feedparser is None:
@@ -204,9 +218,19 @@ def main():
 
     feeds_cfg = load_yaml("feeds.yaml")
     nl_cfg = load_yaml("newsletter.yaml")
-    feeds = feeds_cfg["feeds"]
+    feeds = enabled_feeds(feeds_cfg["feeds"])
     days = args.days if args.days is not None else nl_cfg["research"]["days_lookback"]
     max_per_source = nl_cfg["research"]["max_per_source"]
+
+    if args.test_feeds:
+        # Mesmo caminho de código da pesquisa real (fetch_feed + collect), de propósito:
+        # o que interessa é como as fontes respondem DAQUI, de dentro do broker.
+        _, report = collect(feeds, days, max_per_source)
+        print(json.dumps({"report": report_as_dicts(report)}, ensure_ascii=False))
+        return
+
+    if not args.edition:
+        sys.exit("--edition é obrigatório (ou use --test-feeds)")
 
     candidates, report = collect(feeds, days, max_per_source)
     candidates = dedup(candidates)

@@ -1,6 +1,10 @@
-# Fontes RSS da WooW! Daily Drops
-# Extraído do workflow n8n do João (Newsletter Automatizada - Template, 2026-06-16).
-# Editável pelo João sem tocar no código (liga com MAR-134). Adicionar/remover feeds aqui.
+# Fontes RSS da WooW! Daily Drops — SEED.
+#
+# Este arquivo é só o ponto de partida. A lista viva fica em `sources.json` no bucket
+# de estado e é editada pela skill (`woow.py sources add|set-url|disable|remove`), sem
+# redeploy. Enquanto ninguém tiver mexido pela skill, vale o que está aqui.
+#
+# `enabled: false` mantém a fonte registrada mas fora da pesquisa.
 
 feeds:
   - source: Modern Retail
@@ -8,13 +12,13 @@ feeds:
   - source: Glossy
     url: https://www.glossy.co/feed/
   - source: Digital Commerce 360
-    url: https://digitalcommerce360.com/feed/
+    url: https://www.digitalcommerce360.com/feed/
   - source: Business of Fashion
     url: https://www.businessoffashion.com/feed
   - source: VentureBeat
     url: https://venturebeat.com/feed/
   - source: Fast Company
-    url: https://www.fastcompany.com/feed
+    url: https://www.fastcompany.com/latest/rss
   - source: AR Insider
     url: https://arinsider.co/feed/
   - source: Meio & Mensagem
@@ -23,3 +27,5 @@ feeds:
     url: https://mercadoeconsumo.com.br/feed/
   - source: E-Commerce Brasil
     url: https://www.ecommercebrasil.com.br/feed/
+    enabled: false
+    note: "feed responde 404 no publisher (verificado 2026-08-24); reativar quando voltar"

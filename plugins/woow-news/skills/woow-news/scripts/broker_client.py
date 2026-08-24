@@ -50,6 +50,9 @@ def set_schedule(cfg):                return _req("POST", "/schedule/set", cfg)
 def create_campaign(edition, type, extra=None):
     return _req("POST", "/campaigns/create", {"edition": edition, "type": type, **(extra or {})})
 def set_html(edition, html):          return _req("POST", "/campaigns/set-html", {"edition": edition, "html": html})
+def get_sources():                    return _req("GET", "/sources")
+def set_sources(op, **kw):            return _req("POST", "/sources/set", {"op": op, **kw})
+def test_sources(**kw):               return _req("POST", "/sources/test", kw)
 def get_senders():                    return _req("GET", "/senders")
 def set_sender(from_email, from_name=None):
     return _req("POST", "/senders/set-active", {"from_email": from_email, "from_name": from_name})

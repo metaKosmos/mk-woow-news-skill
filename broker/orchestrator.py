@@ -69,6 +69,9 @@ def _workdir(edition):
         (d / "config" / f.name).write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
     for f in (CONFIG / "prompts").glob("*.md"):
         (d / "config" / "prompts" / f.name).write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
+    # Fontes: o estado mutável (sources.json no GCS) manda sobre o feeds.yaml do container.
+    # Sem nada gravado, _effective_feeds devolve o próprio seed — nada muda.
+    _write_feeds_yaml(d / "config" / "feeds.yaml", _effective_feeds())
     for f in (BROKER_DIR / "templates").glob("*.j2"):
         (d / "templates" / f.name).write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
     env = secrets_store.get_zma_gemini_env()
@@ -580,6 +583,210 @@ def do_sync():
 def reset_edition(edition):
     _sm().reset_edition(edition)
     return {"reset": edition}
+
+
+# --------------------------------------------------------------- fontes (feeds RSS)
+SOURCES_KEY = "sources.json"
+_SOURCE_OPS = ("add", "remove", "enable", "disable", "set-url")
+
+
+def _norm_url(u):
+    return (u or "").strip().rstrip("/").lower()
+
+
+def _norm_name(n):
+    return re.sub(r"\s+", " ", (n or "").strip()).lower()
+
+
+def _validate_url(url):
+    u = (url or "").strip()
+    if not re.match(r"^https?://[^\s/]+", u):
+        raise ValueError(f"URL inválida: {url!r} (precisa começar com http:// ou https://)")
+    return u
+
+
+def _write_feeds_yaml(path, feeds):
+    """Grava a lista de fontes no formato que o research.py lê."""
+    path.write_text(yaml.safe_dump({"feeds": feeds}, allow_unicode=True, sort_keys=False),
+                    encoding="utf-8")
+
+
+def _seed_feeds():
+    """Fontes do feeds.yaml versionado no container — o ponto de partida, usado enquanto
+    ninguém tiver editado pela skill."""
+    raw = yaml.safe_load((CONFIG / "feeds.yaml").read_text(encoding="utf-8")) or {}
+    return [{"source": f.get("source", ""), "url": f.get("url", ""),
+             "enabled": bool(f.get("enabled", True)), "added_by": "", "added_at": "",
+             "note": f.get("note", "") or "", "last_test": None}
+            for f in (raw.get("feeds") or [])]
+
+
+def get_sources(sm=None):
+    """Fontes da pesquisa. Estado mutável (sources.json no GCS) tem precedência; sem ele,
+    devolve o seed do feeds.yaml. Espelha get_active_list/get_active_sender."""
+    sm = sm or _sm()
+    raw = sm.store.read(SOURCES_KEY)
+    if not raw:
+        return {"feeds": _seed_feeds(), "source": "config",
+                "set_by": "", "set_at": "", "tested_by": "", "tested_at": ""}
+    d = json.loads(raw)
+    return {"feeds": d.get("feeds") or [], "source": "state",
+            "set_by": d.get("set_by", ""), "set_at": d.get("set_at", ""),
+            "tested_by": d.get("tested_by", ""), "tested_at": d.get("tested_at", "")}
+
+
+def _effective_feeds(sm=None):
+    """Só as fontes ativas, no formato {source, url} que o research.py consome."""
+    return [{"source": f.get("source", ""), "url": f.get("url", "")}
+            for f in get_sources(sm)["feeds"] if f.get("enabled", True)]
+
+
+def _write_sources(sm, feeds, cur, updates):
+    """Grava sources.json preservando a autoria que não está sendo alterada agora
+    (quem editou a lista != quem rodou o último teste)."""
+    doc = {"feeds": feeds,
+           "set_by": cur.get("set_by", ""), "set_at": cur.get("set_at", ""),
+           "tested_by": cur.get("tested_by", ""), "tested_at": cur.get("tested_at", "")}
+    doc.update(updates)
+    sm.store.write(SOURCES_KEY, json.dumps(doc, ensure_ascii=False, indent=2))
+    return doc
+
+
+def _find_source(feeds, name=None, url=None):
+    if name:
+        n = _norm_name(name)
+        for f in feeds:
+            if _norm_name(f.get("source")) == n:
+                return f
+    if url:
+        u = _norm_url(url)
+        for f in feeds:
+            if _norm_url(f.get("url")) == u:
+                return f
+    return None
+
+
+def _guard_last_active(feeds, target):
+    """Impede deixar a pesquisa sem nenhuma fonte: o research passaria a rodar vazio e
+    ninguém perceberia (a edição sai sem candidatos, não com erro)."""
+    ativas = [f for f in feeds if f.get("enabled", True)]
+    if target.get("enabled", True) and len(ativas) <= 1:
+        raise ValueError("esta é a última fonte ativa; adicione outra antes de desativar ou remover")
+
+
+def set_sources(payload):
+    """Edita a lista de fontes em sources.json (GCS). Operador faz sozinho, sem redeploy.
+    op: add | remove | enable | disable | set-url."""
+    payload = payload or {}
+    op = (payload.get("op") or "").strip().lower()
+    if op not in _SOURCE_OPS:
+        raise ValueError(f"op inválida: {op!r}. Use uma de: {', '.join(_SOURCE_OPS)}")
+    name = payload.get("source") or payload.get("name")
+    url = payload.get("url")
+    email = payload.get("_email", "")
+    now = datetime.now(BRT).isoformat(timespec="seconds")
+    sm = _sm()
+    cur = get_sources(sm)
+    feeds = [dict(f) for f in cur["feeds"]]
+
+    if op == "add":
+        if not (name or "").strip():
+            raise ValueError("campo 'source' obrigatório (nome da fonte)")
+        url = _validate_url(url)
+        if _find_source(feeds, name=name):
+            raise ValueError(f"já existe uma fonte chamada {name!r}")
+        if _find_source(feeds, url=url):
+            raise ValueError(f"já existe uma fonte com essa URL: {url}")
+        lt = payload.get("last_test")
+        if isinstance(lt, dict):  # resultado do probe que o CLI rodou antes de confirmar
+            lt = {**lt, "at": lt.get("at") or now}
+        alvo = {"source": name.strip(), "url": url, "enabled": True, "added_by": email,
+                "added_at": now, "note": payload.get("note", "") or "", "last_test": lt}
+        feeds.append(alvo)
+    else:
+        alvo = _find_source(feeds, name=name, url=None if op == "set-url" else url)
+        if not alvo:
+            raise ValueError(f"fonte não encontrada: {(name or url)!r}. Rode: sources list")
+        if op == "set-url":
+            url = _validate_url(url)
+            outra = _find_source([f for f in feeds if f is not alvo], url=url)
+            if outra:
+                raise ValueError(f"essa URL já é da fonte {outra.get('source')!r}")
+            alvo["url"] = url
+            alvo["last_test"] = None  # URL nova, teste antigo não vale mais
+        elif op == "enable":
+            alvo["enabled"] = True
+        elif op == "disable":
+            _guard_last_active(feeds, alvo)
+            alvo["enabled"] = False
+        elif op == "remove":
+            _guard_last_active(feeds, alvo)
+            feeds = [f for f in feeds if f is not alvo]
+
+    doc = _write_sources(sm, feeds, cur, {"set_by": email, "set_at": now})
+    return {"op": op, "source": alvo.get("source"), "feeds": doc["feeds"],
+            "active": len([f for f in doc["feeds"] if f.get("enabled", True)]),
+            "set_by": email, "set_at": now}
+
+
+def _probe_feeds(feeds):
+    """Baixa cada feed rodando research.py --test-feeds num workdir mínimo (sem segredos).
+    Devolve uma linha por fonte: found, kept e o erro real (403/404/timeout)."""
+    wd = Path(tempfile.mkdtemp(prefix="woow-feedtest-"))
+    (wd / "config").mkdir()
+    try:
+        _write_feeds_yaml(wd / "config" / "feeds.yaml", feeds)
+        (wd / "config" / "newsletter.yaml").write_text(
+            (CONFIG / "newsletter.yaml").read_text(encoding="utf-8"), encoding="utf-8")
+        out = _run_script(wd, "research.py", ["--test-feeds"])
+        lines = [l for l in out.splitlines() if l.strip().startswith("{")]
+        if not lines:
+            raise RuntimeError(f"research.py --test-feeds sem JSON no stdout: {out[-400:]}")
+        return json.loads(lines[-1]).get("report", [])
+    finally:
+        shutil.rmtree(wd, ignore_errors=True)
+
+
+def test_sources(payload=None):
+    """Testa as fontes DE DENTRO DO BROKER, que é de onde a pesquisa busca de verdade:
+    publisher que bloqueia IP de datacenter só aparece neste caminho, nunca na máquina
+    do operador. Três formas:
+      {}                      -> todas as ativas, grava o resultado em last_test
+      {"source": "Nome"}      -> só essa fonte (mesmo desativada), grava last_test
+      {"url": "..."}          -> URL avulsa ainda não cadastrada, não grava nada
+    """
+    payload = payload or {}
+    url = (payload.get("url") or "").strip()
+    name = payload.get("source") or payload.get("name")
+    sm = _sm()
+    cur = get_sources(sm)
+    feeds = [dict(f) for f in cur["feeds"]]
+
+    if url:  # probe de URL nova (usado pelo `sources add` antes de gravar)
+        return {"report": _probe_feeds([{"source": name or url, "url": _validate_url(url)}]),
+                "persisted": False}
+
+    if name:
+        alvo = _find_source(feeds, name=name)
+        if not alvo:
+            raise ValueError(f"fonte não encontrada: {name!r}. Rode: sources list")
+        cand = [alvo]
+    else:
+        cand = [f for f in feeds if f.get("enabled", True)]
+    if not cand:
+        return {"report": [], "persisted": False}
+
+    report = _probe_feeds([{"source": f.get("source", ""), "url": f.get("url", "")} for f in cand])
+    at = datetime.now(BRT).isoformat(timespec="seconds")
+    por_nome = {_norm_name(r.get("source")): r for r in report}
+    for f in feeds:
+        r = por_nome.get(_norm_name(f.get("source")))
+        if r:
+            f["last_test"] = {"status": "erro" if r.get("error") else "ok",
+                              "found": r.get("found", 0), "kept": r.get("kept", 0),
+                              "error": r.get("error"), "at": at}
+    _write_sources(sm, feeds, cur, {"tested_by": payload.get("_email", ""), "tested_at": at})
+    return {"report": report, "persisted": True, "at": at}
 
 
 # --------------------------------------------------------------- agendamento

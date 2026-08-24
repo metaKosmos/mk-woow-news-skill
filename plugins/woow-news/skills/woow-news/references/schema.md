@@ -85,3 +85,33 @@ Lista-alvo do envio diário (`active_list_*`, editado por `set-list`) e remetent
 
 O `POST /cron/tick` (Cloud Scheduler, a cada ~15 min) lê este arquivo e roda a edição de
 hoje quando dá o horário. Editado por `schedule set/on/off/auto-send`.
+
+## sources.json (no GCS) — fontes RSS da pesquisa
+```json
+{
+  "feeds": [
+    {
+      "source": "Fast Company",
+      "url": "https://www.fastcompany.com/latest/rss",
+      "enabled": true,
+      "added_by": "patrick@metakosmos.com.br",
+      "added_at": "2026-08-24T20:00:00-03:00",
+      "note": "",
+      "last_test": {"status": "ok", "found": 20, "kept": 6, "error": null,
+                    "at": "2026-08-24T20:00:00-03:00"}
+    }
+  ],
+  "set_by": "patrick@metakosmos.com.br", "set_at": "2026-08-24T20:00:00-03:00",
+  "tested_by": "joao@metakosmos.com.br", "tested_at": "2026-08-24T21:00:00-03:00"
+}
+```
+Lista viva das fontes, editada por `sources add|set-url|enable|disable|remove`. Tem
+precedência sobre `broker/config/feeds.yaml`, que é só o seed: sem este arquivo, vale o YAML
+do container. Antes de cada pesquisa, o broker escreve as fontes com `enabled: true` no
+`config/feeds.yaml` do workdir, então mudança aqui vale na pesquisa seguinte, sem redeploy.
+
+- `enabled`: `false` mantém a fonte cadastrada e fora da pesquisa.
+- `last_test`: resultado do último `sources test` **daquela** fonte. `found` = itens no feed,
+  `kept` = itens dentro da janela de recência, `error` = o erro real (403/404/timeout).
+- `set_by`/`set_at` são de quem editou a lista; `tested_by`/`tested_at`, de quem rodou o
+  último teste. São coisas diferentes e não se sobrescrevem.
