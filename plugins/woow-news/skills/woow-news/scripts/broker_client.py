@@ -57,6 +57,8 @@ def _req(method, path, payload=None):
         if e.code in (401, 403):
             raise BrokerError(f"Acesso negado ({e.code}): {err.get('error')}. "
                               f"Rode: python scripts/auth.py --status")
+        if e.code == 400:  # entrada inválida: a mensagem do broker já é a explicação
+            raise BrokerError(err.get("error") or "requisição inválida")
         raise BrokerError(f"Broker {e.code}: {json.dumps(err)[:400]}")
     except urllib.error.URLError as e:
         raise BrokerError(f"Não contatei o broker em {BROKER_URL}: {e}")

@@ -217,6 +217,11 @@ def _handlers():
             if path == "/admin/reset" and method == "POST":
                 return jj(orchestrator.reset_edition(payload.get("edition")))
             return jj({"error": f"rota desconhecida: {path}"}, 404)
+        except ValueError as e:
+            # entrada inválida (URL sem esquema, fonte duplicada, campo faltando) é 400.
+            # Como 502 a mensagem lia "broker quebrado" e mandava o operador procurar
+            # problema onde não havia.
+            return jj({"error": str(e)}, 400)
         except Exception as e:  # noqa: BLE001
             print(f"[error] {email} {path}: {e}")
             return jj({"error": str(e)}, 502)

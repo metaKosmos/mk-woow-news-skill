@@ -228,3 +228,23 @@ def test_operador_ve_a_contagem_com_roster(tmp_path, monkeypatch):
     r = orchestrator.get_clients_report("1.5.0", full=False,
                                         email="patrick@metakosmos.com.br", roster=ROSTER)
     assert r["atrasados_total"] == 3 and "atrasados" not in r
+
+
+# ------------------------------------------------------------------ estado corrompido
+@pytest.mark.parametrize("chave,funcao,esperado", [
+    ("release.json", lambda: orchestrator.get_release(), {}),
+    ("clients.json", lambda: orchestrator.get_clients(), {"clients": {}}),
+])
+def test_estado_ilegivel_nao_derruba_a_rota(tmp_path, monkeypatch, chave, funcao, esperado):
+    """Estado é editável pelo console do GCS. JSON quebrado num arquivo não pode virar 502
+    numa rota que nada tem a ver com ele."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    sm.store.write(chave, "{{{ não é json")
+    assert funcao() == esperado
+
+
+def test_relatorio_sobrevive_a_clients_corrompido(tmp_path, monkeypatch):
+    sm = _local_sm(tmp_path, monkeypatch)
+    sm.store.write(orchestrator.CLIENTS_KEY, "lixo")
+    r = orchestrator.get_clients_report("1.5.0", full=True, roster={"patrick@metakosmos.com.br"})
+    assert r["clients"] == {} and [x["email"] for x in r["atrasados"]] == ["patrick@metakosmos.com.br"]

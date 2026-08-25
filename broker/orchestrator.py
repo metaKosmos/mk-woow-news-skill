@@ -650,13 +650,7 @@ def get_sources(sm=None):
 
 
 def _read_tests(sm):
-    raw = sm.store.read(SOURCE_TESTS_KEY)
-    if not raw:
-        return {}
-    try:
-        return json.loads(raw)
-    except (ValueError, TypeError):
-        return {}
+    return _read_state_json(sm, SOURCE_TESTS_KEY, {})
 
 
 def _merge_tests(sm, feeds):
@@ -832,11 +826,24 @@ RELEASE_KEY = "release.json"
 CLIENTS_KEY = "clients.json"
 
 
+def _read_state_json(sm, key, default):
+    """Lê uma chave de estado tolerando conteúdo inválido.
+
+    Estado é editável pelo console do GCS, e o schema convida a inspecionar. JSON quebrado
+    aqui não pode virar 502 numa rota que nada tem a ver com o arquivo."""
+    raw = sm.store.read(key)
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError) as exc:
+        print(f"[estado] {key} ilegível ({exc}); seguindo com o default")
+        return default
+
+
 def get_release(sm=None):
     """Nota da ultima versao publicada (o que mudou, escrito por um humano)."""
-    sm = sm or _sm()
-    raw = sm.store.read(RELEASE_KEY)
-    return json.loads(raw) if raw else {}
+    return _read_state_json(sm or _sm(), RELEASE_KEY, {})
 
 
 def set_release(payload):
@@ -865,9 +872,7 @@ def update_notice(client_version, published_version, sm=None):
 
 
 def get_clients(sm=None):
-    sm = sm or _sm()
-    raw = sm.store.read(CLIENTS_KEY)
-    return json.loads(raw) if raw else {"clients": {}}
+    return _read_state_json(sm or _sm(), CLIENTS_KEY, {"clients": {}})
 
 
 def record_client(email, version, path, sm=None):
