@@ -26,3 +26,12 @@ def test_operator_can_manage_schedule():
     assert main.authorize("joao@metakosmos.com.br", "/schedule", admins, ops)
     assert main.authorize("joao@metakosmos.com.br", "/schedule/set", admins, ops)
     assert main.authorize("patrick@metakosmos.com.br", "/cron/tick", admins, ops)
+
+def test_operator_can_manage_sources():
+    admins = {"david@metakosmos.com.br"}
+    ops = {"joao@metakosmos.com.br", "patrick@metakosmos.com.br"}
+    # fontes RSS são ação de operador (MAR-426): Patrick edita sem acesso ao GCP
+    assert main.authorize("patrick@metakosmos.com.br", "/sources", admins, ops)
+    assert main.authorize("patrick@metakosmos.com.br", "/sources/set", admins, ops)
+    assert main.authorize("patrick@metakosmos.com.br", "/sources/test", admins, ops)
+    assert not main.authorize("estranho@metakosmos.com.br", "/sources/set", admins, ops)

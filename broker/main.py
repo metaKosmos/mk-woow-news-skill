@@ -21,6 +21,9 @@ Rotas:
   POST /lists/set-active operador — troca a lista-alvo do envio diário (settings.json)
   GET  /senders       operador — Senders do ZMA (best-effort) + remetente ativo
   POST /senders/set-active operador — troca o remetente ativo (settings.json, global)
+  GET  /sources       operador — fontes RSS da pesquisa (sources.json) + seed do feeds.yaml
+  POST /sources/set   operador — edita as fontes (add|remove|enable|disable|set-url)
+  POST /sources/test  operador — baixa os feeds de dentro do broker e devolve o status
   POST /admin/reset   admin    — limpa/recria estado de uma edição
 """
 import os
@@ -136,6 +139,12 @@ def _handlers():
                 return j(orchestrator.get_senders())
             if path == "/senders/set-active" and method == "POST":
                 return j(orchestrator.set_sender({**payload, "_email": email}))
+            if path == "/sources" and method == "GET":
+                return j(orchestrator.get_sources())
+            if path == "/sources/set" and method == "POST":
+                return j(orchestrator.set_sources({**payload, "_email": email}))
+            if path == "/sources/test" and method == "POST":
+                return j(orchestrator.test_sources({**payload, "_email": email}))
             if path == "/lists" and method == "GET":
                 return j(orchestrator.list_lists())
             if path == "/lists/create" and method == "POST":

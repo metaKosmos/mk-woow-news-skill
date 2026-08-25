@@ -28,6 +28,11 @@ mas use o formato de data para as novas.)
 - `python3 scripts/woow.py queue` — fila detalhada (JSON).
 - `python3 scripts/woow.py metrics` — métricas ZMA (open/click/bounce) + custo das últimas edições.
 - `python3 scripts/woow.py sync` — força o espelho do estado pro Firebase (o painel mkaifirst.web.app/#newsletter lê de lá).
+- `python3 scripts/woow.py sources list` — as fontes RSS da pesquisa (✓ = ativa) + o resultado do último teste de cada uma.
+- `python3 scripts/woow.py sources test [--name "Fast Company"]` — baixa os feeds **de dentro do broker** e mostra itens encontrados, itens dentro da janela e o erro real por fonte.
+- `python3 scripts/woow.py sources add --name "Retail Dive" --url https://www.retaildive.com/feeds/news/` — testa a URL antes de cadastrar, mostra o resultado e pede confirmação.
+- `python3 scripts/woow.py sources set-url --name "Fast Company" --url https://www.fastcompany.com/latest/rss` — conserta URL que mudou de lugar.
+- `python3 scripts/woow.py sources enable | disable | remove --name "E-Commerce Brasil"` — `disable` tira da pesquisa e mantém cadastrada; `remove` apaga da lista.
 - `python3 scripts/woow.py list-lists` — lista as listas de envio do ZMA (nome + listkey + contatos) e marca (→) qual é o alvo do envio diário.
 - `python3 scripts/woow.py create-list --name "Time mK Daily Drops" --emails-file team.txt` — cria uma lista de envio no ZMA com os contatos (CSV via `--emails` também serve). Confirma antes de criar e devolve o `listkey`.
 - `python3 scripts/woow.py set-list --list-key <KEY>` (ou `--name "..."`) — troca a lista-alvo do envio diário. Mostra o alvo atual + o novo (com nº de contatos) e pede confirmação antes de gravar.
@@ -44,6 +49,23 @@ mas use o formato de data para as novas.)
 A lista de envio da newsletter vive no **Zoho Marketing Automation (ZMA)**, e a skill cria/lista/troca essas listas via broker (comandos acima). **Esta skill não usa Zoho CRM.** Se o seu ambiente Claude tiver algum conector `ZohoCRM_*` conectado, **ignore-o** — ele não tem nada a ver com a newsletter; criar algo no módulo "Campaigns" do CRM não vira lista de disparo. Para qualquer operação de lista, use sempre `scripts/woow.py` (list-lists / create-list / set-list), nunca ferramentas de CRM.
 
 Criar uma lista e trocar o destinatário do envio são **ações de operador** (você consegue fazer sozinho) — não precisam de admin nem de redeploy. O `set-list` grava o alvo em estado mutável; a `newsletter.yaml` é só o fallback.
+
+## Fontes da pesquisa (feeds RSS)
+As fontes que alimentam o Daily Drops são **autosserviço de operador**: a lista viva fica em
+`sources.json` no GCS (mesmo padrão do `set-list`) e vale na pesquisa seguinte, sem redeploy.
+O `broker/config/feeds.yaml` versionado é só o seed, usado enquanto ninguém editou pela skill.
+
+**O teste roda no broker, não na sua máquina, e isso importa.** A pesquisa baixa os feeds de
+dentro do Cloud Run, e vários publishers bloqueiam IP de datacenter: uma fonte pode abrir no seu
+navegador e devolver 403 para o pipeline. Por isso `sources test` e o teste automático do
+`sources add` executam lá, e é o resultado deles que vale.
+
+Um 403 ou 404 numa fonte quase nunca é header faltando — o fetch já manda User-Agent de navegador
+e tem fallback. É bloqueio do publisher (às vezes conteúdo pago) ou URL que mudou. Para URL que
+mudou, `sources set-url`; para bloqueio persistente, `sources disable` e procure outra fonte.
+
+A skill recusa desativar ou remover a **última fonte ativa**: sem fonte, a pesquisa roda vazia
+e a edição sai sem pauta, em vez de dar erro.
 
 ## Tipos de campanha (news_auto | manual_html)
 Cada edição carrega um `type` no estado (campo, não estágio):
@@ -92,8 +114,12 @@ admin e operadores podem ligar o auto-send. Confira sempre o alvo em `list-lists
 
 ## Papéis
 - Admin (david@): muda lógica, allowlist, deploy.
-- Operadores (joão@, patrick@): run, add-pauta, queue, metrics, sync, **list-lists, create-list, set-list, create-campaign, list-senders, set-sender, set-html**.
+- Operadores (joão@, patrick@): run, add-pauta, queue, metrics, sync, **sources (list/test/add/set-url/enable/disable/remove), list-lists, create-list, set-list, create-campaign, list-senders, set-sender, set-html**.
 Erro 403 significa conta não autorizada ou rota de admin. Confira `python3 scripts/auth.py --status`.
+
+> **Mexer nas fontes não é mais tarefa de dev.** Antes exigia editar `config/feeds.yaml` e
+> redeployar o broker (só admin). Agora é autosserviço de operador via `sources`, com o teste
+> rodando de dentro do broker. O `feeds.yaml` no Git segue como seed.
 
 > **Trocar remetente / trocar HTML não é mais tarefa de dev.** Antes exigiam editar `newsletter.yaml`
 > ou os templates `.j2` e redeployar o broker (só admin). Agora são autosserviço de operador via

@@ -16,6 +16,10 @@ Uso:
   python scripts/woow.py list-senders
   python scripts/woow.py set-sender --from-email patrick@metakosmos.com.br --from-name "WooW!"
   python scripts/woow.py set-html --edition 2026-07-01 --html novo.html
+  python scripts/woow.py sources list | test [--name "Fast Company"]
+  python scripts/woow.py sources add --name "Retail Dive" --url https://www.retaildive.com/feeds/news/
+  python scripts/woow.py sources set-url --name "Fast Company" --url https://www.fastcompany.com/latest/rss
+  python scripts/woow.py sources enable | disable | remove --name "E-Commerce Brasil"
   python scripts/woow.py schedule status
   python scripts/woow.py schedule set --time 10:00 --days diario [--until 2026-07-07]
   python scripts/woow.py schedule on | off
@@ -325,6 +329,103 @@ def cmd_set_html(a):
         print(f"⚠ {r['warning']}")
 
 
+# ------------------------------------------------------------------- fontes (feeds RSS)
+def _fmt_last_test(lt):
+    if not lt:
+        return "sem teste"
+    quando = (lt.get("at") or "")[5:16].replace("T", " ")
+    if lt.get("status") == "ok":
+        return f"ok · {lt.get('found', 0)} itens · {quando}"
+    return f"ERRO · {(lt.get('error') or 'falhou')[:44]}"
+
+
+def _print_report(report):
+    print(f"{'Fonte':26} {'Itens':>6} {'Janela':>7}  Status")
+    print("─" * 74)
+    for r in report:
+        err = r.get("error")
+        print(f"{(r.get('source') or '')[:26]:26} {r.get('found', 0):>6} {r.get('kept', 0):>7}  "
+              f"{'ok' if not err else 'erro: ' + str(err)[:38]}")
+    ruins = [r for r in report if r.get("error")]
+    print(f"\n{len(report) - len(ruins)}/{len(report)} fonte(s) ok. Medido de dentro do broker, que é de")
+    print("onde a pesquisa baixa os feeds — pode diferir do que você vê no navegador.")
+
+
+def cmd_sources_list(_):
+    r = bc.get_sources()
+    feeds = r.get("feeds", [])
+    print("WooW! Daily Drops — Fontes da pesquisa  (✓ = ativa)\n" + "━" * 51)
+    for f in feeds:
+        mark = "✓" if f.get("enabled", True) else "·"
+        print(f"{mark} {(f.get('source') or '')[:24]:24} {_fmt_last_test(f.get('last_test'))}")
+        print(f"    {f.get('url')}")
+        if f.get("note"):
+            print(f"    nota: {f['note']}")
+    ativas = len([f for f in feeds if f.get("enabled", True)])
+    print(f"\n{ativas} ativa(s) de {len(feeds)} · origem: {r.get('source')}")
+    if r.get("set_by"):
+        print(f"Última edição: {r['set_by']} em {r.get('set_at')}")
+    if r.get("tested_at"):
+        print(f"Último teste : {r.get('tested_at')}")
+
+
+def cmd_sources_test(a):
+    print("Baixando os feeds de dentro do broker...\n")
+    r = bc.test_sources(**({"source": a.name} if a.name else {}))
+    _print_report(r.get("report", []))
+
+
+def _probe(nome, url):
+    """Testa a URL no broker antes de gravar e devolve (report, last_test)."""
+    print(f"Testando {url} de dentro do broker...\n")
+    report = bc.test_sources(url=url, source=nome).get("report", [])
+    _print_report(report)
+    res = report[0] if report else {}
+    return res, {"status": "erro" if res.get("error") else "ok", "found": res.get("found", 0),
+                 "kept": res.get("kept", 0), "error": res.get("error")}
+
+
+def cmd_sources_add(a):
+    res, lt = _probe(a.name, a.url)
+    if res.get("error"):
+        print("\n⚠ A fonte não respondeu do broker. Cadastrar assim deixa ela na lista sem trazer pauta.")
+    print(f"\nCadastrar {a.name!r} como fonte da pesquisa?")
+    if input("[s/N] ").strip().lower() != "s":
+        print("Cancelado."); return
+    r = bc.set_sources("add", source=a.name, url=a.url, note=a.note, last_test=lt)
+    print(f"OK — {r['active']} fonte(s) ativa(s). Vale já na próxima pesquisa, sem redeploy.")
+
+
+def cmd_sources_set_url(a):
+    res, _ = _probe(a.name, a.url)
+    if res.get("error"):
+        print("\n⚠ A URL nova também não respondeu do broker.")
+    print(f"\nTrocar a URL da fonte {a.name!r}?")
+    if input("[s/N] ").strip().lower() != "s":
+        print("Cancelado."); return
+    r = bc.set_sources("set-url", source=a.name, url=a.url)
+    print(f"OK — URL de {r['source']!r} atualizada.")
+
+
+def cmd_sources_enable(a):
+    r = bc.set_sources("enable", source=a.name)
+    print(f"{r['source']!r} ativada — {r['active']} fonte(s) ativa(s).")
+
+
+def cmd_sources_disable(a):
+    r = bc.set_sources("disable", source=a.name)
+    print(f"{r['source']!r} desativada — {r['active']} fonte(s) ativa(s).")
+
+
+def cmd_sources_remove(a):
+    print(f"Remover {a.name!r} da lista de fontes?")
+    print("(para tirar da pesquisa mas manter cadastrada, use 'sources disable')")
+    if input("[s/N] ").strip().lower() != "s":
+        print("Cancelado."); return
+    r = bc.set_sources("remove", source=a.name)
+    print(f"Removida — {r['active']} fonte(s) ativa(s).")
+
+
 def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -365,6 +466,25 @@ def main():
     sh.add_argument("--edition", required=True)
     sh.add_argument("--html", required=True, help="arquivo HTML que substitui o preview da edição")
     sh.set_defaults(fn=cmd_set_html)
+    src = sub.add_parser("sources")
+    srcsub = src.add_subparsers(dest="sources_cmd", required=True)
+    srcsub.add_parser("list").set_defaults(fn=cmd_sources_list)
+    stt = srcsub.add_parser("test")
+    stt.add_argument("--name", default=None, help="testa só essa fonte (mesmo desativada)")
+    stt.set_defaults(fn=cmd_sources_test)
+    sad = srcsub.add_parser("add")
+    sad.add_argument("--name", required=True, help="nome da fonte, ex: \"Retail Dive\"")
+    sad.add_argument("--url", required=True, help="URL do feed RSS/Atom")
+    sad.add_argument("--note", default=None)
+    sad.set_defaults(fn=cmd_sources_add)
+    sul = srcsub.add_parser("set-url")
+    sul.add_argument("--name", required=True); sul.add_argument("--url", required=True)
+    sul.set_defaults(fn=cmd_sources_set_url)
+    for _op, _fn in (("enable", cmd_sources_enable), ("disable", cmd_sources_disable),
+                     ("remove", cmd_sources_remove)):
+        _p = srcsub.add_parser(_op)
+        _p.add_argument("--name", required=True)
+        _p.set_defaults(fn=_fn)
     sch = sub.add_parser("schedule")
     ssub = sch.add_subparsers(dest="schedule_cmd", required=True)
     ssub.add_parser("status").set_defaults(fn=cmd_schedule_status)
