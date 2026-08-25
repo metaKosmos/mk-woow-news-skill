@@ -1,6 +1,6 @@
 {
   "name": "woow-news",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Skill operacional de campanhas WooW! da metaKosmos: Daily Drops (news_auto) + campanhas manuais (manual_html), gaveta editorial, disparo via ZMA e metricas, autosservico de fontes RSS/lista/remetente/HTML, via broker autenticado por email mK.",
   "author": { "name": "metaKosmos", "email": "david@metakosmos.com.br" },
   "homepage": "https://github.com/metaKosmos/mk-woow-news-skill",

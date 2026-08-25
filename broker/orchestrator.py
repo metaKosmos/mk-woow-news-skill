@@ -789,6 +789,101 @@ def test_sources(payload=None):
     return {"report": report, "persisted": True, "at": at}
 
 
+# --------------------------------------------------------- versao: release e clientes
+RELEASE_KEY = "release.json"
+CLIENTS_KEY = "clients.json"
+
+
+def get_release(sm=None):
+    """Nota da ultima versao publicada (o que mudou, escrito por um humano)."""
+    sm = sm or _sm()
+    raw = sm.store.read(RELEASE_KEY)
+    return json.loads(raw) if raw else {}
+
+
+def set_release(payload):
+    """Grava a nota da versao publicada (rota de admin). E o texto que o operador le no
+    aviso de update: numero sozinho nao diz se vale a pena atualizar agora."""
+    payload = payload or {}
+    version = (payload.get("version") or "").strip()
+    if not version:
+        raise ValueError("campo 'version' obrigatório")
+    doc = {"version": version, "notes": (payload.get("notes") or "").strip(),
+           "by": payload.get("_email", ""),
+           "at": datetime.now(BRT).isoformat(timespec="seconds")}
+    _sm().store.write(RELEASE_KEY, json.dumps(doc, ensure_ascii=False, indent=2))
+    return doc
+
+
+def update_notice(client_version, published_version, sm=None):
+    """Aviso que o broker injeta na resposta quando o cliente esta atras. A nota so entra
+    se for da versao publicada (nota de release velha confunde mais do que ajuda)."""
+    rel = get_release(sm)
+    notes = rel.get("notes", "") if rel.get("version") == published_version else ""
+    return {"client_version": client_version, "latest_version": published_version,
+            "notes": notes,
+            "message": (f"woow-news v{client_version} instalada, v{published_version} "
+                        f"publicada. Atualize: /plugin marketplace update mk-skills")}
+
+
+def get_clients(sm=None):
+    sm = sm or _sm()
+    raw = sm.store.read(CLIENTS_KEY)
+    return json.loads(raw) if raw else {"clients": {}}
+
+
+def record_client(email, version, path, sm=None):
+    """Anota quem chamou o broker e em que versao. Escreve so quando a versao muda ou o
+    dia vira: serve para saber quem esta atrasado, nao para auditar cada chamada."""
+    if not email:
+        return None
+    sm = sm or _sm()
+    doc = get_clients(sm)
+    registro = doc.setdefault("clients", {})
+    agora = datetime.now(BRT)
+    atual = registro.get(email) or {}
+    mesmo_dia = (atual.get("last_seen") or "")[:10] == agora.strftime("%Y-%m-%d")
+    if atual.get("version") == (version or "") and mesmo_dia:
+        return atual
+    novo = {"version": version or "", "last_path": path or "",
+            "last_seen": agora.isoformat(timespec="seconds")}
+    registro[email] = novo
+    sm.store.write(CLIENTS_KEY, json.dumps(doc, ensure_ascii=False, indent=2))
+    return novo
+
+
+def _atrasados(registro, published):
+    """Quem foi visto rodando versao anterior a publicada. Cliente sem versao registrada
+    conta como atrasado: e skill velha demais para mandar o header."""
+    def _p(v):
+        try:
+            return tuple(int(x) for x in (v or "").split("."))
+        except (ValueError, AttributeError):
+            return None
+    pv = _p(published)
+    fora = []
+    for email, info in (registro or {}).items():
+        cv = _p(info.get("version"))
+        if pv and (cv is None or cv < pv):
+            fora.append({"email": email, "version": info.get("version", ""),
+                         "last_seen": info.get("last_seen", "")})
+    return sorted(fora, key=lambda x: x["email"])
+
+
+def get_clients_report(published, full=True, email=None, sm=None):
+    """Quem opera a skill e em que versao. Operador ve a si mesmo e quantos estao
+    atrasados; admin ve a tabela inteira."""
+    doc = get_clients(sm)
+    registro = doc.get("clients") or {}
+    atrasados = _atrasados(registro, published)
+    if full:
+        return {"published": published, "clients": registro, "atrasados": atrasados,
+                "release": get_release(sm)}
+    meu = registro.get(email or "") or {}
+    return {"published": published, "clients": ({email: meu} if meu else {}),
+            "atrasados_total": len(atrasados), "release": get_release(sm)}
+
+
 # --------------------------------------------------------------- agendamento
 def get_schedule(sm=None):
     """Lê o agendamento de schedule.json (GCS); preenche os defaults se ausente."""

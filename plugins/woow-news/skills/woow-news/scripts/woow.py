@@ -16,6 +16,8 @@ Uso:
   python scripts/woow.py list-senders
   python scripts/woow.py set-sender --from-email patrick@metakosmos.com.br --from-name "WooW!"
   python scripts/woow.py set-html --edition 2026-07-01 --html novo.html
+  python scripts/woow.py versions
+  python scripts/woow.py release --notes "fontes RSS viraram autosservico"
   python scripts/woow.py sources list | test [--name "Fast Company"]
   python scripts/woow.py sources add --name "Retail Dive" --url https://www.retaildive.com/feeds/news/
   python scripts/woow.py sources set-url --name "Fast Company" --url https://www.fastcompany.com/latest/rss
@@ -426,6 +428,63 @@ def cmd_sources_remove(a):
     print(f"Removida — {r['active']} fonte(s) ativa(s).")
 
 
+# ------------------------------------------------------ versao da skill e anuncio
+def _fmt_quando(iso):
+    return (iso or "")[:16].replace("T", " ")
+
+
+def cmd_versions(_):
+    from config import local_version
+    r = bc.get_clients()
+    pub = r.get("published", "")
+    local = local_version()
+    print("WooW! skill — versões\n" + "━" * 22)
+    print(f"Nesta máquina      : {local or '(desconhecida)'}")
+    print(f"Publicada no broker: {pub}")
+    rel = r.get("release") or {}
+    if rel.get("version") == pub and rel.get("notes"):
+        print(f"O que mudou        : {rel['notes']}")
+    clients = r.get("clients") or {}
+    if clients:
+        print("\nQuem usou a skill  (! = atrasado)")
+        for email, info in sorted(clients.items()):
+            marca = " " if info.get("version") == pub else "!"
+            print(f" {marca} {email:34} {info.get('version') or '?':9} {_fmt_quando(info.get('last_seen'))}")
+    atrasados = r.get("atrasados")
+    if atrasados is not None:
+        print(f"\n{len(atrasados)} atrasado(s)." if atrasados else "\nTodo mundo em dia.")
+    elif r.get("atrasados_total") is not None:
+        print(f"\n{r['atrasados_total']} atrasado(s) no time (tabela completa só para admin).")
+
+
+def cmd_release(a):
+    """Grava a nota da versão publicada e devolve o texto de anúncio pronto para o Slack.
+    O broker não posta sozinho por decisão: quem cola é uma pessoa."""
+    from config import local_version
+    r = bc.get_clients()
+    pub = r.get("published", "")
+    local = local_version()
+    print(f"Versão publicada no broker: {pub}")
+    if local and local != pub:
+        print(f"⚠ Esta máquina está em {local}. A nota é sobre a PUBLICADA ({pub}).")
+    print(f"Nota: {a.notes}")
+    print("\nGravar essa nota? (ela aparece no aviso de quem está desatualizado)")
+    if input("[s/N] ").strip().lower() != "s":
+        print("Cancelado."); return
+    bc.set_release(a.notes)
+    atrasados = r.get("atrasados") or []
+    print("\n" + "━" * 60)
+    print(f"*WooW! skill v{pub} no ar*")
+    print(a.notes)
+    print("Para atualizar: `/plugin marketplace update mk-skills`")
+    if atrasados:
+        quem = ", ".join(f"{x['email'].split('@')[0]}@ ({x['version'] or 'versão antiga'})"
+                         for x in atrasados)
+        print(f"Ainda na versão antiga: {quem}")
+    print("━" * 60)
+    print("Copie o bloco acima e cole no Slack.")
+
+
 def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -466,6 +525,10 @@ def main():
     sh.add_argument("--edition", required=True)
     sh.add_argument("--html", required=True, help="arquivo HTML que substitui o preview da edição")
     sh.set_defaults(fn=cmd_set_html)
+    sub.add_parser("versions").set_defaults(fn=cmd_versions)
+    rel = sub.add_parser("release")
+    rel.add_argument("--notes", required=True, help="uma linha sobre o que mudou nesta versão")
+    rel.set_defaults(fn=cmd_release)
     src = sub.add_parser("sources")
     srcsub = src.add_subparsers(dest="sources_cmd", required=True)
     srcsub.add_parser("list").set_defaults(fn=cmd_sources_list)

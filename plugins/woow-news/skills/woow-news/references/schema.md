@@ -115,3 +115,37 @@ do container. Antes de cada pesquisa, o broker escreve as fontes com `enabled: t
   `kept` = itens dentro da janela de recência, `error` = o erro real (403/404/timeout).
 - `set_by`/`set_at` são de quem editou a lista; `tested_by`/`tested_at`, de quem rodou o
   último teste. São coisas diferentes e não se sobrescrevem.
+
+## release.json (no GCS) — nota da versão publicada
+```json
+{
+  "version": "1.5.0",
+  "notes": "fontes RSS viraram autosserviço: sources add/test/set-url",
+  "by": "david@metakosmos.com.br",
+  "at": "2026-08-25T09:00:00-03:00"
+}
+```
+Escrito por `woow.py release --notes "..."` (admin). É o texto que aparece no aviso de quem
+está desatualizado: número de versão sozinho não diz se vale a pena atualizar agora. A nota
+só é mostrada quando `version` bate com a versão publicada pelo broker — nota de release
+velha confunde mais do que ajuda.
+
+## clients.json (no GCS) — quem opera e em que versão
+```json
+{
+  "clients": {
+    "patrick@metakosmos.com.br": {
+      "version": "1.4.0",
+      "last_path": "/queue",
+      "last_seen": "2026-08-24T10:12:00-03:00"
+    }
+  }
+}
+```
+Preenchido sozinho: toda chamada autenticada manda `X-Skill-Version`, e o broker grava
+**só quando a versão muda ou o dia vira** (o registro serve para saber quem está atrasado,
+não para auditar cada chamada). Cliente anterior à v1.5.0 não manda o header e aparece com
+`version` vazio, o que já o classifica como atrasado.
+
+Lido por `woow.py versions`: operador vê a si mesmo e quantos estão atrasados, admin vê a
+tabela inteira.
