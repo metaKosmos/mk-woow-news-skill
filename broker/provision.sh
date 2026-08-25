@@ -29,6 +29,13 @@ SA="woow-news-broker-runtime@${PROJECT}.iam.gserviceaccount.com"
 SKILL_VERSION="$(tr -d '[:space:]' < "$(dirname "$0")/../plugins/woow-news/skills/woow-news/VERSION")"
 : "${SKILL_VERSION:?VERSION do repo vazio ou ausente}"
 
+# Papeis: --set-env-vars reescreve o mapa INTEIRO, entao o valor cravado aqui apagaria quem
+# o manage-roles.sh adicionou depois (o operador novo passaria a tomar 403 achando que
+# perdeu o login). Mesma protecao que ja existe para o CRON_TOKEN logo abaixo.
+OPERATOR_EMAILS="$(gcloud functions describe "$SVC" --gen2 --region="$REGION" --project="$PROJECT" \
+  --format='value(serviceConfig.environmentVariables.OPERATOR_EMAILS)' 2>/dev/null || true)"
+[ -z "$OPERATOR_EMAILS" ] && OPERATOR_EMAILS='joao@metakosmos.com.br;patrick@metakosmos.com.br'
+
 # --- checagem de variaveis ---
 : "${OAUTH_CLIENT_ID:?defina OAUTH_CLIENT_ID antes de rodar}"
 : "${OAUTH_CLIENT_SECRET:?defina OAUTH_CLIENT_SECRET antes de rodar}"
@@ -67,7 +74,7 @@ echo "==> Deploy do broker (Cloud Run function gen2)"
 gcloud functions deploy "$SVC" --gen2 --runtime=python312 --region="$REGION" \
   --source=. --entry-point=broker --trigger-http --allow-unauthenticated \
   --service-account="$SA" \
-  --set-env-vars="ALLOWED_DOMAIN=metakosmos.com.br,OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID},OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET},ADMIN_EMAILS=david@metakosmos.com.br,OPERATOR_EMAILS=joao@metakosmos.com.br;patrick@metakosmos.com.br,CRON_TOKEN=${CRON_TOKEN},STATE_BUCKET=mk-woow-news-state,PUBLIC_BUCKET=mk-woow-news-public,FIREBASE_DB_URL=${FIREBASE_DB_URL},SKILL_VERSION=${SKILL_VERSION},BRL_RATE=5.70"
+  --set-env-vars="ALLOWED_DOMAIN=metakosmos.com.br,OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID},OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET},ADMIN_EMAILS=david@metakosmos.com.br,OPERATOR_EMAILS=${OPERATOR_EMAILS},CRON_TOKEN=${CRON_TOKEN},STATE_BUCKET=mk-woow-news-state,PUBLIC_BUCKET=mk-woow-news-public,FIREBASE_DB_URL=${FIREBASE_DB_URL},SKILL_VERSION=${SKILL_VERSION},BRL_RATE=5.70"
 
 URL="$(gcloud functions describe "$SVC" --gen2 --region="$REGION" --format='value(serviceConfig.uri)')"
 echo "=================================================================="

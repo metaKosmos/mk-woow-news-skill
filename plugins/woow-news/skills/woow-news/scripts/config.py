@@ -13,6 +13,7 @@ import json
 import os
 import ssl
 import urllib.request
+from pathlib import Path
 
 
 def ssl_context():
@@ -63,3 +64,33 @@ BROKER_URL = os.environ.get(
 # Passado esse periodo desde o ULTIMO login de verdade, o refresh token para de
 # valer e o usuario precisa entrar com a conta mK de novo. Ajuste aqui a politica.
 SESSION_MAX_AGE_HOURS = float(os.environ.get("WOOW_NEWS_SESSION_MAX_AGE_HOURS", "12"))
+
+
+# --------------------------------------------------------------------- versao da skill
+# O numero instalado nesta maquina. Fonte unica no repo: o arquivo VERSION do plugin
+# (o plugin.json e a env SKILL_VERSION do broker acompanham, ver scripts/bump-version.sh).
+SKILL_DIR = Path(__file__).resolve().parent.parent
+VERSION_FILE = SKILL_DIR / "VERSION"
+
+
+def local_version():
+    """Versao instalada aqui. String vazia se o arquivo sumiu (nunca levanta)."""
+    try:
+        return VERSION_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def parse_version(v):
+    """'1.4.0' -> (1, 4, 0). None quando nao e semver numerico."""
+    try:
+        return tuple(int(x) for x in (v or "").split("."))
+    except Exception:
+        return None
+
+
+def is_outdated(local, remote):
+    """True so quando os dois lados sao semver e o remoto e maior. Numero estranho de
+    qualquer lado devolve False: silencio e melhor que aviso errado."""
+    lp, rp = parse_version(local), parse_version(remote)
+    return bool(lp and rp and rp > lp)

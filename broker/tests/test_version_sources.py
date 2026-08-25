@@ -44,3 +44,32 @@ def test_bump_version_existe_e_e_executavel():
     script = REPO / "scripts/bump-version.sh"
     assert script.exists(), "scripts/bump-version.sh sumiu; é o único jeito de subir versão"
     assert script.stat().st_mode & 0o111, "scripts/bump-version.sh sem bit de execução"
+
+
+def test_bump_recusa_regressao(tmp_path):
+    """Baixar a versão publicada apaga o aviso de update de todo mundo sem gerar erro —
+    é o modo de falha que esta PR existe para matar, então o próprio bump tem que recusar."""
+    import subprocess
+    arvore = tmp_path / "repo"
+    (arvore / "plugins/woow-news/skills/woow-news").mkdir(parents=True)
+    (arvore / "plugins/woow-news/.claude-plugin").mkdir(parents=True)
+    (arvore / "scripts").mkdir()
+    (arvore / "plugins/woow-news/skills/woow-news/VERSION").write_text("1.5.0\n", encoding="utf-8")
+    (arvore / "plugins/woow-news/.claude-plugin/plugin.json").write_text(
+        '{\n  "name": "woow-news",\n  "version": "1.5.0"\n}\n', encoding="utf-8")
+    script = arvore / "scripts/bump-version.sh"
+    script.write_text((REPO / "scripts/bump-version.sh").read_text(encoding="utf-8"), encoding="utf-8")
+
+    def _bump(*args):
+        return subprocess.run(["bash", str(script), *args], capture_output=True, text=True)
+
+    def _versao_da_arvore():
+        return (arvore / "plugins/woow-news/skills/woow-news/VERSION").read_text().strip()
+
+    assert _bump("1.0.0").returncode != 0, "regressão passou"
+    assert _versao_da_arvore() == "1.5.0", "regressão recusada mas o arquivo mudou"
+    assert _bump("1.5.0").returncode != 0, "mesma versão passou"
+    assert _bump("1.0.0", "--permitir-regressao").returncode == 0, "rollback explícito bloqueado"
+    assert _versao_da_arvore() == "1.0.0"
+    assert _bump("1.6.0").returncode == 0
+    assert _versao_da_arvore() == "1.6.0"

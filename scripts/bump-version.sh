@@ -25,6 +25,17 @@ if [[ ! "$NOVA" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 
+# Regressão é recusada por padrão. O aviso de update só dispara quando publicada > local,
+# então baixar a versão não dá erro em lugar nenhum: apaga o aviso de todo mundo em
+# silêncio. Foi assim que a versão publicada voltou para 1.0.0. Rollback consciente passa
+# --permitir-regressao.
+_num() { IFS=. read -r a b c <<< "$1"; echo $((10#$a * 1000000 + 10#$b * 1000 + 10#$c)); }
+if [[ "${2:-}" != "--permitir-regressao" ]] && (( $(_num "$NOVA") <= $(_num "$ATUAL") )); then
+  echo "recusado: $NOVA não é maior que a versão atual ($ATUAL)." >&2
+  echo "Se for rollback de propósito: bash scripts/bump-version.sh $NOVA --permitir-regressao" >&2
+  exit 1
+fi
+
 printf '%s\n' "$NOVA" > "$VERSION_FILE"
 python3 - "$PLUGIN_JSON" "$NOVA" <<'PY'
 import re, sys
@@ -42,7 +53,17 @@ echo "[OK] $ATUAL -> $NOVA  (VERSION + plugin.json)"
 echo
 echo "A terceira fonte é o deploy. Depois de mergear em main, rode (com confirmação do David):"
 echo
-echo "  cd $ROOT/broker && gcloud functions deploy woow-news-broker --gen2 \\"
-echo "    --region=southamerica-east1 --source=. --update-env-vars=\"SKILL_VERSION=$NOVA\""
+echo "  cd <clone em main>/broker && gcloud functions deploy woow-news-broker --gen2 \\"
+echo "    --region=southamerica-east1 --project=mk-ai-first-ops --source=. \\"
+echo "    --update-env-vars=\"SKILL_VERSION=$NOVA\""
+echo
+echo "  (--update-env-vars mexe SÓ nessa variável: não rotaciona o CRON_TOKEN nem"
+echo "   devolve OPERATOR_EMAILS ao valor cravado, como --set-env-vars faria.)"
+BRANCH="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+if [[ "$BRANCH" != "main" ]]; then
+  echo
+  echo "  ⚠ você está em '$BRANCH', não em main. --source=. deploya a árvore ONDE VOCÊ RODAR"
+  echo "    o comando, então rode-o de um clone/worktree em main, não daqui."
+fi
 echo
 echo "E confira:  curl -s \"\$BROKER_URL/version\"   # -> {\"version\":\"$NOVA\"}"

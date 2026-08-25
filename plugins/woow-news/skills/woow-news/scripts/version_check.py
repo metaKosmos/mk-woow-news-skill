@@ -6,6 +6,11 @@ Compara a versao local (arquivo VERSION) com a versao publicada (endpoint
 GET /version do broker). Imprime UMA linha de aviso quando houver atualizacao.
 Tolerante a falha de rede (nunca quebra o fluxo da skill).
 
+A partir da v1.5.0 este script deixou de ser o unico aviso: o broker devolve
+`_aviso` no corpo de toda resposta autenticada quando o cliente esta atras, e o
+woow.py imprime isso sozinho. Este comando continua servindo para checar sem
+precisar chamar nenhuma rota autenticada.
+
 Uso:
     python scripts/version_check.py
 """
@@ -15,28 +20,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-SKILL_DIR = Path(__file__).resolve().parent.parent
-VERSION_FILE = SKILL_DIR / "VERSION"
-
-
-def _local_version():
-    try:
-        return VERSION_FILE.read_text(encoding="utf-8").strip()
-    except Exception:
-        return None
+from config import local_version as _local_version, parse_version as _parse  # noqa: E402
 
 
 def _remote_version():
     try:
         from broker_client import version
         return version()
-    except Exception:
-        return None
-
-
-def _parse(v):
-    try:
-        return tuple(int(x) for x in v.split("."))
     except Exception:
         return None
 

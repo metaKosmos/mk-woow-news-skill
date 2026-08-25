@@ -7,9 +7,14 @@ description: Opera a newsletter WooW! Daily Drops da metaKosmos — gaveta edito
 
 Opera a newsletter diária da mK via broker autenticado por email mK. Os segredos (Gemini, Zoho) ficam no GCP, nunca na máquina. Você (João/Patrick/David) só precisa estar logado com a conta @metakosmos.com.br.
 
-## No início de toda sessão
-Rode a checagem de versão e mostre o aviso de 1 linha se houver update:
-`python3 scripts/version_check.py`
+## Versão da skill (o aviso vem sozinho)
+Não precisa lembrar de checar: a partir da v1.5.0 o **broker** manda o aviso no corpo de
+toda resposta autenticada, e o CLI imprime antes do resultado do comando. Se aparecer
+`[!] woow-news v1.4.0 instalada, v1.5.0 publicada`, rode `/plugin marketplace update mk-skills`.
+
+Antes disso o aviso dependia de alguém rodar `scripts/version_check.py`, então quem não
+rodava operava desatualizado sem saber. O script continua existindo para checar sem
+chamar rota autenticada, mas deixou de ser o único caminho.
 
 ## Login (uma vez)
 `bash scripts/setup.sh` instala deps + faz login Google mK (loopback). Depois, `python3 scripts/auth.py --status` mostra quem está logado.
@@ -28,6 +33,8 @@ mas use o formato de data para as novas.)
 - `python3 scripts/woow.py queue` — fila detalhada (JSON).
 - `python3 scripts/woow.py metrics` — métricas ZMA (open/click/bounce) + custo das últimas edições.
 - `python3 scripts/woow.py sync` — força o espelho do estado pro Firebase (o painel mkaifirst.web.app/#newsletter lê de lá).
+- `python3 scripts/woow.py versions` — versão instalada aqui, versão publicada, o que mudou nela e quem do time está atrasado.
+- `python3 scripts/woow.py release --notes "..."` — **admin**: grava a nota da versão publicada (é ela que aparece no aviso de quem está atrasado) e imprime o texto de anúncio pronto para colar no Slack, já com a lista de quem ainda não atualizou.
 - `python3 scripts/woow.py sources list` — as fontes RSS da pesquisa (✓ = ativa) + o resultado do último teste de cada uma.
 - `python3 scripts/woow.py sources test [--name "Fast Company"]` — baixa os feeds **de dentro do broker** e mostra itens encontrados, itens dentro da janela e o erro real por fonte.
 - `python3 scripts/woow.py sources add --name "Retail Dive" --url https://www.retaildive.com/feeds/news/` — testa a URL antes de cadastrar, mostra o resultado e pede confirmação.
@@ -113,8 +120,8 @@ admin e operadores podem ligar o auto-send. Confira sempre o alvo em `list-lists
 - **Trocar destinatário (`set-list`):** redireciona QUEM recebe a news diária. O comando confirma antes; só responda `s` se for essa a lista certa.
 
 ## Papéis
-- Admin (david@): muda lógica, allowlist, deploy.
-- Operadores (joão@, patrick@): run, add-pauta, queue, metrics, sync, **sources (list/test/add/set-url/enable/disable/remove), list-lists, create-list, set-list, create-campaign, list-senders, set-sender, set-html**.
+- Admin (david@): muda lógica, allowlist, deploy, **release**.
+- Operadores (joão@, patrick@): run, add-pauta, queue, metrics, sync, **versions, sources (list/test/add/set-url/enable/disable/remove), list-lists, create-list, set-list, create-campaign, list-senders, set-sender, set-html**.
 Erro 403 significa conta não autorizada ou rota de admin. Confira `python3 scripts/auth.py --status`.
 
 > **Mexer nas fontes não é mais tarefa de dev.** Antes exigia editar `config/feeds.yaml` e
@@ -124,6 +131,14 @@ Erro 403 significa conta não autorizada ou rota de admin. Confira `python3 scri
 > **Trocar remetente / trocar HTML não é mais tarefa de dev.** Antes exigiam editar `newsletter.yaml`
 > ou os templates `.j2` e redeployar o broker (só admin). Agora são autosserviço de operador via
 > `set-sender` e `set-html` (estado mutável no GCS). O template no Git continua sendo a fonte canônica.
+
+## Quem opera, em que versão
+O broker registra em `clients.json` quem chamou, em qual versão e quando (grava só quando
+a versão muda ou o dia vira). `versions` mostra isso: era a pergunta que ninguém conseguia
+responder, e por isso dava para alguém operar meses numa versão antiga sem ninguém notar.
+
+O broker **avisa, nunca bloqueia**. Não existe versão mínima que recuse chamada: travar um
+operador no meio de um envio é pior do que ele rodar uma versão antiga.
 
 ## Onde as coisas moram
 Estado autoritativo: bucket GCS (via broker). Painel: espelho Firebase. Schema dos arquivos em `references/schema.md`.
