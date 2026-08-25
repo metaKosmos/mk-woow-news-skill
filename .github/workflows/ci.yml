@@ -20,9 +20,10 @@ jobs:
       - name: Dependências de teste
         run: pip install --disable-pip-version-check -r broker/requirements-dev.txt
 
+      # Os dois lados: o broker e o CLI. O teste do cliente nasceu depois de um defeito
+      # na tela do `versions` passar batido justamente por não haver teste deste lado.
       - name: pytest
-        working-directory: broker
-        run: python -m pytest tests/ -q
+        run: python -m pytest broker/tests plugins/woow-news/skills/woow-news/tests -q
 
       # Informativo, nunca falha: o deploy do broker é manual, então entre o merge e o
       # deploy a versão publicada fica atrás de propósito. Um vermelho crônico aqui

@@ -40,6 +40,12 @@ class LocalStore:
             return []
         return [f[:-len(".state.json")] for f in os.listdir(d) if f.endswith(".state.json")]
 
+    def list_keys(self, prefix):
+        d = os.path.join(self.root, prefix.rstrip("/"))
+        if not os.path.isdir(d):
+            return []
+        return sorted(f"{prefix.rstrip('/')}/{f}" for f in os.listdir(d))
+
 
 class GcsStore:
     """Store em bucket GCS privado (produção). Lazy-importa a lib só quando usado."""
@@ -64,6 +70,9 @@ class GcsStore:
             if name.endswith(".state.json"):
                 out.append(name[:-len(".state.json")])
         return out
+
+    def list_keys(self, prefix):
+        return sorted(b.name for b in self._bucket.list_blobs(prefix=prefix))
 
 
 class StateManager:

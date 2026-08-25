@@ -21,6 +21,14 @@ from cost_tracker import compute_cost
 import zma_metrics
 import secrets_store
 
+class EntradaInvalida(ValueError):
+    """Entrada do operador que não passa na validação (URL sem esquema, campo faltando).
+
+    Tipo próprio porque `json.JSONDecodeError` É subclasse de ValueError: mapear ValueError
+    cru para 400 fazia estado corrompido (settings.json, schedule.json) se disfarçar de erro
+    de digitação, com a mensagem do parser no lugar do alerta de corrupção."""
+
+
 BROKER_DIR = Path(__file__).resolve().parent
 PIPELINE = BROKER_DIR / "pipeline"
 CONFIG = BROKER_DIR / "config"
@@ -63,6 +71,16 @@ def _delivery():
 def _workdir(edition):
     """Cria workdir com config/, prompts, templates e content/ da edição (do GCS)."""
     d = Path(tempfile.mkdtemp(prefix=f"woow-{edition}-"))
+    try:
+        return _popula_workdir(d, edition)
+    except Exception:
+        # a partir daqui há leitura do GCS (fontes), que pode falhar. Sem isto o tempdir
+        # ficava órfão: quem chamou ainda não recebeu `d` e o finally dele não limpa.
+        shutil.rmtree(d, ignore_errors=True)
+        raise
+
+
+def _popula_workdir(d, edition):
     (d / "config" / "prompts").mkdir(parents=True)
     (d / "content").mkdir(); (d / "templates").mkdir(); (d / "renders").mkdir()
     for f in CONFIG.glob("*.yaml"):
@@ -205,7 +223,7 @@ def _generate_manual_html(sm, wd, edition, payload):
     subject = payload.get("subject")
     preheader = payload.get("preheader", "")
     if not html or not subject:
-        raise ValueError("manual_html exige 'html' (conteúdo) e 'subject' no payload")
+        raise EntradaInvalida("manual_html exige 'html' (conteúdo) e 'subject' no payload")
     _write_render_html(wd, edition, html)
     html_url, _ = _publish_edition_html(sm, wd, edition, "manual_html", by=payload.get("_email", ""))
     # front-matter mínimo p/ o send_zma.py ler o subject (o corpo do .md é ignorado no send;
@@ -299,7 +317,7 @@ def run_stage(edition, stage, payload):
             _clear_stage_error(sm, edition)
             return {"stage": "sent", "campaign_key": key, "log": out.strip()}
 
-        raise ValueError(f"stage inválido: {stage}")
+        raise EntradaInvalida(f"stage inválido: {stage}")
     except Exception as e:  # noqa: BLE001 — registra a falha do estágio antes de propagar
         _record_stage_error(sm, edition, stage, e)
         raise
@@ -310,7 +328,7 @@ def run_stage(edition, stage, payload):
 
 def add_pauta(edition, pauta):
     if not pauta:
-        raise ValueError("campo 'pauta' obrigatório")
+        raise EntradaInvalida("campo 'pauta' obrigatório")
     sm = _sm()
     raw = sm.store.read(f"content/{edition}.research.json")
     items = json.loads(raw) if raw else []
@@ -333,16 +351,16 @@ def create_campaign(payload):
     payload = payload or {}
     edition = payload.get("edition")
     if not edition:
-        raise ValueError("campo 'edition' obrigatório")
+        raise EntradaInvalida("campo 'edition' obrigatório")
     etype = payload.get("type", "news_auto")
     if etype not in CAMPAIGN_TYPES:
-        raise ValueError(f"type inválido: {etype!r} (use {' | '.join(CAMPAIGN_TYPES)})")
+        raise EntradaInvalida(f"type inválido: {etype!r} (use {' | '.join(CAMPAIGN_TYPES)})")
     sm = _sm()
     st = sm.get_state(edition)
     cur_type = st.get("type", "news_auto")
     cur_stage = st.get("stage", "empty")
     if cur_stage != "empty" and cur_type != etype:
-        raise ValueError(
+        raise EntradaInvalida(
             f"edição {edition} já existe como '{cur_type}' em stage '{cur_stage}'; "
             f"resete antes de recriar como '{etype}' (admin: reset).")
     sm.upsert_edition(edition, {"type": etype})  # sem stage:empty (no-op pela monotonia)
@@ -389,7 +407,7 @@ def set_active_list(payload):
     payload = payload or {}
     list_key = payload.get("list_key")
     if not list_key:
-        raise ValueError("campo 'list_key' obrigatório")
+        raise EntradaInvalida("campo 'list_key' obrigatório")
     sm = _sm()
     s = json.loads(sm.store.read("settings.json") or "{}")
     s["active_list_key"] = list_key
@@ -449,7 +467,7 @@ def set_sender(payload):
     payload = payload or {}
     from_email = (payload.get("from_email") or "").strip()
     if not from_email or "@" not in from_email:
-        raise ValueError("campo 'from_email' obrigatório (email válido)")
+        raise EntradaInvalida("campo 'from_email' obrigatório (email válido)")
     sm = _sm()
     s = json.loads(sm.store.read("settings.json") or "{}")
     s["active_from_email"] = from_email
@@ -500,7 +518,7 @@ def set_html(payload):
     edition = payload.get("edition")
     html = payload.get("html")
     if not edition or not html:
-        raise ValueError("campos 'edition' e 'html' obrigatórios")
+        raise EntradaInvalida("campos 'edition' e 'html' obrigatórios")
     sm = _sm()
     st = sm.get_state(edition)
     # tempdir mínimo: set_html só escreve o HTML e publica (não precisa dos secrets do _workdir).
@@ -533,7 +551,7 @@ def create_list(payload):
     name = payload.get("name")
     emails = payload.get("emails")
     if not name or not emails:
-        raise ValueError("campos 'name' e 'emails' obrigatórios")
+        raise EntradaInvalida("campos 'name' e 'emails' obrigatórios")
     if isinstance(emails, list):
         emails = ",".join(emails)
     args = ["create", "--name", name, "--emails", emails]
@@ -607,7 +625,7 @@ def _norm_name(n):
 def _validate_url(url):
     u = (url or "").strip()
     if not re.match(r"^https?://[^\s/]+", u):
-        raise ValueError(f"URL inválida: {url!r} (precisa começar com http:// ou https://)")
+        raise EntradaInvalida(f"URL inválida: {url!r} (precisa começar com http:// ou https://)")
     return u
 
 
@@ -638,6 +656,8 @@ def get_sources(sm=None):
     else:
         try:
             d = json.loads(raw)
+            if not isinstance(d, dict) or not isinstance(d.get("feeds") or [], list):
+                raise ValueError("shape inesperado (esperava objeto com 'feeds')")
             base = {"feeds": d.get("feeds") or [], "source": "state",
                     "set_by": d.get("set_by", ""), "set_at": d.get("set_at", "")}
         except (ValueError, TypeError) as exc:  # editado à mão no console do GCS, p.ex.
@@ -651,6 +671,17 @@ def get_sources(sm=None):
 
 def _read_tests(sm):
     return _read_state_json(sm, SOURCE_TESTS_KEY, {})
+
+
+def _esquece_teste(sm, nome):
+    """Descarta o último teste de uma fonte. Os testes são chaveados por NOME, então sem
+    isto trocar a URL (ou remover e recadastrar) fazia o resultado da URL VELHA reaparecer
+    colado na nova, dizendo 'ok' sobre um endereço que ninguém mediu."""
+    doc = _read_tests(sm)
+    por_fonte = doc.get("por_fonte") or {}
+    if por_fonte.pop(_norm_name(nome), None) is not None:
+        doc["por_fonte"] = por_fonte
+        sm.store.write(SOURCE_TESTS_KEY, json.dumps(doc, ensure_ascii=False, indent=2))
 
 
 def _merge_tests(sm, feeds):
@@ -702,7 +733,7 @@ def _guard_last_active(feeds, target):
     ninguém perceberia (a edição sai sem candidatos, não com erro)."""
     ativas = [f for f in feeds if f.get("enabled", True)]
     if target.get("enabled", True) and len(ativas) <= 1:
-        raise ValueError("esta é a última fonte ativa; adicione outra antes de desativar ou remover")
+        raise EntradaInvalida("esta é a última fonte ativa; adicione outra antes de desativar ou remover")
 
 
 def set_sources(payload):
@@ -711,7 +742,7 @@ def set_sources(payload):
     payload = payload or {}
     op = (payload.get("op") or "").strip().lower()
     if op not in _SOURCE_OPS:
-        raise ValueError(f"op inválida: {op!r}. Use uma de: {', '.join(_SOURCE_OPS)}")
+        raise EntradaInvalida(f"op inválida: {op!r}. Use uma de: {', '.join(_SOURCE_OPS)}")
     name = payload.get("source") or payload.get("name")
     url = payload.get("url")
     email = payload.get("_email", "")
@@ -722,12 +753,12 @@ def set_sources(payload):
 
     if op == "add":
         if not (name or "").strip():
-            raise ValueError("campo 'source' obrigatório (nome da fonte)")
+            raise EntradaInvalida("campo 'source' obrigatório (nome da fonte)")
         url = _validate_url(url)
         if _find_source(feeds, name=name):
-            raise ValueError(f"já existe uma fonte chamada {name!r}")
+            raise EntradaInvalida(f"já existe uma fonte chamada {name!r}")
         if _find_source(feeds, url=url):
-            raise ValueError(f"já existe uma fonte com essa URL: {url}")
+            raise EntradaInvalida(f"já existe uma fonte com essa URL: {url}")
         lt = payload.get("last_test")
         if isinstance(lt, dict):  # resultado do probe que o CLI rodou antes de confirmar
             lt = {**lt, "at": lt.get("at") or now}
@@ -737,14 +768,15 @@ def set_sources(payload):
     else:
         alvo = _find_source(feeds, name=name, url=None if op == "set-url" else url)
         if not alvo:
-            raise ValueError(f"fonte não encontrada: {(name or url)!r}. Rode: sources list")
+            raise EntradaInvalida(f"fonte não encontrada: {(name or url)!r}. Rode: sources list")
         if op == "set-url":
             url = _validate_url(url)
             outra = _find_source([f for f in feeds if f is not alvo], url=url)
             if outra:
-                raise ValueError(f"essa URL já é da fonte {outra.get('source')!r}")
+                raise EntradaInvalida(f"essa URL já é da fonte {outra.get('source')!r}")
             alvo["url"] = url
             alvo["last_test"] = None  # URL nova, teste antigo não vale mais
+            _esquece_teste(sm, alvo.get("source"))  # senão o merge o ressuscita pelo nome
         elif op == "enable":
             alvo["enabled"] = True
         elif op == "disable":
@@ -753,6 +785,7 @@ def set_sources(payload):
         elif op == "remove":
             _guard_last_active(feeds, alvo)
             feeds = [f for f in feeds if f is not alvo]
+            _esquece_teste(sm, alvo.get("source"))
 
     doc = _write_sources(sm, feeds, cur, {"set_by": email, "set_at": now})
     return {"op": op, "source": alvo.get("source"), "feeds": doc["feeds"],
@@ -800,7 +833,7 @@ def test_sources(payload=None):
     if name:
         alvo = _find_source(feeds, name=name)
         if not alvo:
-            raise ValueError(f"fonte não encontrada: {name!r}. Rode: sources list")
+            raise EntradaInvalida(f"fonte não encontrada: {name!r}. Rode: sources list")
         cand = [alvo]
     else:
         cand = [f for f in feeds if f.get("enabled", True)]
@@ -823,19 +856,25 @@ def test_sources(payload=None):
 
 # --------------------------------------------------------- versao: release e clientes
 RELEASE_KEY = "release.json"
-CLIENTS_KEY = "clients.json"
+CLIENTS_KEY = "clients.json"      # legado: documento único, lido se não houver blobs
+CLIENTS_PREFIX = "clients/"       # um blob por pessoa, sem read-modify-write concorrente
 
 
 def _read_state_json(sm, key, default):
     """Lê uma chave de estado tolerando conteúdo inválido.
 
     Estado é editável pelo console do GCS, e o schema convida a inspecionar. JSON quebrado
-    aqui não pode virar 502 numa rota que nada tem a ver com o arquivo."""
+    aqui não pode virar 502 numa rota que nada tem a ver com o arquivo. Valida também a
+    FORMA: `[]` e `null` são JSON válido e estouram AttributeError no `.get()` seguinte,
+    que é o mesmo estrago que esta guarda existe para impedir."""
     raw = sm.store.read(key)
     if not raw:
         return default
     try:
-        return json.loads(raw)
+        d = json.loads(raw)
+        if not isinstance(d, dict):
+            raise ValueError(f"esperava objeto, veio {type(d).__name__}")
+        return d
     except (ValueError, TypeError) as exc:
         print(f"[estado] {key} ilegível ({exc}); seguindo com o default")
         return default
@@ -852,7 +891,7 @@ def set_release(payload):
     payload = payload or {}
     version = (payload.get("version") or "").strip()
     if not version:
-        raise ValueError("campo 'version' obrigatório")
+        raise EntradaInvalida("campo 'version' obrigatório")
     doc = {"version": version, "notes": (payload.get("notes") or "").strip(),
            "by": payload.get("_email", ""),
            "at": datetime.now(BRT).isoformat(timespec="seconds")}
@@ -871,8 +910,28 @@ def update_notice(client_version, published_version, sm=None):
                         f"publicada. Atualize: /plugin marketplace update mk-skills")}
 
 
+def _client_key(email):
+    return f"{CLIENTS_PREFIX}{email.strip().lower().replace('/', '_')}.json"
+
+
 def get_clients(sm=None):
-    return _read_state_json(sm or _sm(), CLIENTS_KEY, {"clients": {}})
+    """Junta os registros, um blob por pessoa.
+
+    Um arquivo só, lido e reescrito inteiro a cada chamada, perdia a atualização de quem
+    escrevesse no meio: com duas instâncias do Cloud Run em paralelo, a última vencia e
+    alguém que JÁ tinha atualizado voltava a aparecer como atrasado no texto do release."""
+    sm = sm or _sm()
+    clientes = {}
+    for key in sm.store.list_keys(CLIENTS_PREFIX):
+        if not key.endswith(".json"):
+            continue
+        info = _read_state_json(sm, key, {})
+        if info.get("email"):
+            clientes[info["email"]] = {k: v for k, v in info.items() if k != "email"}
+    if clientes:
+        return {"clients": clientes}
+    # legado: instalação que ainda tem o clients.json único de antes desta versão
+    return _read_state_json(sm, CLIENTS_KEY, {"clients": {}})
 
 
 def record_client(email, version, path, sm=None):
@@ -881,18 +940,16 @@ def record_client(email, version, path, sm=None):
     if not email:
         return None
     sm = sm or _sm()
-    doc = get_clients(sm)
-    registro = doc.setdefault("clients", {})
+    chave = _client_key(email)
+    atual = _read_state_json(sm, chave, {})
     agora = datetime.now(BRT)
-    atual = registro.get(email) or {}
     mesmo_dia = (atual.get("last_seen") or "")[:10] == agora.strftime("%Y-%m-%d")
     if atual.get("version") == (version or "") and mesmo_dia:
-        return atual
-    novo = {"version": version or "", "last_path": path or "",
+        return {k: v for k, v in atual.items() if k != "email"}
+    novo = {"email": email, "version": version or "", "last_path": path or "",
             "last_seen": agora.isoformat(timespec="seconds")}
-    registro[email] = novo
-    sm.store.write(CLIENTS_KEY, json.dumps(doc, ensure_ascii=False, indent=2))
-    return novo
+    sm.store.write(chave, json.dumps(novo, ensure_ascii=False, indent=2))
+    return {k: v for k, v in novo.items() if k != "email"}
 
 
 def _atrasados(registro, published, roster=()):
@@ -952,14 +1009,14 @@ def _validate_schedule(s):
         if not (0 <= h <= 23 and 0 <= m <= 59):
             raise ValueError
     except Exception:  # noqa: BLE001
-        raise ValueError(f"send_time inválido (use HH:MM): {s.get('send_time')!r}")
+        raise EntradaInvalida(f"send_time inválido (use HH:MM): {s.get('send_time')!r}")
     wd = s.get("weekdays")
     if (not isinstance(wd, list) or not wd
             or any(not isinstance(d, int) or d < 0 or d > 6 for d in wd)):
-        raise ValueError(f"weekdays inválido (lista de int 0=seg..6=dom): {wd!r}")
+        raise EntradaInvalida(f"weekdays inválido (lista de int 0=seg..6=dom): {wd!r}")
     until = s.get("until")
     if until not in (None, "") and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(until)):
-        raise ValueError(f"until inválido (use YYYY-MM-DD): {until!r}")
+        raise EntradaInvalida(f"until inválido (use YYYY-MM-DD): {until!r}")
 
 
 def set_schedule(payload):
