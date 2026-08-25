@@ -125,11 +125,21 @@ instalado.
 > `bash scripts/bump-version.sh <x.y.z>`, que muda `VERSION` e `plugin.json` juntos e
 > imprime o comando de deploy com o número certo.
 
+> ⚠ **Este bloco é PROVISIONAMENTO INICIAL.** Para só publicar uma versão nova em cima do
+> broker que já existe, use o comando `--update-env-vars` que o `bump-version.sh` imprime,
+> ou `bash provision.sh`. O `--set-env-vars` abaixo reescreve o mapa **inteiro** de
+> variáveis: rodá-lo com um `CRON_TOKEN` recém-gerado troca o token que o Cloud Scheduler
+> usa no `/cron/tick`, e a partir daí o tick toma 403 e **a News para de sair sozinha**,
+> visível só no log de falha do Scheduler.
+
 ```bash
 cd broker
 
-# gere um token aleatório para o cron antes do deploy
-export CRON_TOKEN="$(openssl rand -hex 24)"
+# Reusa o CRON_TOKEN já deployado; só gera um novo se a function ainda não existir.
+# Gerar cego aqui quebra o Cloud Scheduler (mesma proteção que o provision.sh já tem).
+export CRON_TOKEN="$(gcloud functions describe woow-news-broker --gen2 --region=$REGION \
+  --format='value(serviceConfig.environmentVariables.CRON_TOKEN)' 2>/dev/null || true)"
+[ -z "$CRON_TOKEN" ] && export CRON_TOKEN="$(openssl rand -hex 24)"
 
 # a versão vem do repo (fonte única), não do seu histórico de shell
 export SKILL_VERSION="$(tr -d '[:space:]' < ../plugins/woow-news/skills/woow-news/VERSION)"

@@ -190,3 +190,41 @@ def test_with_notice_engole_falha_do_aviso():
     def _explode(cli, pub):
         raise RuntimeError("GCS fora")
     assert main.with_notice({"ok": True}, 200, "1.4.0", "1.5.0", _explode) == {"ok": True}
+
+
+# ------------------------------------------------------------------ quem nunca apareceu
+ROSTER = {"david@metakosmos.com.br", "patrick@metakosmos.com.br", "joao@metakosmos.com.br"}
+
+
+def test_quem_nunca_chamou_conta_como_atrasado(tmp_path, monkeypatch):
+    """clients.json nasce vazio no deploy. Sem o roster, o relatório diria "todo mundo em
+    dia" exatamente no dia em que ninguém atualizou — e o texto do release sairia mentindo."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    orchestrator.record_client("david@metakosmos.com.br", "1.5.0", "/clients")
+    r = orchestrator.get_clients_report("1.5.0", full=True, roster=ROSTER)
+    fora = {x["email"]: x for x in r["atrasados"]}
+    assert set(fora) == {"patrick@metakosmos.com.br", "joao@metakosmos.com.br"}
+    assert all(x["nunca_chamou"] for x in fora.values())
+
+
+def test_roster_nao_duplica_quem_ja_esta_atrasado(tmp_path, monkeypatch):
+    sm = _local_sm(tmp_path, monkeypatch)
+    orchestrator.record_client("patrick@metakosmos.com.br", "1.3.0", "/queue")
+    r = orchestrator.get_clients_report("1.5.0", full=True, roster=ROSTER)
+    patrick = [x for x in r["atrasados"] if x["email"] == "patrick@metakosmos.com.br"]
+    assert len(patrick) == 1 and patrick[0]["nunca_chamou"] is False
+    assert patrick[0]["version"] == "1.3.0"
+
+
+def test_sem_roster_o_comportamento_e_o_de_antes(tmp_path, monkeypatch):
+    sm = _local_sm(tmp_path, monkeypatch)
+    orchestrator.record_client("david@metakosmos.com.br", "1.5.0", "/clients")
+    assert orchestrator.get_clients_report("1.5.0", full=True)["atrasados"] == []
+
+
+def test_operador_ve_a_contagem_com_roster(tmp_path, monkeypatch):
+    sm = _local_sm(tmp_path, monkeypatch)
+    orchestrator.record_client("patrick@metakosmos.com.br", "1.3.0", "/queue")
+    r = orchestrator.get_clients_report("1.5.0", full=False,
+                                        email="patrick@metakosmos.com.br", roster=ROSTER)
+    assert r["atrasados_total"] == 3 and "atrasados" not in r

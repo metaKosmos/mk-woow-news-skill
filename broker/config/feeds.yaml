@@ -13,12 +13,14 @@ feeds:
     url: https://www.glossy.co/feed/
   - source: Digital Commerce 360
     url: https://www.digitalcommerce360.com/feed/
+    note: "URL trocada em 2026-08-24 (sem o www dava 403); verificada: 200, 10 itens"
   - source: Business of Fashion
     url: https://www.businessoffashion.com/feed
   - source: VentureBeat
     url: https://venturebeat.com/feed/
   - source: Fast Company
     url: https://www.fastcompany.com/latest/rss
+    note: "URL trocada em 2026-08-24 (a antiga dava 403); verificada: 200, 20 itens"
   - source: AR Insider
     url: https://arinsider.co/feed/
   - source: Meio & Mensagem

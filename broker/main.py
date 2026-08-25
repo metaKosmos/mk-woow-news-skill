@@ -193,7 +193,8 @@ def _handlers():
                 return jj(orchestrator.set_sender({**payload, "_email": email}))
             if path == "/clients" and method == "GET":
                 return jj(orchestrator.get_clients_report(
-                    SKILL_VERSION, full=(email in ADMINS), email=email))
+                    SKILL_VERSION, full=(email in ADMINS), email=email,
+                    roster=(ADMINS | OPERATORS)))
             if path == "/admin/release" and method == "POST":
                 return jj(orchestrator.set_release(
                     {**payload, "version": SKILL_VERSION, "_email": email}))

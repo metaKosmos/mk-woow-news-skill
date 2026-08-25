@@ -96,13 +96,10 @@ hoje quando dá o horário. Editado por `schedule set/on/off/auto-send`.
       "enabled": true,
       "added_by": "patrick@metakosmos.com.br",
       "added_at": "2026-08-24T20:00:00-03:00",
-      "note": "",
-      "last_test": {"status": "ok", "found": 20, "kept": 6, "error": null,
-                    "at": "2026-08-24T20:00:00-03:00"}
+      "note": ""
     }
   ],
-  "set_by": "patrick@metakosmos.com.br", "set_at": "2026-08-24T20:00:00-03:00",
-  "tested_by": "joao@metakosmos.com.br", "tested_at": "2026-08-24T21:00:00-03:00"
+  "set_by": "patrick@metakosmos.com.br", "set_at": "2026-08-24T20:00:00-03:00"
 }
 ```
 Lista viva das fontes, editada por `sources add|set-url|enable|disable|remove`. Tem
@@ -111,10 +108,29 @@ do container. Antes de cada pesquisa, o broker escreve as fontes com `enabled: t
 `config/feeds.yaml` do workdir, então mudança aqui vale na pesquisa seguinte, sem redeploy.
 
 - `enabled`: `false` mantém a fonte cadastrada e fora da pesquisa.
-- `last_test`: resultado do último `sources test` **daquela** fonte. `found` = itens no feed,
-  `kept` = itens dentro da janela de recência, `error` = o erro real (403/404/timeout).
-- `set_by`/`set_at` são de quem editou a lista; `tested_by`/`tested_at`, de quem rodou o
-  último teste. São coisas diferentes e não se sobrescrevem.
+- `set_by`/`set_at`: quem editou a lista. **Só edição escreve este arquivo.**
+
+⚠ Enquanto este arquivo não existir, o `feeds.yaml` do container é a lista viva e um deploy
+novo pode mudá-la. Depois da primeira edição pela skill, ele passa a ser só semente: fonte
+acrescentada no YAML versionado não entra mais sozinha.
+
+## sources-tests.json (no GCS) — resultado do último `sources test`
+```json
+{
+  "por_fonte": {
+    "fast company": {"status": "ok", "found": 20, "kept": 6, "error": null,
+                     "at": "2026-08-24T21:00:00-03:00"}
+  },
+  "tested_by": "joao@metakosmos.com.br", "tested_at": "2026-08-24T21:00:00-03:00"
+}
+```
+Chave separada de propósito: `sources test` é diagnóstico e **não pode materializar a
+lista**. Guardar o resultado dentro do `sources.json` fazia o primeiro teste congelar o
+`feeds.yaml` do container para sempre, sem erro e sem aviso. O `get_sources` cola o
+`last_test` de cada fonte na hora de responder.
+
+`found` = itens no feed, `kept` = itens dentro da janela de recência, `error` = o erro real
+(403/404/timeout), medido de dentro do broker.
 
 ## release.json (no GCS) — nota da versão publicada
 ```json
@@ -149,3 +165,7 @@ não para auditar cada chamada). Cliente anterior à v1.5.0 não manda o header 
 
 Lido por `woow.py versions`: operador vê a si mesmo e quantos estão atrasados, admin vê a
 tabela inteira.
+
+Quem está no roster (`ADMIN_EMAILS` + `OPERATOR_EMAILS`) e **nunca** aparece aqui também
+conta como atrasado, marcado `nunca_chamou`. Sem isso, no dia do deploy o relatório diria
+"todo mundo em dia" justamente quando ninguém tinha atualizado ainda.

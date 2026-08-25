@@ -434,7 +434,7 @@ def _fmt_quando(iso):
 
 
 def cmd_versions(_):
-    from config import local_version
+    from config import local_version, is_outdated
     r = bc.get_clients()
     pub = r.get("published", "")
     local = local_version()
@@ -448,11 +448,22 @@ def cmd_versions(_):
     if clients:
         print("\nQuem usou a skill  (! = atrasado)")
         for email, info in sorted(clients.items()):
-            marca = " " if info.get("version") == pub else "!"
+            # mesma regra do broker: quem está À FRENTE (dev local) não é atrasado
+            marca = "!" if is_outdated(info.get("version"), pub) else " "
             print(f" {marca} {email:34} {info.get('version') or '?':9} {_fmt_quando(info.get('last_seen'))}")
     atrasados = r.get("atrasados")
     if atrasados is not None:
-        print(f"\n{len(atrasados)} atrasado(s)." if atrasados else "\nTodo mundo em dia.")
+        nunca = [x for x in atrasados if x.get("nunca_chamou")]
+        if not atrasados:
+            print("\nTodo mundo em dia.")
+        else:
+            print(f"\n{len(atrasados)} atrasado(s):")
+            for x in atrasados:
+                estado = "nunca chamou o broker" if x.get("nunca_chamou") else \
+                    f"{x.get('version') or 'sem versão'} · visto {_fmt_quando(x.get('last_seen'))}"
+                print(f"  · {x['email']:34} {estado}")
+            if nunca:
+                print(f"  ({len(nunca)} nunca chamou: pode estar em versão antiga ou nem usar a skill)")
     elif r.get("atrasados_total") is not None:
         print(f"\n{r['atrasados_total']} atrasado(s) no time (tabela completa só para admin).")
 
@@ -462,6 +473,8 @@ def cmd_release(a):
     O broker não posta sozinho por decisão: quem cola é uma pessoa."""
     from config import local_version
     r = bc.get_clients()
+    if r.get("atrasados") is None:  # só admin recebe a lista completa; /admin/release é ADMIN_ONLY
+        sys.exit("release é comando de admin (david@). Peça a ele para publicar a nota.")
     pub = r.get("published", "")
     local = local_version()
     print(f"Versão publicada no broker: {pub}")
@@ -478,9 +491,10 @@ def cmd_release(a):
     print(a.notes)
     print("Para atualizar: `/plugin marketplace update mk-skills`")
     if atrasados:
-        quem = ", ".join(f"{x['email'].split('@')[0]}@ ({x['version'] or 'versão antiga'})"
-                         for x in atrasados)
-        print(f"Ainda na versão antiga: {quem}")
+        quem = ", ".join(
+            f"{x['email'].split('@')[0]}@ ({'nunca abriu a skill' if x.get('nunca_chamou') else (x['version'] or 'versão antiga')})"
+            for x in atrasados)
+        print(f"Ainda não atualizaram: {quem}")
     print("━" * 60)
     print("Copie o bloco acima e cole no Slack.")
 
@@ -561,7 +575,15 @@ def main():
     sas = ssub.add_parser("auto-send")
     sas.add_argument("mode", choices=["on", "off"])
     sas.set_defaults(fn=cmd_schedule_autosend)
-    args = p.parse_args(); args.fn(args)
+    args = p.parse_args()
+    try:
+        args.fn(args)
+    except bc.BrokerError as e:
+        # 403 de papel e 502 de validação viravam traceback, e a última linha mandava
+        # refazer o login — remédio errado para "você não é admin" ou "URL inválida".
+        sys.exit(f"\n{e}")
+    except KeyboardInterrupt:
+        sys.exit("\nCancelado.")
 
 
 if __name__ == "__main__":

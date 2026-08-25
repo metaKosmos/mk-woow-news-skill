@@ -244,8 +244,12 @@ def _build_send_args(edition, st, deliv, sender, active_list):
 
 def run_stage(edition, stage, payload):
     sm = _sm()
-    wd = _workdir(edition)
+    wd = None
     try:
+        # _workdir lê estado do GCS (fontes), então pode falhar: fica DENTRO do try para a
+        # falha virar health.last_error em vez de sumir. Um send em 'ready' não tem nada a
+        # ver com feeds, mas morria calado se a leitura de sources.json quebrasse.
+        wd = _workdir(edition)
         _restore_content(sm, wd, edition)
 
         if stage == "research":
@@ -300,7 +304,8 @@ def run_stage(edition, stage, payload):
         _record_stage_error(sm, edition, stage, e)
         raise
     finally:
-        shutil.rmtree(wd, ignore_errors=True)
+        if wd is not None:
+            shutil.rmtree(wd, ignore_errors=True)
 
 
 def add_pauta(edition, pauta):
@@ -587,6 +592,7 @@ def reset_edition(edition):
 
 # --------------------------------------------------------------- fontes (feeds RSS)
 SOURCES_KEY = "sources.json"
+SOURCE_TESTS_KEY = "sources-tests.json"
 _SOURCE_OPS = ("add", "remove", "enable", "disable", "set-url")
 
 
@@ -627,12 +633,44 @@ def get_sources(sm=None):
     sm = sm or _sm()
     raw = sm.store.read(SOURCES_KEY)
     if not raw:
-        return {"feeds": _seed_feeds(), "source": "config",
-                "set_by": "", "set_at": "", "tested_by": "", "tested_at": ""}
-    d = json.loads(raw)
-    return {"feeds": d.get("feeds") or [], "source": "state",
-            "set_by": d.get("set_by", ""), "set_at": d.get("set_at", ""),
-            "tested_by": d.get("tested_by", ""), "tested_at": d.get("tested_at", "")}
+        base = {"feeds": _seed_feeds(), "source": "config",
+                "set_by": "", "set_at": ""}
+    else:
+        try:
+            d = json.loads(raw)
+            base = {"feeds": d.get("feeds") or [], "source": "state",
+                    "set_by": d.get("set_by", ""), "set_at": d.get("set_at", "")}
+        except (ValueError, TypeError) as exc:  # editado à mão no console do GCS, p.ex.
+            # Cair no seed é o menor mal: a alternativa é derrubar TODO estágio, inclusive
+            # um send que nada tem a ver com fontes. A origem denuncia o problema na lista.
+            print(f"[sources] sources.json ilegível ({exc}); usando o seed do feeds.yaml")
+            base = {"feeds": _seed_feeds(), "source": "config-fallback",
+                    "set_by": "", "set_at": ""}
+    return {**base, **_merge_tests(sm, base["feeds"])}
+
+
+def _read_tests(sm):
+    raw = sm.store.read(SOURCE_TESTS_KEY)
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+
+
+def _merge_tests(sm, feeds):
+    """Cola o último teste de cada fonte, que mora em chave própria.
+
+    Separado de propósito: `sources test` é diagnóstico e não pode materializar a lista.
+    Gravar o resultado dentro do sources.json fazia o primeiro teste congelar o
+    feeds.yaml do container para sempre — fonte nova no YAML versionado passaria a ser
+    ignorada, sem erro e sem aviso."""
+    testes = _read_tests(sm)
+    por_fonte = testes.get("por_fonte") or {}
+    for f in feeds:
+        f["last_test"] = por_fonte.get(_norm_name(f.get("source"))) or f.get("last_test")
+    return {"tested_by": testes.get("tested_by", ""), "tested_at": testes.get("tested_at", "")}
 
 
 def _effective_feeds(sm=None):
@@ -642,11 +680,10 @@ def _effective_feeds(sm=None):
 
 
 def _write_sources(sm, feeds, cur, updates):
-    """Grava sources.json preservando a autoria que não está sendo alterada agora
-    (quem editou a lista != quem rodou o último teste)."""
+    """Grava sources.json. Só EDIÇÃO escreve aqui: teste vai para SOURCE_TESTS_KEY, senão
+    um diagnóstico materializaria a lista e congelaria o feeds.yaml do container."""
     doc = {"feeds": feeds,
-           "set_by": cur.get("set_by", ""), "set_at": cur.get("set_at", ""),
-           "tested_by": cur.get("tested_by", ""), "tested_at": cur.get("tested_at", "")}
+           "set_by": cur.get("set_by", ""), "set_at": cur.get("set_at", "")}
     doc.update(updates)
     sm.store.write(SOURCES_KEY, json.dumps(doc, ensure_ascii=False, indent=2))
     return doc
@@ -778,14 +815,15 @@ def test_sources(payload=None):
 
     report = _probe_feeds([{"source": f.get("source", ""), "url": f.get("url", "")} for f in cand])
     at = datetime.now(BRT).isoformat(timespec="seconds")
-    por_nome = {_norm_name(r.get("source")): r for r in report}
-    for f in feeds:
-        r = por_nome.get(_norm_name(f.get("source")))
-        if r:
-            f["last_test"] = {"status": "erro" if r.get("error") else "ok",
-                              "found": r.get("found", 0), "kept": r.get("kept", 0),
-                              "error": r.get("error"), "at": at}
-    _write_sources(sm, feeds, cur, {"tested_by": payload.get("_email", ""), "tested_at": at})
+    doc = _read_tests(sm)
+    por_fonte = doc.get("por_fonte") or {}
+    for r in report:
+        por_fonte[_norm_name(r.get("source"))] = {
+            "status": "erro" if r.get("error") else "ok", "found": r.get("found", 0),
+            "kept": r.get("kept", 0), "error": r.get("error"), "at": at}
+    sm.store.write(SOURCE_TESTS_KEY, json.dumps(
+        {"por_fonte": por_fonte, "tested_by": payload.get("_email", ""), "tested_at": at},
+        ensure_ascii=False, indent=2))
     return {"report": report, "persisted": True, "at": at}
 
 
@@ -852,30 +890,38 @@ def record_client(email, version, path, sm=None):
     return novo
 
 
-def _atrasados(registro, published):
-    """Quem foi visto rodando versao anterior a publicada. Cliente sem versao registrada
-    conta como atrasado: e skill velha demais para mandar o header."""
+def _atrasados(registro, published, roster=()):
+    """Quem não está na versão publicada.
+
+    Duas famílias: quem foi visto numa versão anterior (inclusive sem versão, que é skill
+    velha demais para mandar o header) e quem está no roster e NUNCA chamou o broker. A
+    segunda existe porque clients.json nasce vazio: sem ela, no dia do deploy o relatório
+    diria "todo mundo em dia" justamente quando ninguém atualizou ainda."""
     def _p(v):
         try:
             return tuple(int(x) for x in (v or "").split("."))
         except (ValueError, AttributeError):
             return None
     pv = _p(published)
+    registro = registro or {}
     fora = []
-    for email, info in (registro or {}).items():
+    for email, info in registro.items():
         cv = _p(info.get("version"))
         if pv and (cv is None or cv < pv):
             fora.append({"email": email, "version": info.get("version", ""),
-                         "last_seen": info.get("last_seen", "")})
+                         "last_seen": info.get("last_seen", ""), "nunca_chamou": False})
+    for email in (set(roster or ()) - set(registro)):
+        fora.append({"email": email, "version": "", "last_seen": "", "nunca_chamou": True})
     return sorted(fora, key=lambda x: x["email"])
 
 
-def get_clients_report(published, full=True, email=None, sm=None):
+def get_clients_report(published, full=True, email=None, sm=None, roster=()):
     """Quem opera a skill e em que versao. Operador ve a si mesmo e quantos estao
-    atrasados; admin ve a tabela inteira."""
+    atrasados; admin ve a tabela inteira. `roster` são os emails autorizados (admin +
+    operadores), para contar quem ainda nem apareceu."""
     doc = get_clients(sm)
     registro = doc.get("clients") or {}
-    atrasados = _atrasados(registro, published)
+    atrasados = _atrasados(registro, published, roster)
     if full:
         return {"published": published, "clients": registro, "atrasados": atrasados,
                 "release": get_release(sm)}

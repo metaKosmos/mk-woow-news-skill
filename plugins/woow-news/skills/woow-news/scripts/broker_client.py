@@ -47,6 +47,7 @@ def _req(method, path, payload=None):
             body = r.read().decode("utf-8")
             out = json.loads(body) if body else {}
             _mostra_aviso(out)
+            out.pop("_aviso", None)  # o aviso é do stderr; stdout de `queue` sai JSON limpo
             return out
     except urllib.error.HTTPError as e:
         try:

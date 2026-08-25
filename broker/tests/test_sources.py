@@ -248,3 +248,87 @@ def test_report_as_dicts():
     assert research.report_as_dicts([("A", 10, 3, None), ("B", 0, 0, "403")]) == [
         {"source": "A", "found": 10, "kept": 3, "error": None},
         {"source": "B", "found": 0, "kept": 0, "error": "403"}]
+
+
+# ------------------------------------------------------------------ estado ilegível
+def test_sources_json_corrompido_cai_no_seed(tmp_path, monkeypatch):
+    """Editar o sources.json à mão no console do GCS não pode derrubar TODO estágio —
+    inclusive um `send` que nada tem a ver com fontes. Cai no seed e denuncia a origem."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    sm.store.write(orchestrator.SOURCES_KEY, "{isso não é json")
+    r = orchestrator.get_sources()
+    assert r["source"] == "config-fallback"
+    assert [f["source"] for f in r["feeds"]] == [f["source"] for f in orchestrator._seed_feeds()]
+    assert orchestrator._effective_feeds()  # o pipeline continua tendo fontes
+
+
+def test_falha_ao_montar_workdir_vira_health_last_error(tmp_path, monkeypatch):
+    """_workdir passou a ler o GCS, então pode falhar. A falha tem que ficar registrada:
+    antes ela nascia fora do try e o estado da edição não guardava rastro nenhum."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    sm.upsert_edition("2026-08-25", {"stage": "ready"})
+
+    def _explode(edition):
+        raise RuntimeError("GCS fora")
+
+    monkeypatch.setattr(orchestrator, "_workdir", _explode)
+    with pytest.raises(RuntimeError):
+        orchestrator.run_stage("2026-08-25", "send", {})
+    erro = sm.get_state("2026-08-25")["health"]["last_error"]
+    assert erro["stage"] == "send" and "GCS fora" in erro["message"]
+
+
+# ------------------------------------------------------------------ teste não é mutação
+def test_sources_test_nao_materializa_a_lista(tmp_path, monkeypatch):
+    """`sources test` é diagnóstico. Gravar o resultado dentro do sources.json fazia o
+    primeiro teste congelar o feeds.yaml do container: a partir dali, fonte nova ou URL
+    corrigida no YAML versionado passava a ser ignorada, sem erro e sem aviso."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    monkeypatch.setattr(orchestrator, "_probe_feeds", lambda feeds: [
+        {"source": f["source"], "found": 7, "kept": 2, "error": None} for f in feeds])
+    orchestrator.test_sources({"_email": "patrick@metakosmos.com.br"})
+    assert sm.store.read(orchestrator.SOURCES_KEY) in (None, ""), "o teste materializou a lista"
+    assert orchestrator.get_sources(sm)["source"] == "config", "a origem saiu do seed"
+
+
+def test_last_test_do_seed_sobrevive_em_chave_propria(tmp_path, monkeypatch):
+    sm = _local_sm(tmp_path, monkeypatch)
+    monkeypatch.setattr(orchestrator, "_probe_feeds", lambda feeds: [
+        {"source": f["source"], "found": 7, "kept": 2, "error": None} for f in feeds])
+    orchestrator.test_sources({"_email": "patrick@metakosmos.com.br"})
+    cur = orchestrator.get_sources(sm)
+    mr = next(f for f in cur["feeds"] if f["source"] == "Modern Retail")
+    assert mr["last_test"]["status"] == "ok" and mr["last_test"]["found"] == 7
+    assert cur["tested_by"] == "patrick@metakosmos.com.br" and cur["tested_at"]
+
+
+def test_fonte_nova_no_seed_entra_mesmo_depois_de_testar(tmp_path, monkeypatch):
+    """O congelamento era o defeito: depois de um teste, o YAML tinha que continuar valendo."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    monkeypatch.setattr(orchestrator, "_probe_feeds", lambda feeds: [])
+    orchestrator.test_sources({})
+    monkeypatch.setattr(orchestrator, "_seed_feeds", lambda: [
+        {"source": "Fonte Nova", "url": "https://nova/feed", "enabled": True,
+         "added_by": "", "added_at": "", "note": "", "last_test": None}])
+    assert [f["source"] for f in orchestrator._effective_feeds()] == ["Fonte Nova"]
+
+
+def test_testar_uma_fonte_tambem_nao_materializa(tmp_path, monkeypatch):
+    """O laço gravava a lista inteira mesmo testando uma só: `sources test --name Glossy`
+    promovia as dez fontes do seed para estado."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    monkeypatch.setattr(orchestrator, "_probe_feeds", lambda feeds: [
+        {"source": f["source"], "found": 3, "kept": 1, "error": None} for f in feeds])
+    orchestrator.test_sources({"source": "Glossy", "_email": "joao@metakosmos.com.br"})
+    assert sm.store.read(orchestrator.SOURCES_KEY) in (None, "")
+    assert orchestrator.get_sources(sm)["source"] == "config"
+
+
+def test_fallback_de_json_ilegivel_tambem_nao_vira_estado(tmp_path, monkeypatch):
+    """config-fallback é uma terceira origem: se o teste gravasse a partir dela, o seed
+    congelava do mesmo jeito, com a agravante de já estarmos num estado corrompido."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    sm.store.write(orchestrator.SOURCES_KEY, "{corrompido")
+    monkeypatch.setattr(orchestrator, "_probe_feeds", lambda feeds: [])
+    orchestrator.test_sources({})
+    assert orchestrator.get_sources(sm)["source"] == "config-fallback"
