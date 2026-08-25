@@ -96,7 +96,7 @@ def test_record_client_nao_regrava_no_mesmo_dia(tmp_path, monkeypatch):
     orchestrator.record_client("p@metakosmos.com.br", "1.5.0", "/queue")
     orchestrator.record_client("p@metakosmos.com.br", "1.5.0", "/status")
     orchestrator.record_client("p@metakosmos.com.br", "1.5.0", "/metrics")
-    assert escritas.count(orchestrator.CLIENTS_KEY) == 1
+    assert len([k for k in escritas if k.startswith(orchestrator.CLIENTS_PREFIX)]) == 1
 
 
 def test_record_client_regrava_quando_a_versao_muda(tmp_path, monkeypatch):
@@ -104,14 +104,14 @@ def test_record_client_regrava_quando_a_versao_muda(tmp_path, monkeypatch):
     escritas = _spy_writes(sm, monkeypatch)
     orchestrator.record_client("p@metakosmos.com.br", "1.4.0", "/queue")
     orchestrator.record_client("p@metakosmos.com.br", "1.5.0", "/queue")
-    assert escritas.count(orchestrator.CLIENTS_KEY) == 2
+    assert len([k for k in escritas if k.startswith(orchestrator.CLIENTS_PREFIX)]) == 2
     assert orchestrator.get_clients()["clients"]["p@metakosmos.com.br"]["version"] == "1.5.0"
 
 
 def test_record_client_sem_email_nao_faz_nada(tmp_path, monkeypatch):
     sm = _local_sm(tmp_path, monkeypatch)
     assert orchestrator.record_client("", "1.5.0", "/queue") is None
-    assert sm.store.read(orchestrator.CLIENTS_KEY) in (None, "")
+    assert sm.store.list_keys(orchestrator.CLIENTS_PREFIX) == []
 
 
 # ------------------------------------------------------------------ quem está atrasado
@@ -233,7 +233,7 @@ def test_operador_ve_a_contagem_com_roster(tmp_path, monkeypatch):
 # ------------------------------------------------------------------ estado corrompido
 @pytest.mark.parametrize("chave,funcao,esperado", [
     ("release.json", lambda: orchestrator.get_release(), {}),
-    ("clients.json", lambda: orchestrator.get_clients(), {"clients": {}}),
+    ("clients/alguem@metakosmos.com.br.json", lambda: orchestrator.get_clients(), {"clients": {}}),
 ])
 def test_estado_ilegivel_nao_derruba_a_rota(tmp_path, monkeypatch, chave, funcao, esperado):
     """Estado é editável pelo console do GCS. JSON quebrado num arquivo não pode virar 502
@@ -245,6 +245,6 @@ def test_estado_ilegivel_nao_derruba_a_rota(tmp_path, monkeypatch, chave, funcao
 
 def test_relatorio_sobrevive_a_clients_corrompido(tmp_path, monkeypatch):
     sm = _local_sm(tmp_path, monkeypatch)
-    sm.store.write(orchestrator.CLIENTS_KEY, "lixo")
+    sm.store.write(orchestrator._client_key("patrick@metakosmos.com.br"), "lixo")
     r = orchestrator.get_clients_report("1.5.0", full=True, roster={"patrick@metakosmos.com.br"})
     assert r["clients"] == {} and [x["email"] for x in r["atrasados"]] == ["patrick@metakosmos.com.br"]

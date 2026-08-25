@@ -217,10 +217,13 @@ def _handlers():
             if path == "/admin/reset" and method == "POST":
                 return jj(orchestrator.reset_edition(payload.get("edition")))
             return jj({"error": f"rota desconhecida: {path}"}, 404)
-        except ValueError as e:
+        except orchestrator.EntradaInvalida as e:
             # entrada inválida (URL sem esquema, fonte duplicada, campo faltando) é 400.
             # Como 502 a mensagem lia "broker quebrado" e mandava o operador procurar
-            # problema onde não havia.
+            # problema onde não havia. Tipo próprio, e não ValueError: json.JSONDecodeError
+            # é subclasse de ValueError, e estado corrompido não pode se disfarçar de erro
+            # de digitação nem sumir do log.
+            print(f"[entrada] {email} {path}: {e}")
             return jj({"error": str(e)}, 400)
         except Exception as e:  # noqa: BLE001
             print(f"[error] {email} {path}: {e}")

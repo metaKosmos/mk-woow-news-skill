@@ -445,13 +445,16 @@ def cmd_versions(_):
     if rel.get("version") == pub and rel.get("notes"):
         print(f"O que mudou        : {rel['notes']}")
     clients = r.get("clients") or {}
+    atrasados = r.get("atrasados")
+    fora = {x["email"] for x in atrasados} if atrasados is not None else None
     if clients:
         print("\nQuem usou a skill  (! = atrasado)")
         for email, info in sorted(clients.items()):
-            # mesma regra do broker: quem está À FRENTE (dev local) não é atrasado
-            marca = "!" if is_outdated(info.get("version"), pub) else " "
-            print(f" {marca} {email:34} {info.get('version') or '?':9} {_fmt_quando(info.get('last_seen'))}")
-    atrasados = r.get("atrasados")
+            # a marca vem da lista do broker, não de uma segunda conta aqui: assim tabela e
+            # rodapé não podem discordar. O is_outdated só entra no ramo do operador, que
+            # não recebe a lista e só tem a própria linha.
+            atras = (email in fora) if fora is not None else is_outdated(info.get("version"), pub)
+            print(f" {'!' if atras else ' '} {email:34} {info.get('version') or '?':9} {_fmt_quando(info.get('last_seen'))}")
     if atrasados is not None:
         nunca = [x for x in atrasados if x.get("nunca_chamou")]
         if not atrasados:
