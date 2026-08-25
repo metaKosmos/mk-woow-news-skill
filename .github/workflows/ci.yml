@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # A suíte não importa google-cloud-* nem functions-framework (o broker trata o
+      # ImportError), então o CI instala só o que os testes usam.
+      - name: Dependências de teste
+        run: pip install --disable-pip-version-check -r broker/requirements-dev.txt
+
+      - name: pytest
+        working-directory: broker
+        run: python -m pytest tests/ -q
+
+      # Informativo, nunca falha: o deploy do broker é manual, então entre o merge e o
+      # deploy a versão publicada fica atrás de propósito. Um vermelho crônico aqui
+      # ensinaria o time a ignorar o CI inteiro.
+      - name: Versão publicada no broker (informativo)
+        continue-on-error: true
+        run: |
+          REPO_V="$(tr -d '[:space:]' < plugins/woow-news/skills/woow-news/VERSION)"
+          LIVE_V="$(curl -sS --max-time 15 https://woow-news-broker-lpbyopeg7q-rj.a.run.app/version \
+                    | python -c 'import json,sys; print(json.load(sys.stdin).get("version",""))' || echo "?")"
+          echo "repo=$REPO_V  broker=$LIVE_V"
+          if [ "$REPO_V" != "$LIVE_V" ]; then
+            echo "::notice::repo em $REPO_V, broker publica $LIVE_V — falta deployar (gate de update fica mudo até lá)"
+          fi

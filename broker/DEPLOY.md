@@ -118,11 +118,21 @@ instalado.
 
 ## 5. Deploy da function
 
+> **A versão publicada sai do arquivo `VERSION` do repo, nunca digitada no comando.**
+> Este documento já trouxe a versão `1.0.0` cravada no comando: quem copiasse a receita fazia a versão
+> publicada **regredir**, e como o aviso de update só dispara quando remoto > local, a
+> regressão apagava o aviso de todo mundo sem gerar erro. Para subir versão use
+> `bash scripts/bump-version.sh <x.y.z>`, que muda `VERSION` e `plugin.json` juntos e
+> imprime o comando de deploy com o número certo.
+
 ```bash
 cd broker
 
 # gere um token aleatório para o cron antes do deploy
 export CRON_TOKEN="$(openssl rand -hex 24)"
+
+# a versão vem do repo (fonte única), não do seu histórico de shell
+export SKILL_VERSION="$(tr -d '[:space:]' < ../plugins/woow-news/skills/woow-news/VERSION)"
 
 gcloud functions deploy woow-news-broker \
   --gen2 \
@@ -133,7 +143,7 @@ gcloud functions deploy woow-news-broker \
   --trigger-http \
   --allow-unauthenticated \
   --service-account=$RUNTIME_SA \
-  --set-env-vars="ALLOWED_DOMAIN=metakosmos.com.br,OAUTH_CLIENT_ID=SEU_CLIENT_ID.apps.googleusercontent.com,OAUTH_CLIENT_SECRET=GOCSPX-...,ADMIN_EMAILS=david@metakosmos.com.br,OPERATOR_EMAILS=joao@metakosmos.com.br;patrick@metakosmos.com.br,CRON_TOKEN=$CRON_TOKEN,STATE_BUCKET=mk-woow-news-state,PUBLIC_BUCKET=mk-woow-news-public,FIREBASE_DB_URL=https://mk-ai-first-ops.firebaseio.com,SKILL_VERSION=1.0.0,BRL_RATE=5.70"
+  --set-env-vars="ALLOWED_DOMAIN=metakosmos.com.br,OAUTH_CLIENT_ID=SEU_CLIENT_ID.apps.googleusercontent.com,OAUTH_CLIENT_SECRET=GOCSPX-...,ADMIN_EMAILS=david@metakosmos.com.br,OPERATOR_EMAILS=joao@metakosmos.com.br;patrick@metakosmos.com.br,CRON_TOKEN=$CRON_TOKEN,STATE_BUCKET=mk-woow-news-state,PUBLIC_BUCKET=mk-woow-news-public,FIREBASE_DB_URL=https://mk-ai-first-ops.firebaseio.com,SKILL_VERSION=$SKILL_VERSION,BRL_RATE=5.70"
 ```
 
 > Os emails em `OPERATOR_EMAILS` são separados por ponto e vírgula porque o
@@ -177,7 +187,7 @@ no endpoint `/oauth-config`, e o cliente busca em tempo de uso. Então:
 ```bash
 # /version é público (usado pela checagem de versão)
 curl -s "$(gcloud functions describe woow-news-broker --gen2 --region=$REGION --format='value(serviceConfig.uri)')/version"
-# -> {"version":"1.0.0"}
+# -> {"version":"X.Y.Z"} (o mesmo do arquivo VERSION)
 ```
 
 Confira nos logs do Cloud Run que os secrets foram lidos do Secret Manager e que
