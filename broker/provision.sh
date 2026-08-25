@@ -22,6 +22,13 @@ REGION=southamerica-east1
 SVC=woow-news-broker
 SA="woow-news-broker-runtime@${PROJECT}.iam.gserviceaccount.com"
 
+# Versao publicada: sai do arquivo VERSION do repo, NUNCA digitada aqui. Este script
+# cravava a versao 1.0.0 aqui dentro, entao um re-run REGREDIA a publicada; como o aviso
+# de update so dispara quando remoto > local, a regressao apagava o aviso de todo mundo
+# sem gerar erro nenhum. Suba versao com: bash scripts/bump-version.sh <x.y.z>
+SKILL_VERSION="$(tr -d '[:space:]' < "$(dirname "$0")/../plugins/woow-news/skills/woow-news/VERSION")"
+: "${SKILL_VERSION:?VERSION do repo vazio ou ausente}"
+
 # --- checagem de variaveis ---
 : "${OAUTH_CLIENT_ID:?defina OAUTH_CLIENT_ID antes de rodar}"
 : "${OAUTH_CLIENT_SECRET:?defina OAUTH_CLIENT_SECRET antes de rodar}"
@@ -60,7 +67,7 @@ echo "==> Deploy do broker (Cloud Run function gen2)"
 gcloud functions deploy "$SVC" --gen2 --runtime=python312 --region="$REGION" \
   --source=. --entry-point=broker --trigger-http --allow-unauthenticated \
   --service-account="$SA" \
-  --set-env-vars="ALLOWED_DOMAIN=metakosmos.com.br,OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID},OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET},ADMIN_EMAILS=david@metakosmos.com.br,OPERATOR_EMAILS=joao@metakosmos.com.br;patrick@metakosmos.com.br,CRON_TOKEN=${CRON_TOKEN},STATE_BUCKET=mk-woow-news-state,PUBLIC_BUCKET=mk-woow-news-public,FIREBASE_DB_URL=${FIREBASE_DB_URL},SKILL_VERSION=1.0.0,BRL_RATE=5.70"
+  --set-env-vars="ALLOWED_DOMAIN=metakosmos.com.br,OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID},OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET},ADMIN_EMAILS=david@metakosmos.com.br,OPERATOR_EMAILS=joao@metakosmos.com.br;patrick@metakosmos.com.br,CRON_TOKEN=${CRON_TOKEN},STATE_BUCKET=mk-woow-news-state,PUBLIC_BUCKET=mk-woow-news-public,FIREBASE_DB_URL=${FIREBASE_DB_URL},SKILL_VERSION=${SKILL_VERSION},BRL_RATE=5.70"
 
 URL="$(gcloud functions describe "$SVC" --gen2 --region="$REGION" --format='value(serviceConfig.uri)')"
 echo "=================================================================="
