@@ -32,6 +32,22 @@ def _access(secret_name, version="latest"):
     return resp.payload.data.decode("utf-8").strip()
 
 
+# Webhook do aviso de edição pronta (MAR-484). Fora do SECRET_NAMES de propósito: aquele
+# grupo é obrigatório e falha alto, este é opcional e um aviso que não sai não pode derrubar
+# a edição do dia.
+SLACK_WEBHOOK_SECRET = os.environ.get("SECRET_SLACK_WEBHOOK", "SLACK_WEBHOOK_URL")
+
+
+@lru_cache(maxsize=1)
+def get_slack_webhook():
+    """URL do webhook, ou "" se o segredo não existir ou a SA não puder lê-lo."""
+    try:
+        return _access(SLACK_WEBHOOK_SECRET)
+    except Exception as exc:  # noqa: BLE001 — segredo ausente é configuração, não erro
+        print(f"[notify] webhook indisponível ({type(exc).__name__}); aviso desligado")
+        return ""
+
+
 @lru_cache(maxsize=1)
 def get_zma_gemini_env():
     """Devolve dict no formato que os scripts do pipeline esperam no .envmk (cacheado)."""
