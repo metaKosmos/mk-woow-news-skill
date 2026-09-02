@@ -70,6 +70,16 @@ devolve 403 para link legítimo, então 403 aparece no relatório sem derrubar a
 Para auditar edições já publicadas (roda sem login, lê o bucket público):
 `bash broker/scripts/auditar-edicoes.sh 2026-09-02 2026-08-31`
 
+## Revisão antes do envio
+Com `schedule auto-send off`, o cron faz pesquisa e geração de manhã, para em `ready` e
+**não envia**. O broker avisa no Slack que a edição está pronta, com o assunto, o link do
+preview (bucket público, abre sem login, dá para colar em qualquer canal) e o resumo da
+procedência. Quem revisa abre o link; quem dispara roda `run --edition <hoje> --stage send`.
+
+Uma edição em `ready` não é regerada pelo tick seguinte, então o que foi revisado é
+exatamente o que sai. Se o estágio falhar, o aviso vem com o erro: o dia já foi marcado
+como rodado e o cron não tenta de novo, então alguém precisa rodar na mão.
+
 ## Listas e destinatários (ZMA, NÃO Zoho CRM)
 A lista de envio da newsletter vive no **Zoho Marketing Automation (ZMA)**, e a skill cria/lista/troca essas listas via broker (comandos acima). **Esta skill não usa Zoho CRM.** Se o seu ambiente Claude tiver algum conector `ZohoCRM_*` conectado, **ignore-o** — ele não tem nada a ver com a newsletter; criar algo no módulo "Campaigns" do CRM não vira lista de disparo. Para qualquer operação de lista, use sempre `scripts/woow.py` (list-lists / create-list / set-list), nunca ferramentas de CRM.
 
