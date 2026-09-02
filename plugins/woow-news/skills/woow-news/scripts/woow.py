@@ -47,6 +47,15 @@ def cmd_status(_):
             bits.append(f"open {round(e['open_rate']*100)}%")
         if e.get("html_versions", 0) > 1:
             bits.append(f"{e['html_versions']} versões HTML")
+        # Procedência (MAR-483): edição com menos de 5 itens é legítima, mas quem opera
+        # precisa ver que houve descarte e por qual motivo procurar no queue.
+        if e.get("itens") is not None and e["itens"] < 5:
+            bits.append(f"{e['itens']} itens")
+        if e.get("descartados"):
+            motivos = ", ".join(e.get("motivos") or []) or "motivo não registrado"
+            bits.append(f"{e['descartados']} descartado(s): {motivos}")
+        if e.get("links_suspeitos"):
+            bits.append(f"⚠ {e['links_suspeitos']} link(s) suspeito(s)")
         print(f"{glyph} {e['edition']}   {e.get('date',''):10}   {'  ·  '.join(bits)}")
     c = Counter(e["stage"] for e in q["editions"])
     print(f"\nCobertura: {c.get('ready',0)} pronto · {c.get('generated',0)} gerado · "

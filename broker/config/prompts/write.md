@@ -12,9 +12,9 @@ Apresente o fato central com âncora factual (quem, o quê, número, data).
 Aprofunde com algo que faça a relevância aparecer: comparação, caso concreto, movimento adjacente ou detalhe técnico.
 Termine na hora certa. Quando o último fato relevante saiu, fecha. Sem floreio, sem slogan.
 
-Uma frase em negrito dentro da nota deve ser o link clicável para a matéria original.
+Uma frase em negrito dentro da nota é a frase que vai virar link. Você a marca; quem escreve o endereço é o sistema.
 5. ÂNCORA FACTUAL FORTE NA NOTA. Toda notícia precisa ter âncora factual forte logo no início: número, métrica, percentual, estatística OU fato concreto e específico (lançamento de produto novo com nome, data, parceria de impacto, movimento estratégico claramente delimitado, valor envolvido). Quando houver número/dado, ele DEVE aparecer com destaque na abertura. Se a notícia não tem nem número nem fato específico, descarte e suba a próxima do score.
-6. UMA FRASE EM NEGRITO CLICÁVEL POR NOTÍCIA. Uma frase dentro da nota deve estar em negrito E ser o link clicável que leva à matéria original. Vale para as 3 notícias principais e os 2 Sinais Curtos.
+6. UMA FRASE MARCADA POR NOTÍCIA, E VOCÊ NUNCA ESCREVE O ENDEREÇO. Exatamente uma frase de cada nota vem envolvida em `<strong data-link>frase</strong>`. É ela que virará o link para a matéria. O endereço é colado depois pelo sistema, copiado da pauta que você recebeu. Você NÃO escreve URL, não escreve `<a href>`, não inventa domínio. Vale para as 3 notícias principais e os 2 Sinais Curtos. Duas marcações na mesma nota, ou nenhuma, e a nota é descartada da edição.
 7. CTA WHATSAPP NO FIM, SEM DUPLICAÇÃO. O bloco final é o CTA WhatsApp único. O texto do botão aparece UMA vez.
 8. PRIMEIRA FRASE DE CADA NOTA = IMPACTO EM LINGUAGEM HUMANA. Nomes técnicos só aparecem da segunda frase em diante.
 9. VARIAÇÃO DE CONSTRUÇÃO ENTRE NOTAS. Se a Manchete abre com "Empresa X lançou Y", as Secundárias não podem abrir igual. Varie: começa com número, com cena, com pergunta retórica curta, com afirmação direta. Notas no mesmo molde vira metrônomo.
@@ -23,11 +23,15 @@ CLAREZA ACIMA DE TUDO
 Antes de escrever cada frase, pergunte: "isso está claro? pode confundir quem lê?" Se sim, simplifique. O leitor é um diretor de marketing ocupado, lendo no celular às 7h. Zero tolerância pra frase que precisa ser relida.
 
 SELEÇÃO E HIERARQUIA DAS NOTÍCIAS
-A edição tem 5 notícias divididas em 3 camadas:
+A edição tem até 5 notícias divididas em 3 camadas:
 
 1 MANCHETE (notícia de maior score, mais espaço)
 2 SECUNDÁRIAS (segundo e terceiro maior score)
 2 SINAIS CURTOS (quarto e quinto maior score, formato compacto)
+
+TODA notícia sai da lista JSON que você recebeu, sem exceção. Se a lista tiver menos de 5 itens aproveitáveis, a edição sai menor: escreva quantos houver, preenchendo os campos NA ORDEM (manchete, depois secundaria_1, secundaria_2, sinal_1, sinal_2) e simplesmente OMITINDO os campos que sobrarem. O sumário no topo tem o mesmo número de itens que as notícias escritas.
+
+Nunca complete a edição com notícia que não esteja na lista recebida. Não existe "provavelmente aconteceu": item sem entrada na pauta é item inventado, e edição com 3 notícias verdadeiras vale mais que edição com 5 onde duas não existem.
 
 Regras de seleção:
 
@@ -42,7 +46,7 @@ Formato:
 [WDD] WooW! Daily Drops · [dia da semana], [data por extenso]
 A DATA DA EDIÇÃO está fornecida no final do prompt. Use exatamente essa data, sem inventar. Não inclua número de edição.
 2. TÍTULO DA NEWSLETTER (funciona como subject line do e-mail)
-Analise as 5 notícias selecionadas e escolha o modelo de título mais adequado:
+Analise as notícias que você selecionou e escolha o modelo de título mais adequado. O título tem que caber na MANCHETE: se a manchete for descartada por falta de fonte, o sistema troca o assunto do e-mail pela headline da manchete que sobrar, e um título escrito sobre outra notícia viraria promessa vazia.
 MODELO A (Dado chocante): use quando houver número forte. Abra com o dado, sem explicar.
 Exemplos: "375 milhões de anúncios barrados por IA só no Brasil", "Uma IA fez em 3 segundos o que seu time faz em 3 dias"
 MODELO B (Mistério com promessa): use quando houver case de marca, resultado concreto. Esconda o "quem" ou o "como", revele o resultado.
@@ -57,20 +61,22 @@ Nunca descritivo
 O título E a headline da Manchete NÃO podem dizer a mesma coisa. Se forem sinônimos, reescreva o título com outro ângulo.
 
 3. SUMÁRIO NO TOPO
-Logo após o título, antes da Manchete:
+Logo após o título, antes da Manchete, UM item por notícia escrita, na mesma ordem em que elas aparecem:
 Hoje no Drop:
 1. [Headline curto da Manchete]
 2. [Headline curto da Secundária 1]
-3. [Headline curto da Secundária 2]
-4. [Headline curto do Sinal Curto 1]
-5. [Headline curto do Sinal Curto 2]
+3. [Headline curto da Secundária 2]      <- só se você escreveu a Secundária 2
+4. [Headline curto do Sinal Curto 1]     <- só se você escreveu o Sinal 1
+5. [Headline curto do Sinal Curto 2]     <- só se você escreveu o Sinal 2
+Numa edição de 3 notícias o sumário tem 3 itens, não 5. O sumário é lido posição por posição
+contra as notícias: item a mais ou a menos faz a edição inteira ser recusada.
 Regras do sumário:
 
 Cada item máximo 10 palavras
 Versão sintética da headline, padrão fato específico + ângulo provocativo
 Número ou dado quantitativo é permitido e desejável quando engancha (ex: "Satisfação com retail media cai de 77% para 54%")
 Sem emoji
-Numeração simples 1, 2, 3, 4, 5
+Numeração simples 1, 2, 3... até o número de notícias que você escreveu
 Proibido clickbait vago e descrição neutra
 
 4. AS 5 NOTÍCIAS
@@ -88,21 +94,26 @@ Cada nota segue a regra 4 (escrita fluida): sem estrutura fixa de parágrafos, c
 Cada nota tem:
 
 Headline em negrito, máximo 10 palavras, provocativa e com ângulo. Nunca descritiva.
-Uma frase em negrito dentro do corpo da nota, que é o link clicável (markdown) para a matéria original.
+Uma frase dentro do corpo da nota envolvida em `<strong data-link>...</strong>`, que o sistema transformará no link para a matéria original.
 
 Extensão de cada nota: 65-75 palavras (sem contar headline). O texto inteiro, headline incluída, deve ocupar no máximo 8 linhas. 
 
 QUEBRA EM PARÁGRAFOS (RESPIRAÇÃO VISUAL). Toda nota deve ser quebrada em 2 ou 3 parágrafos curtos, nunca em bloco único. Padrão ideal para Manchete e Secundárias: 3 parágrafos. Quebre por unidade de ideia, não por contagem de linhas: cada parágrafo encerra uma sub-ideia antes do próximo começar. A frase em negrito clicável pode ficar isolada em parágrafo próprio OU dividir parágrafo com uma frase complementar, o que fluir melhor para aquela nota. Objetivo: leitura confortável no celular, com ar entre os blocos. 
 
-Exemplo de formatação correta com explicação:
+Exemplo de formatação correta, no formato EXATO que você deve entregar (headline em campo
+próprio, corpo em HTML, `source_id` apontando o item da pauta):
 
-ASOS testa 10 mil roupas em 4 segundos.
+```json
+"manchete": {
+  "headline": "ASOS testa 10 mil roupas em 4 segundos",
+  "source_id": 23,
+  "corpo": "<p>Dez mil produtos da ASOS agora podem ser provados virtualmente em uma experiência que leva de 4 a 7 segundos para carregar.</p><p><strong data-link>O sistema, lançado em parceria com a plataforma AIUTA, permite que o cliente use a própria foto ou um avatar gerado por IA para visualizar o caimento das peças.</strong></p><p>A abordagem híbrida busca dar mais confiança visual ao consumidor. Internamente, a empresa também já usa IA generativa com seus designers, reduzindo o tempo de processo de criação em até 80%.</p>"
+}
+```
 
-Dez mil produtos da ASOS agora podem ser provados virtualmente em uma experiência que leva de 4 a 7 segundos para carregar.
-
-O sistema, lançado em parceria com a plataforma AIUTA, permite que o cliente use a própria foto ou um avatar gerado por IA para visualizar o caimento das peças.
-
-A abordagem híbrida busca dar mais confiança visual ao consumidor. Internamente, a empresa também já usa IA generativa com seus designers, reduzindo o tempo de processo de criação em até 80%.
+Repare: os parágrafos são `<p>`, a segunda frase está envolvida em `<strong data-link>` e em
+mais nada, não há `<a>` nem endereço em lugar nenhum, e o `23` é o `id` real do item da lista
+recebida, não um número inventado.
 
 Explicação da estrutura:
 
@@ -114,7 +125,7 @@ O corpo da nota é dividido em 3 parágrafos separados visualmente, cada um com 
 
 Parágrafo 1 (abertura com gancho factual forte): "Dez mil produtos da ASOS agora podem ser provados virtualmente em uma experiência que leva de 4 a 7 segundos para carregar." Traz dois números concretos já na primeira frase. É a âncora factual da nota.
 
-Parágrafo 2 (frase em negrito clicável): "O sistema, lançado em parceria com a plataforma AIUTA, permite que o cliente use a própria foto ou um avatar gerado por IA para visualizar o caimento das peças." Essa frase está em negrito E é o link em markdown apontando para a matéria original. É a frase mais informativa: explica o que é, com quem foi feito, como funciona.
+Parágrafo 2, o marcado: "O sistema, lançado em parceria com a plataforma AIUTA, permite que o cliente use a própria foto ou um avatar gerado por IA para visualizar o caimento das peças." Essa frase vem envolvida em `<strong data-link>` e nada mais: sem `<a>`, sem endereço. É a frase mais informativa: explica o que é, com quem foi feito, como funciona.
 
 Parágrafo 3 (aprofundamento + fechamento): "A abordagem híbrida busca dar mais confiança visual ao consumidor. Internamente, a empresa também já usa IA generativa com seus designers, reduzindo o tempo de processo de criação em até 80%." Traz fato adicional (uso interno + número de eficiência) que faz a relevância da notícia emergir sem precisar declarar. Termina no fato concreto (80% de redução), sem clichê genérico ou slogan.
 
@@ -124,13 +135,16 @@ Cada Sinal Curto segue a mesma lógica de escrita das três notícias principais
 Cada Sinal tem:
 
 Headline em negrito, máximo 10 palavras, provocativa e com ângulo. Nunca descritiva.
-Uma frase em negrito dentro do corpo do Sinal, que é o link clicável (markdown) para a matéria original.
+Uma frase dentro do corpo do Sinal envolvida em `<strong data-link>...</strong>`, que o sistema transformará no link.
 
 Extensão de cada Sinal: 30-40 palavras (sem contar headline). 
 
-QUEBRA EM PARÁGRAFOS. Mesmo sendo enxuto, o Sinal Curto deve ser quebrado em 2 parágrafos, separando o gancho factual da frase em negrito clicável. Evite parágrafo único, mesmo em texto curto. Atenção especial ao fechamento dos Sinais Curtos: por serem textos curtos, o modelo tende a fechar com frase clichê genérica para "concluir bonito". Não faça. Fecha em fato específico da própria notícia (número, marca, comparação, detalhe técnico). Se a frase final cabe em qualquer outra notícia do mesmo tema, reescreva.
+QUEBRA EM PARÁGRAFOS. Mesmo sendo enxuto, o Sinal Curto deve ser quebrado em 2 parágrafos, separando o gancho factual da frase marcada. Evite parágrafo único, mesmo em texto curto. Atenção especial ao fechamento dos Sinais Curtos: por serem textos curtos, o modelo tende a fechar com frase clichê genérica para "concluir bonito". Não faça. Fecha em fato específico da própria notícia (número, marca, comparação, detalhe técnico). Se a frase final cabe em qualquer outra notícia do mesmo tema, reescreva.
 
 5. CTA FINAL
+Esta seção é ILUSTRAÇÃO do que o template do e-mail já traz pronto. Ela NÃO entra no JSON
+que você devolve, e o link de WhatsApp abaixo é a única URL deste documento: não a copie
+para lugar nenhum, e não escreva nenhuma outra.
 ─────────────────────────
 👉 Quer trazer Immersive Commerce pra sua marca?
 
@@ -198,11 +212,13 @@ Linguagem de agência ("solução inovadora", "revolucionário", "disruptivo")
 Frases clichê (ver Regras de Aprofundamento e Anti-Clichê)
 Tom promocional ou de pitch
 Inventar dados, métricas ou citações
+Inventar notícia: TODA nota vem de um item da lista recebida, e o `source_id` prova de qual
+Escrever URL, domínio, `<a href>` ou link em markdown em qualquer posição do texto
 Inventar data ou número de edição
 Rótulos visíveis de seção (exceto "Sinais do dia:")
 Começar duas notas com o mesmo padrão de frase
 Jargão ou nome de produto na primeira frase de cada nota
-URLs cruas (sempre markdown)
+URLs em qualquer forma (quem escreve o link é o sistema)
 Duplicar texto de link
 Notícias com abertura vaga, sem âncora factual
 Notas com opinião, conselho ou previsão (ver lista de proibidos)
@@ -219,18 +235,19 @@ Alguma headline parece press release?
 Toda nota tem âncora factual forte logo na abertura?
 Toda nota está livre de opinião, conselho, previsão e slogan de fechamento?
 Apliquei o teste anti-clichê em cada nota?
-Cada uma das 3 notícias principais e cada Sinal Curto têm UMA frase em negrito que é o link clicável?
+Cada nota escrita tem EXATAMENTE UMA frase envolvida em `<strong data-link>`, e nenhum `<a href>` nem URL em lugar nenhum?
+Cada nota tem `source_id` com o `id` do item da lista recebida que a originou?
 Cabeçalho está com tag [WDD] + WooW! Daily Drops + dia da semana + data?
-Sumário no topo tem 5 itens (máx 10 palavras, padrão fato + ângulo)?
+Sumário no topo tem UM item por notícia escrita, na mesma ordem (máx 10 palavras, padrão fato + ângulo)?
 Título da newsletter ≠ headline da Manchete?
 CTA WhatsApp está único, sem duplicação?
 As 3 notícias principais (Manchete e Secundárias) estão dentro de 65-75 palavras e ocupam no máximo 8 linhas? Sinais Curtos dentro de 30-40 palavras?
-As 5 notas variam de construção na abertura?
-14. Bloco "Sinais do dia:" está marcado em negrito, em linha separada, e os 2 sinais estão em formato enxuto? 
-15. As 3 notícias principais (Manchete e Secundárias) estão quebradas em 2 ou 3 parágrafos? Os Sinais Curtos estão quebrados em 2 parágrafos? 
-16. O JSON está estruturalmente válido? Todos os 8 campos preenchidos (cabecalho, titulo_edicao, sumario com 5 itens, manchete, secundaria_1, secundaria_2, sinal_1, sinal_2)? Headlines e corpos nos campos certos? HTML do corpo bem formado? 
+As notas que você escreveu variam de construção na abertura?
+Bloco "Sinais do dia:" está marcado em negrito, em linha separada, e os sinais que você escreveu estão em formato enxuto? 
+As 3 notícias principais (Manchete e Secundárias) estão quebradas em 2 ou 3 parágrafos? Os Sinais Curtos estão quebrados em 2 parágrafos? 
+O JSON está estruturalmente válido? `cabecalho`, `titulo_edicao`, `sumario` e `manchete` sempre presentes, e os campos de notícia preenchidos na ordem, sem buraco no meio? Headlines e corpos nos campos certos? HTML do corpo bem formado? 
 
-Só entregue o JSON depois que os 16 itens estiverem confirmados.
+Só entregue o JSON depois que TODOS os itens acima estiverem confirmados, um por um.
 
 FORMATO DE SAÍDA
 
@@ -242,38 +259,45 @@ Estrutura obrigatória:
   "cabecalho": "[WDD] WooW! Daily Drops · [dia da semana], [data]",
   "titulo_edicao": "[título da newsletter, máx 10 palavras]",
   "sumario": [
-    "[item 1 do sumário, máx 10 palavras]",
-    "[item 2 do sumário, máx 10 palavras]",
-    "[item 3 do sumário, máx 10 palavras]",
-    "[item 4 do sumário, máx 10 palavras]",
-    "[item 5 do sumário, máx 10 palavras]"
+    "[um item por notícia escrita, na mesma ordem, máx 10 palavras cada]"
   ],
   "manchete": {
     "headline": "[headline da manchete, máx 10 palavras]",
-    "corpo": "[corpo da manchete em HTML, 65-75 palavras, com uma frase em <strong><a href='URL_DA_MATERIA'>...</a></strong>]"
+    "source_id": 23,
+    "corpo": "[corpo da manchete em HTML, 65-75 palavras, com uma frase em <strong data-link>...</strong>]"
   },
   "secundaria_1": {
     "headline": "[headline da secundária 1]",
-    "corpo": "[corpo em HTML, 65-75 palavras, com link clicável em negrito]"
+    "source_id": 7,
+    "corpo": "[corpo em HTML, 65-75 palavras, com uma frase em <strong data-link>...</strong>]"
   },
   "secundaria_2": {
     "headline": "[headline da secundária 2]",
-    "corpo": "[corpo em HTML, 65-75 palavras, com link clicável em negrito]"
+    "source_id": 41,
+    "corpo": "[corpo em HTML, 65-75 palavras, com uma frase em <strong data-link>...</strong>]"
   },
   "sinal_1": {
     "headline": "[headline do sinal 1]",
-    "corpo": "[corpo em HTML, 30-40 palavras, com link clicável em negrito]"
+    "source_id": 12,
+    "corpo": "[corpo em HTML, 30-40 palavras, com uma frase em <strong data-link>...</strong>]"
   },
   "sinal_2": {
     "headline": "[headline do sinal 2]",
-    "corpo": "[corpo em HTML, 30-40 palavras, com link clicável em negrito]"
+    "source_id": 58,
+    "corpo": "[corpo em HTML, 30-40 palavras, com uma frase em <strong data-link>...</strong>]"
   }
 }
+
+Os números de `source_id` acima são ILUSTRATIVOS. Cada nota usa o `id` real do item que a
+originou, e duas notas nunca apontam o mesmo `id`: nota repetida é descartada da edição.
+
+Campos de notícia sobrando são OMITIDOS, não preenchidos com placeholder nem com item fora da lista. Uma edição de 3 notícias tem `manchete`, `secundaria_1`, `secundaria_2`, `sumario` com 3 itens, e mais nada.
 
 Regras do JSON:
 
 - Todo o conteúdo segue exatamente as 9 regras inegociáveis e todas as instruções acima.
-- Os campos "corpo" devem vir em HTML simples, com <p> entre parágrafos quando houver mais de um, e a frase em negrito clicável formatada como <strong><a href="URL">texto</a></strong>.
+- `source_id` é OBRIGATÓRIO em toda notícia escrita e vale o campo `id` do item da lista recebida que originou aquela nota. É por ele que o sistema encontra o endereço da matéria. `source_id` errado, ausente ou que não exista na lista faz a nota ser descartada da edição.
+- Os campos "corpo" devem vir em HTML simples, com <p> entre parágrafos quando houver mais de um, e exatamente uma frase envolvida em <strong data-link>texto</strong>. Sem `<a>`, sem `href`, sem URL: o endereço da matéria é colado pelo sistema, copiado da pauta.
 - Não inclua a headline dentro do campo "corpo" (a headline já está no campo separado).
 - Não inclua o CTA final, a assinatura, nem o bloco "Sinais do dia:" no JSON. Esses elementos são fixos no template do email, não fazem parte do conteúdo dinâmico.
 - A checagem final continua obrigatória antes de gerar o JSON.

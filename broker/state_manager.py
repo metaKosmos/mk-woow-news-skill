@@ -114,6 +114,14 @@ class StateManager:
                 "image_ready": st.get("image_ready", False),
                 "open_rate": (st.get("metrics") or {}).get("open_rate"),
                 "html_versions": len(st.get("html_history") or []),  # nº de versões p/ o painel
+                # Procedência (MAR-483): quantas notícias saíram com fonte confirmada, quantas
+                # foram descartadas e quantos links ficaram suspeitos. Na queue porque é ela que
+                # o `woow status` e o painel leem — no estado da edição ninguém olha por conta.
+                "itens": (st.get("provenance") or {}).get("publicados"),
+                "descartados": len(((st.get("provenance") or {}).get("descartados")) or []),
+                "motivos": sorted({d.get("motivo", "") for d in
+                                   (((st.get("provenance") or {}).get("descartados")) or [])}),
+                "links_suspeitos": len(((st.get("link_check") or {}).get("suspeitos")) or []),
             })
         rows.sort(key=lambda r: r["edition"])
         queue = {"updated_at": _now_brt(), "editions": rows}

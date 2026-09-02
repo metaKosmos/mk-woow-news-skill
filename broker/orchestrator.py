@@ -272,6 +272,7 @@ def run_stage(edition, stage, payload):
 
         if stage == "research":
             out = _run_script(wd, "research.py", ["--edition", edition])
+            print(f"[research {edition}]\n{out.strip()}")
             _persist_content(sm, wd, edition)
             patch = {"stage": "researched", "date": _resolve_edition_date(edition)}
             health = _read_health(wd, edition)
@@ -285,7 +286,12 @@ def run_stage(edition, stage, payload):
             etype = sm.get_state(edition).get("type", "news_auto")
             if etype == "manual_html":
                 return _generate_manual_html(sm, wd, edition, payload)
-            _run_script(wd, "generate_content.py", ["--edition", edition])
+            # O stdout do pipeline vai para o log do Cloud Run. Sem isto ele era capturado
+            # e descartado, e os números que explicam a edição ("Candidatos: 72", "No
+            # território: N", "enviados ao Escritor: N", cada DESCARTADO) não existiam em
+            # lugar nenhum: em 02/09 não deu para saber quantos itens o Escritor recebeu no
+            # dia em que ele inventou uma notícia.
+            print(f"[generate {edition}]\n{_run_script(wd, 'generate_content.py', ['--edition', edition]).strip()}")
             _run_script(wd, "generate_image.py", ["--edition", edition])
             img_ext = next((e for e in ("jpg", "png")
                             if (wd / "renders" / f"woow-{edition}-manchete.{e}").exists()), None)
@@ -296,16 +302,25 @@ def run_stage(edition, stage, payload):
             _run_script(wd, "render_newsletter.py", render_args)
             usage = json.loads((wd / "content" / f"{edition}.usage.json").read_text(encoding="utf-8"))
             cost = compute_cost(usage, _rates())
-            meta = json.loads((wd / "content" / f"{edition}.json").read_text(encoding="utf-8")).get("meta", {})
+            gerado = json.loads((wd / "content" / f"{edition}.json").read_text(encoding="utf-8"))
+            meta = gerado.get("meta", {})
+            # Procedência de cada link publicado (MAR-483). Vai para o estado porque é no
+            # painel e no `queue` que alguém repara em item descartado ou link suspeito.
+            prov = gerado.get("provenance") or {}
             html_url, img_url = _publish_edition_html(sm, wd, edition, "news_auto")
             _persist_content(sm, wd, edition)
             sm.upsert_edition(edition, {"stage": "ready", "subject": meta.get("subject", ""),
                                         "image_ready": True, "tokens": usage, "cost": cost,
                                         "preview_url": html_url,
+                                        "provenance": prov,
+                                        "link_check": gerado.get("link_check"),
                                         "date": meta.get("edition_date") or _resolve_edition_date(edition)})
             _clear_stage_error(sm, edition)
             return {"stage": "ready", "preview_url": html_url, "image_url": img_url,
-                    "subject": meta.get("subject", ""), "cost_brl": round(cost["total_brl"], 4)}
+                    "subject": meta.get("subject", ""), "cost_brl": round(cost["total_brl"], 4),
+                    "itens": prov.get("publicados"),
+                    "descartados": [d.get("motivo") for d in prov.get("descartados") or []],
+                    "links_suspeitos": (gerado.get("link_check") or {}).get("suspeitos") or []}
 
         if stage == "send":
             st = sm.get_state(edition)

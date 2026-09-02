@@ -52,6 +52,24 @@ mas use o formato de data para as novas.)
 - `python3 scripts/woow.py schedule on | off` — liga/desliga o agendamento.
 - `python3 scripts/woow.py schedule auto-send on | off` — liga/desliga o disparo automático (sem revisão). Pede confirmação explícita ao ligar.
 
+## De onde vem o link de cada notícia (e por que a edição às vezes sai com 4)
+O link da matéria **não é escrito pelo modelo**. O Escritor devolve o `id` do item de pauta
+e marca a frase clicável; o endereço é copiado do feed RSS depois. Notícia que não prova de
+qual item veio é descartada da edição, e a edição sai com menos itens em vez de sair com um
+item inventado. O piso é 3: abaixo disso o `generate` falha de propósito e nada é enviado.
+
+Isso existe porque, até 02/09/2026, o modelo escrevia o próprio `<a href>` e três edições
+saíram com link para matéria que não existe (MAR-483). No `woow.py status`, a edição passa a
+mostrar `4 itens · 1 descartado(s): source_id_fora_do_pool` quando houve corte. Isso é a
+guarda funcionando, não erro. O detalhe por bloco (qual headline caiu, qual era o link) está
+em `queue`, no campo `provenance` de cada edição.
+
+A checagem de HTTP **registra e não bloqueia**. Publisher que barra IP de datacenter
+devolve 403 para link legítimo, então 403 aparece no relatório sem derrubar a notícia.
+
+Para auditar edições já publicadas (roda sem login, lê o bucket público):
+`bash broker/scripts/auditar-edicoes.sh 2026-09-02 2026-08-31`
+
 ## Listas e destinatários (ZMA, NÃO Zoho CRM)
 A lista de envio da newsletter vive no **Zoho Marketing Automation (ZMA)**, e a skill cria/lista/troca essas listas via broker (comandos acima). **Esta skill não usa Zoho CRM.** Se o seu ambiente Claude tiver algum conector `ZohoCRM_*` conectado, **ignore-o** — ele não tem nada a ver com a newsletter; criar algo no módulo "Campaigns" do CRM não vira lista de disparo. Para qualquer operação de lista, use sempre `scripts/woow.py` (list-lists / create-list / set-list), nunca ferramentas de CRM.
 
