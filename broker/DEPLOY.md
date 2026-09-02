@@ -55,6 +55,31 @@ Para rotacionar qualquer secret depois (sem tocar em nenhuma máquina):
 printf '%s' 'NOVO_VALOR' | gcloud secrets versions add zoho-ma-refresh-token --data-file=-
 ```
 
+### Webhook de aviso (opcional, MAR-484)
+
+O broker avisa num canal do Slack quando a edição do dia fica **pronta para revisão** ou
+quando o estágio **falha**. É o único sinal que existe antes do horário de entrega: o
+`cron_tick` marca o dia como rodado antes de executar e não tenta de novo, então sem isto
+a ausência do e-mail é a primeira notícia de que algo deu errado.
+
+O canal é escolhido ao criar o webhook no Slack (Incoming Webhooks do app da workspace):
+
+```bash
+printf '%s' 'https://hooks.slack.com/services/...' | gcloud secrets create SLACK_WEBHOOK_URL --data-file=-
+gcloud secrets add-iam-policy-binding SLACK_WEBHOOK_URL \
+  --member="serviceAccount:$RUNTIME_SA" --role="roles/secretmanager.secretAccessor"
+```
+
+**Sem o segredo o pipeline roda igual e o aviso simplesmente não sai** (o log do Cloud Run
+mostra `[aviso <edição>] sem_webhook`). Isso é de propósito: aviso é observabilidade, e uma
+falha de aviso nunca pode derrubar a edição do dia.
+
+Para trocar o canal depois, basta uma versão nova do segredo, sem redeploy:
+```bash
+printf '%s' 'https://hooks.slack.com/services/NOVO' | gcloud secrets versions add SLACK_WEBHOOK_URL --data-file=-
+```
+(o valor fica em cache na instância enquanto ela vive; uma revisão nova pega o valor novo.)
+
 ---
 
 ## 2. Buckets do GCS (estado privado + artefatos públicos)

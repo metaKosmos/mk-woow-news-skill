@@ -20,6 +20,7 @@ from state_manager import StateManager, GcsStore, BRT
 from cost_tracker import compute_cost
 import zma_metrics
 import secrets_store
+import notify
 
 class EntradaInvalida(ValueError):
     """Entrada do operador que não passa na validação (URL sem esquema, campo faltando).
@@ -1113,5 +1114,9 @@ def cron_tick():
         result = run_daily(edition, sched.get("auto_send"))
     except Exception as e:  # noqa: BLE001 — dia já claimado; erro fica no health, sem 500/retry
         result = {"edition": edition, "error": str(e)[:500]}
+    # Aviso ANTES do envio (MAR-484): edição em 'ready' esperando revisão, ou estágio que
+    # falhou. 'sent' não avisa, o e-mail já chegou a quem seria avisado. Nunca levanta.
+    aviso = notify.avisa(sm.get_state(edition), edition, result.get("error"))
+    print(f"[aviso {edition}] {aviso}")
     sm.sync_to_firebase()
-    return {"ran": True, **result}
+    return {"ran": True, "aviso": aviso, **result}
