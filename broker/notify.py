@@ -1,8 +1,8 @@
-"""notify.py — aviso de edição pronta ou falha, sempre ANTES do envio.
+"""notify.py: aviso de edição pronta ou falha, sempre ANTES do envio.
 
 Existe porque o tick diário roda sozinho e não fala com ninguém. Com `auto-send off` a
 edição para em `ready` esperando revisão, e nada avisa que ela está lá: a revisão dependia
-de alguém lembrar de rodar `woow status`. Quando o estágio falha é pior — o `cron_tick`
+de alguém lembrar de rodar `woow status`. Quando o estágio falha é pior. O `cron_tick`
 marca o dia como rodado ANTES de executar, engole a exceção e devolve 200 ao Cloud
 Scheduler, então não há nem nova tentativa nem sinal.
 
@@ -41,14 +41,14 @@ def monta_aviso(edition, estado, erro=None):
     `sent` não gera aviso de propósito: o e-mail já chegou a quem seria avisado."""
     estado = estado or {}
     if erro:
-        return (f"*WooW! Daily Drops {edition} — NÃO foi gerada*\n"
+        return (f"*WooW! Daily Drops {edition}: NÃO foi gerada*\n"
                 f"```{str(erro)[:600]}```\n"
                 f"O dia já foi marcado como rodado, então o cron não tenta de novo. "
                 f"Para rodar na mão antes do horário de entrega:\n"
                 f"`python3 scripts/woow.py run --edition {edition}`")
     if estado.get("stage") != "ready":
         return None
-    linhas = [f"*WooW! Daily Drops {edition} — pronta para revisão*"]
+    linhas = [f"*WooW! Daily Drops {edition}: pronta para revisão*"]
     if estado.get("subject"):
         linhas.append(f"Assunto: {estado['subject']}")
     resumo = _linha_de_procedencia(estado)
