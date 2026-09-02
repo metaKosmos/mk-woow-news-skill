@@ -272,6 +272,7 @@ def run_stage(edition, stage, payload):
 
         if stage == "research":
             out = _run_script(wd, "research.py", ["--edition", edition])
+            print(f"[research {edition}]\n{out.strip()}")
             _persist_content(sm, wd, edition)
             patch = {"stage": "researched", "date": _resolve_edition_date(edition)}
             health = _read_health(wd, edition)
@@ -285,7 +286,12 @@ def run_stage(edition, stage, payload):
             etype = sm.get_state(edition).get("type", "news_auto")
             if etype == "manual_html":
                 return _generate_manual_html(sm, wd, edition, payload)
-            _run_script(wd, "generate_content.py", ["--edition", edition])
+            # O stdout do pipeline vai para o log do Cloud Run. Sem isto ele era capturado
+            # e descartado, e os números que explicam a edição ("Candidatos: 72", "No
+            # território: N", "enviados ao Escritor: N", cada DESCARTADO) não existiam em
+            # lugar nenhum: em 02/09 não deu para saber quantos itens o Escritor recebeu no
+            # dia em que ele inventou uma notícia.
+            print(f"[generate {edition}]\n{_run_script(wd, 'generate_content.py', ['--edition', edition]).strip()}")
             _run_script(wd, "generate_image.py", ["--edition", edition])
             img_ext = next((e for e in ("jpg", "png")
                             if (wd / "renders" / f"woow-{edition}-manchete.{e}").exists()), None)

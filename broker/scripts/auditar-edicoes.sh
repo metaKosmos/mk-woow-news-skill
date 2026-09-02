@@ -22,14 +22,21 @@ IGNORAR='wa\.me|UNSUBSCRIBE|mailto:|metakosmos\.com\.br|linkedin\.com|instagram\
 
 [ $# -gt 0 ] || { echo "uso: $0 <edição> [edição...]   (ex: 2026-09-02)" >&2; exit 2; }
 
-total=0; suspeitos=0
+total=0; suspeitos=0; falhas=0
 for ed in "$@"; do
   url="https://storage.googleapis.com/${BUCKET}/nl/${ed}.html"
-  html="$(curl -sS --max-time 30 "$url")" || { echo "=== $ed === não baixou ($url)"; continue; }
+  # Falha de download NÃO pode virar "0 suspeitos": silêncio por instrumento quebrado é
+  # indistinguível de edição limpa, e é essa confusão que o script existe para não fazer.
+  if ! html="$(curl -fsS --max-time 30 "$url")"; then
+    echo "=== $ed === NÃO BAIXOU ($url)"; falhas=$((falhas + 1)); continue
+  fi
   echo "=== $ed ==="
   links="$(printf '%s' "$html" | grep -oE "href=['\"][^'\"]+['\"]" | sed "s/^href=//; s/[\"']//g" \
            | grep -Ev "$IGNORAR" | sort -u)"
-  [ -n "$links" ] || { echo "  nenhum link de matéria encontrado"; continue; }
+  if [ -z "$links" ]; then
+    echo "  NENHUM link de matéria encontrado (edição vazia ou HTML inesperado)"
+    falhas=$((falhas + 1)); continue
+  fi
   while IFS= read -r link; do
     total=$((total + 1))
     caminho="$(printf '%s' "$link" | sed -E 's#^https?://[^/]+##')"
@@ -49,5 +56,5 @@ for ed in "$@"; do
   done <<< "$links"
 done
 echo
-echo "$total link(s) auditado(s), $suspeitos suspeito(s)"
-[ "$suspeitos" -eq 0 ]
+echo "$total link(s) auditado(s), $suspeitos suspeito(s), $falhas edição(ões) não auditada(s)"
+[ "$suspeitos" -eq 0 ] && [ "$falhas" -eq 0 ]

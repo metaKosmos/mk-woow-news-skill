@@ -61,7 +61,10 @@ MIN_BLOCOS = 3
 # o campo `link` do item de pauta. O Escritor não recebe URL nenhuma (ver write_edition).
 LINK_MARK_RE = re.compile(r"<strong\b[^>]*\bdata-link\b[^>]*>(.*?)</strong>",
                           re.DOTALL | re.IGNORECASE)
-ANCHOR_RE = re.compile(r"""<a\b[^>]*\bhref\s*=\s*["']([^"']*)["']""", re.IGNORECASE)
+# href com aspas duplas, simples OU sem aspas: <a href=https://x> é HTML válido o bastante
+# para o cliente de e-mail abrir, então tem que ser visível para a guarda de procedência.
+ANCHOR_RE = re.compile(
+    r"""<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.IGNORECASE)
 
 # UA de browser na checagem de link: publisher que barra agente desconhecido devolveria
 # 403 e sujaria o relatório. A checagem registra, não bloqueia.
@@ -218,6 +221,19 @@ def _norm_link(u):
     return html.unescape((u or "").strip()).rstrip("/").lower()
 
 
+def _hrefs(corpo):
+    """Todos os destinos de <a> do corpo, com ou sem aspas."""
+    return [next(g for g in m.groups() if g is not None) for m in ANCHOR_RE.finditer(corpo or "")]
+
+
+def _texto(valor):
+    """Campo de texto puro que o template interpola SEM escape (autoescape está off em
+    render_newsletter.jinja_env). Tag aqui vira HTML vivo: um <a href> no sumário, na
+    headline ou no título sai clicável no e-mail com procedência zero, que é o mesmo dano
+    que bind_links existe para impedir."""
+    return strip_html(valor) if isinstance(valor, str) else ""
+
+
 def _descarte(campo, headline, source_id, motivo, detalhe=""):
     return {"campo": campo, "headline": headline, "source_id": source_id,
             "motivo": motivo, "detalhe": detalhe}
@@ -241,7 +257,7 @@ def bind_links(content, pool):
     a ser permitida. Bloco PRESENTE que não prova de onde veio é descartado, porque foi
     exatamente assim que item sem fonte virou e-mail enviado (MAR-483)."""
     by_id = {_como_id(c.get("id")): c for c in pool if _como_id(c.get("id")) is not None}
-    blocos, descartes = [], []
+    blocos, descartes, usados = [], [], set()
     for campo in BLOCK_FIELDS:
         bloco = content.get(campo)
         if not isinstance(bloco, dict):
@@ -255,6 +271,11 @@ def bind_links(content, pool):
         item = by_id.get(sid)
         if item is None:
             descartes.append(_descarte(campo, headline, sid, "source_id_fora_do_pool"))
+            continue
+        if sid in usados:
+            # duas notas da mesma matéria sairiam com o MESMO link e procedência limpa:
+            # a edição pareceria ter 5 fontes tendo uma só.
+            descartes.append(_descarte(campo, headline, sid, "source_id_repetido"))
             continue
         link = (item.get("link") or "").strip()
         if not link:
@@ -273,6 +294,7 @@ def bind_links(content, pool):
         href = html.escape(link, quote=True)
         corpo = LINK_MARK_RE.sub(
             lambda m: f'<strong><a href="{href}">{m.group(1)}</a></strong>', corpo, count=1)
+        usados.add(sid)
         blocos.append({"campo": campo, "headline": headline, "corpo": corpo,
                        "source_id": sid, "source": item.get("source", ""),
                        "link": link, "titulo_fonte": item.get("title", "")})
@@ -286,7 +308,7 @@ def enforce_provenance(blocos, pool):
     permitidos = {_norm_link(c.get("link")) for c in pool if (c.get("link") or "").strip()}
     ok, descartes = [], []
     for b in blocos:
-        fora = [h for h in ANCHOR_RE.findall(b["corpo"]) if _norm_link(h) not in permitidos]
+        fora = [h for h in _hrefs(b["corpo"]) if _norm_link(h) not in permitidos]
         if fora:
             descartes.append(_descarte(b["campo"], b["headline"], b["source_id"],
                                        "link_fora_do_pool", fora[0][:200]))
@@ -303,11 +325,13 @@ def recompose(content, blocos):
     volta como veio e o validate() recusa: adivinhar a correspondência publicaria chamada
     de um item em cima de outro."""
     novo = {k: v for k, v in content.items() if k not in BLOCK_FIELDS}
+    novo["cabecalho"] = _texto(content.get("cabecalho"))
+    novo["titulo_edicao"] = _texto(content.get("titulo_edicao"))
     entregues = [c for c in BLOCK_FIELDS if isinstance(content.get(c), dict)]
     sumario = content.get("sumario")
-    sumario = list(sumario) if isinstance(sumario, list) else []
+    sumario = [_texto(s) for s in sumario] if isinstance(sumario, list) else []
     for i, b in enumerate(blocos):
-        novo[BLOCK_FIELDS[i]] = {"headline": b["headline"], "corpo": b["corpo"],
+        novo[BLOCK_FIELDS[i]] = {"headline": _texto(b["headline"]), "corpo": b["corpo"],
                                  "source_id": b["source_id"]}
     if len(sumario) == len(entregues):
         pos = {campo: i for i, campo in enumerate(entregues)}
@@ -321,12 +345,22 @@ def apply_provenance(content, pool):
     """bind -> enforce -> recompose. Devolve (content, provenance)."""
     blocos, d1 = bind_links(content, pool)
     blocos, d2 = enforce_provenance(blocos, pool)
+    descartes = d1 + d2
     novo = recompose(content, blocos)
+    # `titulo_edicao` é o ASSUNTO do e-mail e o H1 da página, e foi escrito para a manchete.
+    # Se ela caiu, outra notícia subiu para o topo e o assunto passa a prometer matéria que
+    # não está dentro: o mesmo dano da MAR-483 entrando pela porta do lado. A headline da
+    # manchete que sobrou é menos trabalhada como chamada, mas é verdadeira.
+    titulo_substituido = False
+    if blocos and any(d["campo"] == "manchete" for d in descartes):
+        novo["titulo_edicao"] = novo["manchete"]["headline"]
+        titulo_substituido = True
     prov = {"pool_size": len(pool), "publicados": len(blocos),
+            "titulo_substituido": titulo_substituido,
             "itens": [{"campo": BLOCK_FIELDS[i], "source_id": b["source_id"],
                        "source": b["source"], "link": b["link"],
                        "titulo_fonte": b["titulo_fonte"]} for i, b in enumerate(blocos)],
-            "descartados": d1 + d2}
+            "descartados": descartes}
     return novo, prov
 
 
@@ -370,17 +404,53 @@ def check_links(itens, timeout=8):
     return rel
 
 
-def validate(content):
+def relata_descartes(provenance):
+    """Imprime o que foi descartado e por quê, em stdout E stderr.
+
+    O stderr não é redundância: quando validate() derruba o script, `_run_script` anexa
+    apenas `proc.stderr` ao RuntimeError que vira `health.last_error`, então o motivo
+    impresso só em stdout some justamente no caso em que ele importa."""
+    for d in provenance.get("descartados") or []:
+        linha = f"  DESCARTADO {d['campo']} ({d['motivo']}): {d['headline']}"
+        print(linha)
+        print(linha, file=sys.stderr)
+    if provenance.get("titulo_substituido"):
+        aviso = "  AVISO: a manchete original caiu; o assunto virou a headline da manchete nova"
+        print(aviso)
+        print(aviso, file=sys.stderr)
+    redigidos = provenance.get("publicados", 0) + len(provenance.get("descartados") or [])
+    print(f"Itens com fonte confirmada: {provenance.get('publicados', 0)} de {redigidos} redigidos")
+
+
+def _diagnostico(provenance):
+    """Diz ONDE olhar quando a edição é recusada. Sem isto a mensagem sugeria ampliar a
+    janela de dias, que é o conselho errado no caso mais provável: pauta cheia e o Escritor
+    ignorando a marcação do prompt."""
+    motivos = [d.get("motivo") for d in ((provenance or {}).get("descartados") or [])]
+    if not motivos:
+        return "Nenhuma nota foi redigida: veja a resposta do modelo."
+    do_prompt = {"sem_marcador_de_link", "marcadores_de_link_demais", "source_id_ausente"}
+    if set(motivos) <= do_prompt:
+        return (f"Todos os {len(motivos)} descartes são de marcação ({', '.join(sorted(set(motivos)))}): "
+                f"o Escritor não seguiu o prompt. NÃO é escassez de pauta, não adianta mexer em --days.")
+    return f"Motivos dos {len(motivos)} descartes: {', '.join(sorted(set(motivos)))}."
+
+
+def validate(content, provenance=None):
     """Recusa a edição em vez de publicar item sem fonte. O generate falhando é o que
     impede o envio: run_daily encadeia research -> generate -> send, e a exceção para
-    antes do send."""
-    missing = [f for f in REQUIRED_FIELDS if f not in content]
-    if missing:
-        sys.exit(f"Conteúdo gerado sem os campos: {missing}")
+    antes do send.
+
+    A contagem de blocos vem ANTES dos campos obrigatórios de propósito: com zero blocos a
+    `manchete` também some, e a mensagem "sem os campos: ['manchete']" mandava procurar JSON
+    quebrado do modelo em vez do motivo real."""
     blocos = [c for c in BLOCK_FIELDS if isinstance(content.get(c), dict)]
     if len(blocos) < MIN_BLOCOS:
         sys.exit(f"Só {len(blocos)} item(ns) com fonte confirmada, e o piso é {MIN_BLOCOS}. "
-                 f"Edição NÃO publicada. Amplie a janela (--days) ou revise as fontes.")
+                 f"Edição NÃO publicada. {_diagnostico(provenance)}")
+    missing = [f for f in REQUIRED_FIELDS if f not in content]
+    if missing:
+        sys.exit(f"Conteúdo gerado sem os campos: {missing}")
     if blocos != BLOCK_FIELDS[:len(blocos)]:
         sys.exit(f"Blocos fora de ordem depois do corte: {blocos}")
     if not isinstance(content.get("sumario"), list) or len(content["sumario"]) != len(blocos):
@@ -464,11 +534,8 @@ def main():
 
     content = write_edition(gcfg, key, load_prompt("write.md"), pool, edition_date)
     content, provenance = apply_provenance(content, pool)
-    for d in provenance["descartados"]:
-        print(f"  DESCARTADO {d['campo']} ({d['motivo']}): {d['headline']}")
-    redigidos = provenance["publicados"] + len(provenance["descartados"])
-    print(f"Itens com fonte confirmada: {provenance['publicados']} de {redigidos} redigidos")
-    validate(content)
+    relata_descartes(provenance)
+    validate(content, provenance)
 
     links = None
     if not args.skip_link_check:

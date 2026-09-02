@@ -46,7 +46,7 @@ Formato:
 [WDD] WooW! Daily Drops · [dia da semana], [data por extenso]
 A DATA DA EDIÇÃO está fornecida no final do prompt. Use exatamente essa data, sem inventar. Não inclua número de edição.
 2. TÍTULO DA NEWSLETTER (funciona como subject line do e-mail)
-Analise as 5 notícias selecionadas e escolha o modelo de título mais adequado:
+Analise as notícias que você selecionou e escolha o modelo de título mais adequado. O título tem que caber na MANCHETE: se a manchete for descartada por falta de fonte, o sistema troca o assunto do e-mail pela headline da manchete que sobrar, e um título escrito sobre outra notícia viraria promessa vazia.
 MODELO A (Dado chocante): use quando houver número forte. Abra com o dado, sem explicar.
 Exemplos: "375 milhões de anúncios barrados por IA só no Brasil", "Uma IA fez em 3 segundos o que seu time faz em 3 dias"
 MODELO B (Mistério com promessa): use quando houver case de marca, resultado concreto. Esconda o "quem" ou o "como", revele o resultado.
@@ -61,20 +61,22 @@ Nunca descritivo
 O título E a headline da Manchete NÃO podem dizer a mesma coisa. Se forem sinônimos, reescreva o título com outro ângulo.
 
 3. SUMÁRIO NO TOPO
-Logo após o título, antes da Manchete:
+Logo após o título, antes da Manchete, UM item por notícia escrita, na mesma ordem em que elas aparecem:
 Hoje no Drop:
 1. [Headline curto da Manchete]
 2. [Headline curto da Secundária 1]
-3. [Headline curto da Secundária 2]
-4. [Headline curto do Sinal Curto 1]
-5. [Headline curto do Sinal Curto 2]
+3. [Headline curto da Secundária 2]      <- só se você escreveu a Secundária 2
+4. [Headline curto do Sinal Curto 1]     <- só se você escreveu o Sinal 1
+5. [Headline curto do Sinal Curto 2]     <- só se você escreveu o Sinal 2
+Numa edição de 3 notícias o sumário tem 3 itens, não 5. O sumário é lido posição por posição
+contra as notícias: item a mais ou a menos faz a edição inteira ser recusada.
 Regras do sumário:
 
 Cada item máximo 10 palavras
 Versão sintética da headline, padrão fato específico + ângulo provocativo
 Número ou dado quantitativo é permitido e desejável quando engancha (ex: "Satisfação com retail media cai de 77% para 54%")
 Sem emoji
-Numeração simples 1, 2, 3, 4, 5
+Numeração simples 1, 2, 3... até o número de notícias que você escreveu
 Proibido clickbait vago e descrição neutra
 
 4. AS 5 NOTÍCIAS
@@ -98,15 +100,20 @@ Extensão de cada nota: 65-75 palavras (sem contar headline). O texto inteiro, h
 
 QUEBRA EM PARÁGRAFOS (RESPIRAÇÃO VISUAL). Toda nota deve ser quebrada em 2 ou 3 parágrafos curtos, nunca em bloco único. Padrão ideal para Manchete e Secundárias: 3 parágrafos. Quebre por unidade de ideia, não por contagem de linhas: cada parágrafo encerra uma sub-ideia antes do próximo começar. A frase em negrito clicável pode ficar isolada em parágrafo próprio OU dividir parágrafo com uma frase complementar, o que fluir melhor para aquela nota. Objetivo: leitura confortável no celular, com ar entre os blocos. 
 
-Exemplo de formatação correta com explicação:
+Exemplo de formatação correta, no formato EXATO que você deve entregar (headline em campo
+próprio, corpo em HTML, `source_id` apontando o item da pauta):
 
-ASOS testa 10 mil roupas em 4 segundos.
+```json
+"manchete": {
+  "headline": "ASOS testa 10 mil roupas em 4 segundos",
+  "source_id": 23,
+  "corpo": "<p>Dez mil produtos da ASOS agora podem ser provados virtualmente em uma experiência que leva de 4 a 7 segundos para carregar.</p><p><strong data-link>O sistema, lançado em parceria com a plataforma AIUTA, permite que o cliente use a própria foto ou um avatar gerado por IA para visualizar o caimento das peças.</strong></p><p>A abordagem híbrida busca dar mais confiança visual ao consumidor. Internamente, a empresa também já usa IA generativa com seus designers, reduzindo o tempo de processo de criação em até 80%.</p>"
+}
+```
 
-Dez mil produtos da ASOS agora podem ser provados virtualmente em uma experiência que leva de 4 a 7 segundos para carregar.
-
-O sistema, lançado em parceria com a plataforma AIUTA, permite que o cliente use a própria foto ou um avatar gerado por IA para visualizar o caimento das peças.
-
-A abordagem híbrida busca dar mais confiança visual ao consumidor. Internamente, a empresa também já usa IA generativa com seus designers, reduzindo o tempo de processo de criação em até 80%.
+Repare: os parágrafos são `<p>`, a segunda frase está envolvida em `<strong data-link>` e em
+mais nada, não há `<a>` nem endereço em lugar nenhum, e o `23` é o `id` real do item da lista
+recebida, não um número inventado.
 
 Explicação da estrutura:
 
@@ -118,7 +125,7 @@ O corpo da nota é dividido em 3 parágrafos separados visualmente, cada um com 
 
 Parágrafo 1 (abertura com gancho factual forte): "Dez mil produtos da ASOS agora podem ser provados virtualmente em uma experiência que leva de 4 a 7 segundos para carregar." Traz dois números concretos já na primeira frase. É a âncora factual da nota.
 
-Parágrafo 2 (frase marcada): "O sistema, lançado em parceria com a plataforma AIUTA, permite que o cliente use a própria foto ou um avatar gerado por IA para visualizar o caimento das peças." Essa frase vem envolvida em `<strong data-link>` e nada mais: sem `<a>`, sem endereço. É a frase mais informativa: explica o que é, com quem foi feito, como funciona.
+Parágrafo 2, o marcado: "O sistema, lançado em parceria com a plataforma AIUTA, permite que o cliente use a própria foto ou um avatar gerado por IA para visualizar o caimento das peças." Essa frase vem envolvida em `<strong data-link>` e nada mais: sem `<a>`, sem endereço. É a frase mais informativa: explica o que é, com quem foi feito, como funciona.
 
 Parágrafo 3 (aprofundamento + fechamento): "A abordagem híbrida busca dar mais confiança visual ao consumidor. Internamente, a empresa também já usa IA generativa com seus designers, reduzindo o tempo de processo de criação em até 80%." Traz fato adicional (uso interno + número de eficiência) que faz a relevância da notícia emergir sem precisar declarar. Termina no fato concreto (80% de redução), sem clichê genérico ou slogan.
 
@@ -135,6 +142,9 @@ Extensão de cada Sinal: 30-40 palavras (sem contar headline).
 QUEBRA EM PARÁGRAFOS. Mesmo sendo enxuto, o Sinal Curto deve ser quebrado em 2 parágrafos, separando o gancho factual da frase marcada. Evite parágrafo único, mesmo em texto curto. Atenção especial ao fechamento dos Sinais Curtos: por serem textos curtos, o modelo tende a fechar com frase clichê genérica para "concluir bonito". Não faça. Fecha em fato específico da própria notícia (número, marca, comparação, detalhe técnico). Se a frase final cabe em qualquer outra notícia do mesmo tema, reescreva.
 
 5. CTA FINAL
+Esta seção é ILUSTRAÇÃO do que o template do e-mail já traz pronto. Ela NÃO entra no JSON
+que você devolve, e o link de WhatsApp abaixo é a única URL deste documento: não a copie
+para lugar nenhum, e não escreva nenhuma outra.
 ─────────────────────────
 👉 Quer trazer Immersive Commerce pra sua marca?
 
@@ -232,12 +242,12 @@ Sumário no topo tem UM item por notícia escrita, na mesma ordem (máx 10 palav
 Título da newsletter ≠ headline da Manchete?
 CTA WhatsApp está único, sem duplicação?
 As 3 notícias principais (Manchete e Secundárias) estão dentro de 65-75 palavras e ocupam no máximo 8 linhas? Sinais Curtos dentro de 30-40 palavras?
-As 5 notas variam de construção na abertura?
-14. Bloco "Sinais do dia:" está marcado em negrito, em linha separada, e os 2 sinais estão em formato enxuto? 
-15. As 3 notícias principais (Manchete e Secundárias) estão quebradas em 2 ou 3 parágrafos? Os Sinais Curtos estão quebrados em 2 parágrafos? 
-16. O JSON está estruturalmente válido? `cabecalho`, `titulo_edicao`, `sumario` e `manchete` sempre presentes, e os campos de notícia preenchidos na ordem, sem buraco no meio? Headlines e corpos nos campos certos? HTML do corpo bem formado? 
+As notas que você escreveu variam de construção na abertura?
+Bloco "Sinais do dia:" está marcado em negrito, em linha separada, e os sinais que você escreveu estão em formato enxuto? 
+As 3 notícias principais (Manchete e Secundárias) estão quebradas em 2 ou 3 parágrafos? Os Sinais Curtos estão quebrados em 2 parágrafos? 
+O JSON está estruturalmente válido? `cabecalho`, `titulo_edicao`, `sumario` e `manchete` sempre presentes, e os campos de notícia preenchidos na ordem, sem buraco no meio? Headlines e corpos nos campos certos? HTML do corpo bem formado? 
 
-Só entregue o JSON depois que os 16 itens estiverem confirmados.
+Só entregue o JSON depois que TODOS os itens acima estiverem confirmados, um por um.
 
 FORMATO DE SAÍDA
 
@@ -253,30 +263,33 @@ Estrutura obrigatória:
   ],
   "manchete": {
     "headline": "[headline da manchete, máx 10 palavras]",
-    "source_id": 0,
+    "source_id": 23,
     "corpo": "[corpo da manchete em HTML, 65-75 palavras, com uma frase em <strong data-link>...</strong>]"
   },
   "secundaria_1": {
     "headline": "[headline da secundária 1]",
-    "source_id": 0,
+    "source_id": 7,
     "corpo": "[corpo em HTML, 65-75 palavras, com uma frase em <strong data-link>...</strong>]"
   },
   "secundaria_2": {
     "headline": "[headline da secundária 2]",
-    "source_id": 0,
+    "source_id": 41,
     "corpo": "[corpo em HTML, 65-75 palavras, com uma frase em <strong data-link>...</strong>]"
   },
   "sinal_1": {
     "headline": "[headline do sinal 1]",
-    "source_id": 0,
+    "source_id": 12,
     "corpo": "[corpo em HTML, 30-40 palavras, com uma frase em <strong data-link>...</strong>]"
   },
   "sinal_2": {
     "headline": "[headline do sinal 2]",
-    "source_id": 0,
+    "source_id": 58,
     "corpo": "[corpo em HTML, 30-40 palavras, com uma frase em <strong data-link>...</strong>]"
   }
 }
+
+Os números de `source_id` acima são ILUSTRATIVOS. Cada nota usa o `id` real do item que a
+originou, e duas notas nunca apontam o mesmo `id`: nota repetida é descartada da edição.
 
 Campos de notícia sobrando são OMITIDOS, não preenchidos com placeholder nem com item fora da lista. Uma edição de 3 notícias tem `manchete`, `secundaria_1`, `secundaria_2`, `sumario` com 3 itens, e mais nada.
 

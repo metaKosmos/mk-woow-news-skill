@@ -315,3 +315,202 @@ def test_generate_espelha_procedencia_e_links_no_estado(tmp_path, monkeypatch):
     st = sm.get_state("2026-09-03")
     assert st["provenance"]["publicados"] == 4
     assert st["link_check"]["suspeitos"][0]["campo"] == "manchete"
+
+
+def test_generate_emite_o_stdout_do_pipeline_no_log(tmp_path, monkeypatch, capsys):
+    """Os números do funil (candidatos -> território -> pool -> publicados) e cada DESCARTADO
+    só existem no stdout do subprocess. Capturado e descartado, como era antes, não dava para
+    responder 'quantos itens o Escritor recebeu no dia em que inventou uma notícia'."""
+    import json
+    import orchestrator
+    from state_manager import StateManager, LocalStore
+
+    sm = StateManager(LocalStore(tmp_path))
+    wd = tmp_path / "wd"
+    (wd / "renders").mkdir(parents=True)
+    (wd / "content").mkdir()
+
+    def _fake_run(w, script, args):
+        if script == "generate_content.py":
+            (w / "content" / "2026-09-03.json").write_text(json.dumps(
+                {"meta": {}, "content": {}, "provenance": {"publicados": 4, "descartados": []},
+                 "link_check": None}), encoding="utf-8")
+            (w / "content" / "2026-09-03.usage.json").write_text("{}", encoding="utf-8")
+            return "Candidatos: 72\nNo território: 9\n  DESCARTADO sinal_2 (source_id_fora_do_pool): H"
+        return ""
+
+    monkeypatch.setattr(orchestrator, "_sm", lambda: sm)
+    monkeypatch.setattr(orchestrator, "_workdir", lambda ed: wd)
+    monkeypatch.setattr(orchestrator, "_restore_content", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator, "_run_script", _fake_run)
+    monkeypatch.setattr(orchestrator, "_publish_edition_html",
+                        lambda s, w, ed, src, by="": ("https://pub/x.html", ""))
+
+    orchestrator.run_stage("2026-09-03", "generate", {})
+    saida = capsys.readouterr().out
+    assert "Candidatos: 72" in saida
+    assert "DESCARTADO sinal_2" in saida
+
+
+# ------------------------------------------- achados da revisão adversarial (MAR-483)
+def test_source_id_repetido_derruba_a_segunda_nota():
+    """Cinco notas apontando o mesmo item sairiam com o MESMO link e `descartados: []`:
+    a edição pareceria ter cinco fontes tendo uma só."""
+    c = _content([2, 2, 2, 2, 2])
+    out, prov = gc.apply_provenance(c, _pool(5))
+    assert prov["publicados"] == 1
+    assert [d["motivo"] for d in prov["descartados"]] == ["source_id_repetido"] * 4
+    with pytest.raises(SystemExit):
+        gc.validate(out, prov)
+
+
+def test_source_id_repetido_preserva_a_primeira_ocorrencia():
+    c = _content([0, 1, 1, 3, 4])
+    out, prov = gc.apply_provenance(c, _pool(5))
+    assert prov["publicados"] == 4
+    assert [i["source_id"] for i in prov["itens"]] == [0, 1, 3, 4]
+
+
+def test_href_sem_aspas_nao_atravessa_a_guarda():
+    """<a href=https://x> é HTML que o cliente de e-mail abre. A regex antiga só via
+    href entre aspas, então esse link inventado saía clicável."""
+    c = _content([0, 1, 2, 3, 4])
+    c["sinal_1"]["corpo"] = ('<p>g</p><p><strong data-link>f</strong> '
+                             '<a href=https://news.shopify.com>x</a></p>')
+    out, prov = gc.apply_provenance(c, _pool(5))
+    assert [d["motivo"] for d in prov["descartados"]] == ["link_fora_do_pool"]
+    assert "news.shopify.com" not in str(out)
+
+
+@pytest.mark.parametrize("campo", ["titulo_edicao", "cabecalho"])
+def test_tag_em_campo_de_texto_e_removida(campo):
+    """O template interpola estes campos SEM escape (autoescape off), então tag aqui vira
+    HTML vivo no e-mail."""
+    c = _content([0, 1, 2, 3, 4])
+    c[campo] = "antes <a href='https://news.shopify.com'>clique</a> depois"
+    out, _ = gc.apply_provenance(c, _pool(5))
+    assert "<a" not in out[campo] and "news.shopify.com" not in out[campo]
+    assert "antes" in out[campo] and "clique" in out[campo]
+
+
+def test_tag_no_sumario_e_na_headline_e_removida():
+    c = _content([0, 1, 2, 3, 4],
+                 sumario=["um", "<a href='https://news.shopify.com'>dois</a>", "três", "quatro", "cinco"])
+    c["manchete"]["headline"] = "<a href='https://x.com'>manchete</a>"
+    out, _ = gc.apply_provenance(c, _pool(5))
+    assert "<a" not in " ".join(out["sumario"])
+    assert "news.shopify.com" not in " ".join(out["sumario"])
+    assert "<a" not in out["manchete"]["headline"]
+
+
+def test_manchete_descartada_troca_o_assunto_do_email():
+    """O assunto foi escrito para a manchete. Se ela cai, outra notícia sobe ao topo e o
+    assunto passa a prometer matéria que não está dentro."""
+    c = _content([0, 1, 2, 3, 4])
+    c["titulo_edicao"] = "Amazon liga provador 3D em 12 mil SKUs"
+    c["manchete"]["corpo"] = "<p>nota sem marcador</p>"
+    out, prov = gc.apply_provenance(c, _pool(5))
+    assert prov["titulo_substituido"] is True
+    assert out["titulo_edicao"] == out["manchete"]["headline"]
+    assert "Amazon" not in out["titulo_edicao"]
+
+
+def test_assunto_intacto_quando_a_manchete_sobrevive():
+    """Controle positivo: sem descarte na manchete, o título trabalhado do Escritor fica."""
+    c = _content([0, 1, 2, 3, 4])
+    c["titulo_edicao"] = "Um título bem trabalhado"
+    out, prov = gc.apply_provenance(c, _pool(5))
+    assert prov["titulo_substituido"] is False
+    assert out["titulo_edicao"] == "Um título bem trabalhado"
+
+
+def test_zero_blocos_cai_na_mensagem_do_piso_e_acusa_o_prompt():
+    """Formato antigo (<strong><a href>) é o que o modelo produziu todo dia até 02/09: é o
+    modo de falha mais provável na primeira manhã. A mensagem tem que dizer isso, não
+    mandar ampliar a janela de dias."""
+    c = _content([0, 1, 2, 3, 4])
+    for campo in gc.BLOCK_FIELDS:
+        c[campo]["corpo"] = "<p>x</p><p><strong><a href='https://ex0.com.br/m-0'>frase</a></strong></p>"
+    out, prov = gc.apply_provenance(c, _pool(5))
+    assert prov["publicados"] == 0
+    with pytest.raises(SystemExit) as e:
+        gc.validate(out, prov)
+    msg = str(e.value)
+    assert "piso" in msg and "sem_marcador_de_link" in msg
+    assert "não seguiu o prompt" in msg
+    assert "manchete" not in msg  # a mensagem velha mandava procurar campo faltando
+
+
+def test_diagnostico_nao_culpa_o_prompt_quando_o_motivo_e_outro():
+    prov = {"descartados": [{"motivo": "source_id_fora_do_pool"}, {"motivo": "sem_marcador_de_link"}]}
+    msg = gc._diagnostico(prov)
+    assert "não seguiu o prompt" not in msg
+    assert "source_id_fora_do_pool" in msg
+
+
+def test_stderr_do_pipeline_chega_ao_health_e_o_stdout_nao(tmp_path):
+    """Controle positivo do canal: é por isso que os DESCARTADO também vão para stderr.
+    Quando validate() derruba o script, _run_script só anexa proc.stderr ao RuntimeError,
+    então o motivo impresso apenas em stdout desaparece justamente no caso em que importa."""
+    import orchestrator
+    (tmp_path / "pipeline").mkdir()
+    (orchestrator.PIPELINE / "_teste_canal.py").write_text(
+        "import sys\n"
+        "print('SO_NO_STDOUT')\n"
+        "print('  DESCARTADO sinal_2 (sem_marcador_de_link): H', file=sys.stderr)\n"
+        "sys.exit('Só 0 item(ns) com fonte confirmada')\n", encoding="utf-8")
+    try:
+        with pytest.raises(RuntimeError) as e:
+            orchestrator._run_script(tmp_path, "_teste_canal.py", [])
+        msg = str(e.value)
+        assert "DESCARTADO sinal_2" in msg
+        assert "SO_NO_STDOUT" not in msg
+    finally:
+        (orchestrator.PIPELINE / "_teste_canal.py").unlink()
+
+
+def test_relata_descartes_escreve_nos_dois_canais(capsys):
+    """Prova que o pipeline USA o canal que o teste acima prova existir. Sem esta asserção,
+    trocar `file=sys.stderr` por um print comum passaria despercebido."""
+    gc.relata_descartes({"publicados": 4, "titulo_substituido": True,
+                         "descartados": [{"campo": "sinal_2", "motivo": "source_id_repetido",
+                                          "headline": "H"}]})
+    cap = capsys.readouterr()
+    assert "DESCARTADO sinal_2 (source_id_repetido)" in cap.err
+    assert "DESCARTADO sinal_2 (source_id_repetido)" in cap.out
+    assert "manchete original caiu" in cap.err
+    assert "4 de 5 redigidos" in cap.out
+
+
+# ---------------------------------------------- o prompt é a metade sem teste de execução
+def _prompt():
+    return (BROKER / "config" / "prompts" / "write.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("proibido", ["href='URL", 'href="URL', "URL_DA_MATERIA"])
+def test_prompt_nao_pede_mais_que_o_modelo_escreva_url(proibido):
+    """A instrução que causou a MAR-483 não pode voltar por edição descuidada."""
+    assert proibido not in _prompt()
+
+
+def test_prompt_ensina_a_marcacao_e_o_source_id():
+    p = _prompt()
+    assert "<strong data-link>" in p
+    assert "source_id" in p
+    # o exemplo completo de nota precisa estar no formato que o pipeline aceita
+    assert '"source_id": 23' in p and "<p>" in p
+
+
+def test_prompt_nao_usa_o_mesmo_source_id_de_exemplo_em_todos_os_blocos():
+    """Placeholder repetido é copiado literalmente, e com a guarda de id repetido isso
+    derrubaria 4 das 5 notas."""
+    import re
+    ids = re.findall(r'"source_id":\s*(\d+)', _prompt())
+    assert len(ids) >= 5
+    assert len(set(ids)) >= 5, f"ids de exemplo repetidos: {ids}"
+
+
+def test_prompt_admite_edicao_com_menos_de_cinco():
+    p = _prompt()
+    assert "até 5 notícias" in p
+    assert "UM item por notícia escrita" in p
