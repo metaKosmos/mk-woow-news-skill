@@ -148,3 +148,11 @@ def test_tick_que_nao_roda_nao_avisa(tmp_path, monkeypatch):
         raise AssertionError("avisou sem ter rodado")
     monkeypatch.setattr(orchestrator.notify, "avisa", _nao)
     assert orchestrator.cron_tick()["ran"] is False
+
+
+@pytest.mark.parametrize("estado,erro", [(PRONTA, None), ({"stage": "researched"}, "falhou")])
+def test_aviso_nao_usa_travessao_longo(estado, erro):
+    """A regra editorial da mK proíbe travessão longo, e o próprio prompt da newsletter
+    abre com "ZERO TRAVESSÃO LONGO". O aviso é texto da mK como qualquer outro."""
+    txt = notify.monta_aviso("2026-09-03", estado, erro)
+    assert "—" not in txt and "–" not in txt
