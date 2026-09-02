@@ -20,11 +20,13 @@ Saídas:
 NÃO envia nada. A perna de envio é o send_zma.py, rodada depois, à parte.
 """
 import argparse
+import html
 import json
 import re
 import sys
-import urllib.request
 import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -47,8 +49,24 @@ WEEKDAYS = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira",
 MONTHS = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho",
           "agosto", "setembro", "outubro", "novembro", "dezembro"]
 
-REQUIRED_FIELDS = ["cabecalho", "titulo_edicao", "sumario", "manchete",
-                   "secundaria_1", "secundaria_2", "sinal_1", "sinal_2"]
+REQUIRED_FIELDS = ["cabecalho", "titulo_edicao", "sumario", "manchete"]
+
+# Os 5 blocos de notícia, na ordem em que a edição os apresenta. Só a manchete é
+# obrigatória: com o pool curto a edição encolhe (piso em MIN_BLOCOS) em vez de ser
+# completada com item inventado, que foi o defeito de 24/08, 31/08 e 02/09 (MAR-483).
+BLOCK_FIELDS = ["manchete", "secundaria_1", "secundaria_2", "sinal_1", "sinal_2"]
+MIN_BLOCOS = 3
+
+# A frase clicável chega marcada, sem href: quem escreve o link é este arquivo, copiando
+# o campo `link` do item de pauta. O Escritor não recebe URL nenhuma (ver write_edition).
+LINK_MARK_RE = re.compile(r"<strong\b[^>]*\bdata-link\b[^>]*>(.*?)</strong>",
+                          re.DOTALL | re.IGNORECASE)
+ANCHOR_RE = re.compile(r"""<a\b[^>]*\bhref\s*=\s*["']([^"']*)["']""", re.IGNORECASE)
+
+# UA de browser na checagem de link: publisher que barra agente desconhecido devolveria
+# 403 e sujaria o relatório. A checagem registra, não bloqueia.
+USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 
 def load_env(start: Path) -> dict:
@@ -138,8 +156,10 @@ def gemini_json(cfg, api_key, model, system_prompt, user_data, expect,
 def _slim(items, content_len):
     """Versão enxuta para mandar ao LLM: só o necessário para classificar/pontuar."""
     return [{
-        "id": c["id"], "title": c["title"], "content": c["content"][:content_len],
-        "source": c["source"], "categories": c["categories"], "date": c["date"][:10],
+        "id": c["id"], "title": c.get("title", ""),
+        "content": (c.get("content") or "")[:content_len],
+        "source": c.get("source", ""), "categories": c.get("categories", ""),
+        "date": (c.get("date") or "")[:10],
     } for c in items]
 
 
@@ -177,21 +197,195 @@ def score(cfg, key, prompt, items):
 
 
 def write_edition(cfg, key, prompt, pool, edition_date):
+    """Redige a edição. O pool vai ENXUTO, sem o campo `link`: o Escritor aponta a fonte
+    pelo `id` e não tem URL para copiar nem para inventar. A alucinação de 31/08 aconteceu
+    com os links reais dentro do prompt, então tirá-los é parte da correção, não detalhe."""
     data = (f"DATA DA EDIÇÃO: {edition_date}\n\n"
             "Notícias pontuadas para esta edição (JSON):\n"
-            + json.dumps(pool, ensure_ascii=False))
+            + json.dumps(_slim(pool, 800), ensure_ascii=False))
     # etapa criativa: deixa o Escritor raciocinar (checklist de 16 itens), com folga de output
     return gemini_json(cfg, key, cfg["model_write"], prompt, data, expect=dict,
                        thinking_budget=cfg.get("write_thinking_budget", 4096),
                        max_tokens=16384)
 
 
+# ------------------------------------------------------------------ procedência do link
+def _norm_link(u):
+    """Normaliza para comparar href com link de pauta: entidade HTML, barra final e caixa.
+
+    O unescape não é detalhe: o href sai do corpo já escapado (`&amp;`, `&quot;`) e o link
+    da pauta é cru, então sem ele um link legítimo com querystring seria lido como forasteiro."""
+    return html.unescape((u or "").strip()).rstrip("/").lower()
+
+
+def _descarte(campo, headline, source_id, motivo, detalhe=""):
+    return {"campo": campo, "headline": headline, "source_id": source_id,
+            "motivo": motivo, "detalhe": detalhe}
+
+
+def _como_id(valor):
+    """Aceita 3 e "3" (o modelo alterna), recusa o resto. None se não for id."""
+    if isinstance(valor, bool):
+        return None
+    if isinstance(valor, int):
+        return valor
+    if isinstance(valor, str) and valor.strip().lstrip("-").isdigit():
+        return int(valor.strip())
+    return None
+
+
+def bind_links(content, pool):
+    """Injeta o href de cada bloco copiando o `link` do item de pauta que ele aponta.
+
+    Devolve (blocos, descartes). Campo AUSENTE não é descarte: é edição curta, que passou
+    a ser permitida. Bloco PRESENTE que não prova de onde veio é descartado, porque foi
+    exatamente assim que item sem fonte virou e-mail enviado (MAR-483)."""
+    by_id = {_como_id(c.get("id")): c for c in pool if _como_id(c.get("id")) is not None}
+    blocos, descartes = [], []
+    for campo in BLOCK_FIELDS:
+        bloco = content.get(campo)
+        if not isinstance(bloco, dict):
+            continue
+        headline = bloco.get("headline", "")
+        sid = _como_id(bloco.get("source_id"))
+        if sid is None:
+            descartes.append(_descarte(campo, headline, bloco.get("source_id"),
+                                       "source_id_ausente"))
+            continue
+        item = by_id.get(sid)
+        if item is None:
+            descartes.append(_descarte(campo, headline, sid, "source_id_fora_do_pool"))
+            continue
+        link = (item.get("link") or "").strip()
+        if not link:
+            descartes.append(_descarte(campo, headline, sid, "item_sem_link",
+                                       item.get("title", "")))
+            continue
+        corpo = bloco.get("corpo") or ""
+        marcas = LINK_MARK_RE.findall(corpo)
+        if not marcas:
+            descartes.append(_descarte(campo, headline, sid, "sem_marcador_de_link"))
+            continue
+        if len(marcas) > 1:
+            descartes.append(_descarte(campo, headline, sid, "marcadores_de_link_demais",
+                                       f"{len(marcas)} marcadores"))
+            continue
+        href = html.escape(link, quote=True)
+        corpo = LINK_MARK_RE.sub(
+            lambda m: f'<strong><a href="{href}">{m.group(1)}</a></strong>', corpo, count=1)
+        blocos.append({"campo": campo, "headline": headline, "corpo": corpo,
+                       "source_id": sid, "source": item.get("source", ""),
+                       "link": link, "titulo_fonte": item.get("title", "")})
+    return blocos, descartes
+
+
+def enforce_provenance(blocos, pool):
+    """Rede de segurança: o prompt proíbe <a>, mas se o Escritor escrever um assim mesmo,
+    o destino tem que estar na pauta do dia. Mede procedência, não formatação: link que
+    ESTÁ no pool passa, senão a guarda recusaria tudo e pareceria estar funcionando."""
+    permitidos = {_norm_link(c.get("link")) for c in pool if (c.get("link") or "").strip()}
+    ok, descartes = [], []
+    for b in blocos:
+        fora = [h for h in ANCHOR_RE.findall(b["corpo"]) if _norm_link(h) not in permitidos]
+        if fora:
+            descartes.append(_descarte(b["campo"], b["headline"], b["source_id"],
+                                       "link_fora_do_pool", fora[0][:200]))
+        else:
+            ok.append(b)
+    return ok, descartes
+
+
+def recompose(content, blocos):
+    """Recoloca os blocos sobreviventes nos primeiros campos e recorta o sumário.
+
+    O sumário é posicional (item 1 = manchete, item 2 = secundária 1...), então só dá para
+    recortá-lo quando o tamanho bate com o número de blocos entregues. Quando não bate, ele
+    volta como veio e o validate() recusa: adivinhar a correspondência publicaria chamada
+    de um item em cima de outro."""
+    novo = {k: v for k, v in content.items() if k not in BLOCK_FIELDS}
+    entregues = [c for c in BLOCK_FIELDS if isinstance(content.get(c), dict)]
+    sumario = content.get("sumario")
+    sumario = list(sumario) if isinstance(sumario, list) else []
+    for i, b in enumerate(blocos):
+        novo[BLOCK_FIELDS[i]] = {"headline": b["headline"], "corpo": b["corpo"],
+                                 "source_id": b["source_id"]}
+    if len(sumario) == len(entregues):
+        pos = {campo: i for i, campo in enumerate(entregues)}
+        novo["sumario"] = [sumario[pos[b["campo"]]] for b in blocos]
+    else:
+        novo["sumario"] = sumario
+    return novo
+
+
+def apply_provenance(content, pool):
+    """bind -> enforce -> recompose. Devolve (content, provenance)."""
+    blocos, d1 = bind_links(content, pool)
+    blocos, d2 = enforce_provenance(blocos, pool)
+    novo = recompose(content, blocos)
+    prov = {"pool_size": len(pool), "publicados": len(blocos),
+            "itens": [{"campo": BLOCK_FIELDS[i], "source_id": b["source_id"],
+                       "source": b["source"], "link": b["link"],
+                       "titulo_fonte": b["titulo_fonte"]} for i, b in enumerate(blocos)],
+            "descartados": d1 + d2}
+    return novo, prov
+
+
+# ------------------------------------------------------------------ checagem de link
+def _http_status(url, timeout):
+    """(status, url_final) seguindo redirecionamento. Isolado para o teste trocar."""
+    req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.geturl()
+    except urllib.error.HTTPError as e:  # 404/403 são resposta, não falha do instrumento
+        return e.code, e.url or url
+
+
+def check_links(itens, timeout=8):
+    """Confere os links publicados e REGISTRA o resultado. Não bloqueia nada.
+
+    Motivo de não bloquear: publisher que barra IP de datacenter devolve 403 para link
+    legítimo, e o broker já tem esse caso com Business of Fashion. Um veto por HTTP
+    derrubaria item honesto justamente nos dias de pool curto. Suspeita é raiz de domínio
+    (link sem caminho de matéria) e 4xx que não seja 403."""
+    rel = {"checked_at": datetime.now().isoformat(timespec="seconds"),
+           "itens": [], "sem_path": [], "suspeitos": []}
+    for it in itens:
+        campo, link = it.get("campo", ""), (it.get("link") or "")
+        sem_path = not urllib.parse.urlsplit(link).path.strip("/")
+        linha = {"campo": campo, "link": link, "status": None, "final_url": "",
+                 "erro": "", "sem_path": sem_path}
+        try:
+            linha["status"], linha["final_url"] = _http_status(link, timeout)
+        except Exception as exc:  # noqa: BLE001 — rede caída não vira acusação de link
+            linha["erro"] = f"{type(exc).__name__}: {exc}"[:200]
+        rel["itens"].append(linha)
+        if sem_path:
+            rel["sem_path"].append(campo)
+        st = linha["status"]
+        morto = st is not None and 400 <= st < 500 and st != 403
+        if sem_path or morto:
+            rel["suspeitos"].append({"campo": campo, "link": link, "status": st,
+                                     "motivo": "raiz_de_dominio" if sem_path else "http_4xx"})
+    return rel
+
+
 def validate(content):
+    """Recusa a edição em vez de publicar item sem fonte. O generate falhando é o que
+    impede o envio: run_daily encadeia research -> generate -> send, e a exceção para
+    antes do send."""
     missing = [f for f in REQUIRED_FIELDS if f not in content]
     if missing:
         sys.exit(f"Conteúdo gerado sem os campos: {missing}")
-    if not isinstance(content.get("sumario"), list) or len(content["sumario"]) != 5:
-        sys.exit("Campo 'sumario' deve ter exatamente 5 itens.")
+    blocos = [c for c in BLOCK_FIELDS if isinstance(content.get(c), dict)]
+    if len(blocos) < MIN_BLOCOS:
+        sys.exit(f"Só {len(blocos)} item(ns) com fonte confirmada, e o piso é {MIN_BLOCOS}. "
+                 f"Edição NÃO publicada. Amplie a janela (--days) ou revise as fontes.")
+    if blocos != BLOCK_FIELDS[:len(blocos)]:
+        sys.exit(f"Blocos fora de ordem depois do corte: {blocos}")
+    if not isinstance(content.get("sumario"), list) or len(content["sumario"]) != len(blocos):
+        sys.exit(f"Sumário com {len(content.get('sumario') or [])} itens para "
+                 f"{len(blocos)} notícia(s). Sem alinhamento, a chamada iria no item errado.")
 
 
 def build_md(content, meta):
@@ -217,7 +411,9 @@ def build_md(content, meta):
     for field, label in [("manchete", "Manchete"), ("secundaria_1", "Secundária 1"),
                          ("secundaria_2", "Secundária 2"), ("sinal_1", "Sinal 1"),
                          ("sinal_2", "Sinal 2")]:
-        bloco = content[field]
+        bloco = content.get(field)
+        if not isinstance(bloco, dict):
+            continue  # edição curta: o bloco não existe, e isso agora é legítimo
         out.append(f"{label}: {bloco['headline']}")
         out.append(strip_html(bloco["corpo"]))
         out.append("")
@@ -229,6 +425,8 @@ def main():
     ap.add_argument("--edition", required=True, help="rótulo da edição, ex: 2026-w25")
     ap.add_argument("--date", default=None, help='data por extenso; default = hoje (pt-BR)')
     ap.add_argument("--no-classify", action="store_true", help="pula o filtro de território")
+    ap.add_argument("--skip-link-check", action="store_true",
+                    help="não bate HTTP nos links publicados (a checagem só registra)")
     args = ap.parse_args()
 
     env = load_env(BASE)
@@ -265,7 +463,18 @@ def main():
     print(f"Top score: {top.get('score')} — {top.get('title', '')[:70]}")
 
     content = write_edition(gcfg, key, load_prompt("write.md"), pool, edition_date)
+    content, provenance = apply_provenance(content, pool)
+    for d in provenance["descartados"]:
+        print(f"  DESCARTADO {d['campo']} ({d['motivo']}): {d['headline']}")
+    redigidos = provenance["publicados"] + len(provenance["descartados"])
+    print(f"Itens com fonte confirmada: {provenance['publicados']} de {redigidos} redigidos")
     validate(content)
+
+    links = None
+    if not args.skip_link_check:
+        links = check_links(provenance["itens"])
+        for s in links["suspeitos"]:
+            print(f"  ATENÇÃO {s['campo']}: {s['motivo']} ({s['status']}) {s['link']}")
 
     deliv = nl_cfg["delivery"]
     meta = {
@@ -283,7 +492,12 @@ def main():
     md_path = CONTENT / f"{args.edition}.md"
     json_path.write_text(json.dumps(
         {"edition": args.edition, "generated_at": datetime.now().isoformat(),
-         "meta": meta, "content": content}, ensure_ascii=False, indent=2), encoding="utf-8")
+         "meta": meta, "content": content, "provenance": provenance,
+         "link_check": {k: links[k] for k in ("checked_at", "sem_path", "suspeitos")}
+         if links else None}, ensure_ascii=False, indent=2), encoding="utf-8")
+    if links:  # relatório completo à parte; o _persist_content leva tudo p/ o GCS
+        (CONTENT / f"{args.edition}.links.json").write_text(
+            json.dumps(links, ensure_ascii=False, indent=2), encoding="utf-8")
     md_path.write_text(build_md(content, meta), encoding="utf-8")
 
     usage_path = CONTENT / f"{args.edition}.usage.json"

@@ -1,0 +1,317 @@
+# broker/tests/test_provenance.py — MAR-483: o link da matéria vem do feed, não do Gemini.
+#
+# O defeito que originou estes testes: o Escritor escrevia o próprio <a href> dentro do
+# corpo, e três edições saíram com link inventado (2 raízes de domínio e 3 404). Agora o
+# Escritor devolve `source_id` e uma frase marcada; o href é copiado do research.json.
+import pathlib
+import sys
+
+import pytest
+
+BROKER = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BROKER))
+sys.path.insert(0, str(BROKER / "pipeline"))
+
+import generate_content as gc  # noqa: E402
+
+TEMPLATES = BROKER / "templates"
+# Uma bandeirinha separadora de bloco são 6 células de 4px. As outras faixas coloridas do
+# template (topo e CTA) usam outra altura, então contar por aqui só pega as separadoras.
+CELULA_DE_BANDEIRINHA = 'height="4"'
+CELULAS_POR_BANDEIRINHA = 6
+
+
+def _pool(n=5):
+    """Itens como saem do score(): id estável, link real do feed."""
+    return [{"id": i, "title": f"Título {i}", "source": f"Fonte {i}", "score": 100 - i,
+             "link": f"https://exemplo{i}.com.br/materia-{i}"} for i in range(n)]
+
+
+def _bloco(source_id, texto="frase clicável", corpo=None):
+    return {"headline": f"Headline {source_id}", "source_id": source_id,
+            "corpo": corpo if corpo is not None else
+            f"<p>Abertura com 42% de gancho.</p><p><strong data-link>{texto}</strong></p>"}
+
+
+def _content(source_ids, sumario=None):
+    c = {"cabecalho": "[WDD] WooW! Daily Drops · quarta-feira, 02 de setembro de 2026",
+         "titulo_edicao": "Título da edição",
+         "sumario": sumario if sumario is not None else
+         [f"item {i}" for i in range(len(source_ids))]}
+    for campo, sid in zip(gc.BLOCK_FIELDS, source_ids):
+        c[campo] = _bloco(sid)
+    return c
+
+
+# --------------------------------------------------------------- controle positivo
+def test_controle_positivo_cinco_itens_sadios_passam_intactos():
+    """Sem este teste, uma guarda que derruba tudo imita uma guarda que funciona."""
+    pool = _pool(5)
+    out, prov = gc.apply_provenance(_content([0, 1, 2, 3, 4]), pool)
+    assert [p["campo"] for p in prov["itens"]] == gc.BLOCK_FIELDS
+    assert prov["descartados"] == []
+    assert len(out["sumario"]) == 5
+    for campo, item in zip(gc.BLOCK_FIELDS, pool):
+        # href copiado do feed, byte a byte
+        assert f'<a href="{item["link"]}">' in out[campo]["corpo"]
+        assert "data-link" not in out[campo]["corpo"]
+
+
+def test_link_publicado_e_o_do_item_apontado_nao_o_da_posicao():
+    """source_id 3 na manchete tem que trazer o link do item 3, não o do topo do pool."""
+    pool = _pool(5)
+    out, _ = gc.apply_provenance(_content([3, 0, 1, 2, 4]), pool)
+    assert f'href="{pool[3]["link"]}"' in out["manchete"]["corpo"]
+
+
+# --------------------------------------------------------------- procedência
+def test_source_id_fora_do_pool_derruba_so_aquele_bloco():
+    out, prov = gc.apply_provenance(_content([0, 1, 99, 3, 4]), _pool(5))
+    assert len(prov["itens"]) == 4
+    assert [d["motivo"] for d in prov["descartados"]] == ["source_id_fora_do_pool"]
+    assert prov["descartados"][0]["campo"] == "secundaria_2"
+    assert "sinal_2" not in out  # 4 itens ocupam os 4 primeiros campos
+
+
+@pytest.mark.parametrize("sid", [None, "", "sete", -1, 3.5])
+def test_source_id_invalido_derruba(sid):
+    c = _content([0, 1, 2, 3, 4])
+    c["sinal_1"]["source_id"] = sid
+    _, prov = gc.apply_provenance(c, _pool(5))
+    assert len(prov["itens"]) == 4
+    assert prov["descartados"][0]["motivo"] in ("source_id_ausente", "source_id_fora_do_pool")
+
+
+def test_source_id_ausente_derruba():
+    c = _content([0, 1, 2, 3, 4])
+    del c["sinal_2"]["source_id"]
+    _, prov = gc.apply_provenance(c, _pool(5))
+    assert [d["motivo"] for d in prov["descartados"]] == ["source_id_ausente"]
+
+
+def test_item_do_pool_sem_link_derruba():
+    pool = _pool(5)
+    pool[2]["link"] = ""
+    _, prov = gc.apply_provenance(_content([0, 1, 2, 3, 4]), pool)
+    assert [d["motivo"] for d in prov["descartados"]] == ["item_sem_link"]
+
+
+@pytest.mark.parametrize("corpo,motivo", [
+    ("<p>Nota inteira sem marcador nenhum.</p>", "sem_marcador_de_link"),
+    ("<p><strong data-link>uma</strong> e <strong data-link>outra</strong></p>",
+     "marcadores_de_link_demais"),
+])
+def test_marcador_de_link_fora_do_contrato_derruba(corpo, motivo):
+    c = _content([0, 1, 2, 3, 4])
+    c["secundaria_1"]["corpo"] = corpo
+    _, prov = gc.apply_provenance(c, _pool(5))
+    assert [d["motivo"] for d in prov["descartados"]] == [motivo]
+
+
+def test_href_alucinado_remanescente_derruba_o_bloco():
+    """Rede de segurança: o prompt proíbe <a>, mas se o Escritor escrever um assim mesmo,
+    o destino não está no pool e o item cai. É a assinatura exata do defeito de 31/08."""
+    c = _content([0, 1, 2, 3, 4])
+    c["sinal_1"]["corpo"] = ('<p>Gancho.</p><p><strong data-link>frase</strong> '
+                             'e <a href="https://news.shopify.com">inventado</a></p>')
+    out, prov = gc.apply_provenance(c, _pool(5))
+    assert [d["motivo"] for d in prov["descartados"]] == ["link_fora_do_pool"]
+    assert "news.shopify.com" not in str(out)
+
+
+def test_href_de_outro_item_do_pool_sobrevive_por_estar_na_pauta():
+    """Contraprova do teste acima: a guarda mede procedência, não formatação. Um link que
+    ESTÁ no pool passa, senão 'tudo cai' se disfarçaria de guarda funcionando."""
+    pool = _pool(5)
+    c = _content([0, 1, 2, 3, 4])
+    c["sinal_1"]["corpo"] = (f'<p>Gancho.</p><p><strong data-link>frase</strong> '
+                             f'e <a href="{pool[4]["link"]}">vizinho</a></p>')
+    _, prov = gc.apply_provenance(c, pool)
+    assert prov["descartados"] == []
+
+
+def test_link_com_aspas_nao_quebra_o_atributo():
+    pool = _pool(5)
+    pool[0]["link"] = 'https://exemplo.com/a?b="x"&c=1'
+    out, prov = gc.apply_provenance(_content([0, 1, 2, 3, 4]), pool)
+    assert prov["descartados"] == []
+    assert '&quot;' in out["manchete"]["corpo"]
+    assert 'href="https://exemplo.com/a?b=&quot;x&quot;&amp;c=1"' in out["manchete"]["corpo"]
+
+
+# --------------------------------------------------------------- edição encolhe
+def test_sumario_perde_o_item_do_bloco_derrubado_nao_o_ultimo():
+    c = _content([0, 1, 99, 3, 4], sumario=["um", "dois", "três", "quatro", "cinco"])
+    out, _ = gc.apply_provenance(c, _pool(5))
+    assert out["sumario"] == ["um", "dois", "quatro", "cinco"]
+
+
+def test_tres_elegiveis_publicam_tres_e_validate_passa():
+    c = _content([0, 1, 2, 88, 99])
+    out, prov = gc.apply_provenance(c, _pool(5))
+    assert prov["publicados"] == 3
+    assert set(gc.BLOCK_FIELDS[:3]) <= set(out)
+    assert "sinal_1" not in out and "sinal_2" not in out
+    assert len(out["sumario"]) == 3
+    gc.validate(out)  # não levanta
+
+
+def test_dois_elegiveis_derrubam_a_edicao_inteira():
+    """Abaixo do piso o generate falha, e é isso que impede o send: run_daily chama os
+    estágios em sequência e a exceção interrompe antes do envio."""
+    c = _content([0, 1, 77, 88, 99])
+    out, prov = gc.apply_provenance(c, _pool(5))
+    assert prov["publicados"] == 2
+    with pytest.raises(SystemExit):
+        gc.validate(out)
+
+
+def test_edicao_que_ja_nasce_com_tres_blocos_e_valida():
+    """Pool curto no dia: o Escritor entrega 3 campos e não há descarte nenhum."""
+    c = _content([0, 1, 2])
+    out, prov = gc.apply_provenance(c, _pool(3))
+    assert prov["descartados"] == [] and prov["publicados"] == 3
+    gc.validate(out)
+
+
+def test_sumario_de_tamanho_errado_e_recusado():
+    c = _content([0, 1, 2, 3, 4], sumario=["um", "dois"])
+    out, _ = gc.apply_provenance(c, _pool(5))
+    with pytest.raises(SystemExit):
+        gc.validate(out)
+
+
+# --------------------------------------------------------------- o Escritor não vê URL
+def test_write_edition_nao_manda_link_ao_escritor(monkeypatch):
+    """A alucinação aconteceu COM os links reais no prompt. Agora eles não vão."""
+    capturado = {}
+
+    def _fake(cfg, key, model, system_prompt, user_data, expect, **kw):
+        capturado["user_data"] = user_data
+        return {}
+
+    monkeypatch.setattr(gc, "gemini_json", _fake)
+    pool = _pool(5)
+    gc.write_edition({"model_write": "m", "write_thinking_budget": 0}, "k", "prompt",
+                     pool, "quarta-feira, 02 de setembro de 2026")
+    enviado = capturado["user_data"]
+    for item in pool:
+        assert item["link"] not in enviado
+    assert "exemplo0.com.br" not in enviado
+    assert '"id": 0' in enviado  # o id continua indo, é como o Escritor aponta a fonte
+
+
+# --------------------------------------------------------------- checagem de link (registra)
+def test_check_links_registra_e_nao_derruba(monkeypatch):
+    """403 de publisher que bloqueia IP de datacenter não pode virar veto: ebay.com deu
+    403 na medição de 02/09 e é link legítimo, vindo do feed."""
+    monkeypatch.setattr(gc, "_http_status", lambda url, timeout: (403, url))
+    rel = gc.check_links([{"campo": "manchete", "link": "https://www.ebay.com/x"}])
+    assert rel["itens"][0]["status"] == 403
+    assert rel["suspeitos"] == []          # 403 não é suspeita, é bloqueio de bot
+    assert rel["sem_path"] == []
+
+
+def test_check_links_marca_raiz_de_dominio_e_404(monkeypatch):
+    monkeypatch.setattr(gc, "_http_status",
+                        lambda url, timeout: (404 if "morta" in url else 200, url))
+    rel = gc.check_links([{"campo": "manchete", "link": "https://news.shopify.com"},
+                          {"campo": "sinal_1", "link": "https://x.com/materia-morta"}])
+    assert rel["sem_path"] == ["manchete"]
+    assert [s["campo"] for s in rel["suspeitos"]] == ["manchete", "sinal_1"]
+
+
+def test_check_links_nao_explode_quando_a_rede_cai(monkeypatch):
+    def _boom(url, timeout):
+        raise OSError("sem rede")
+    monkeypatch.setattr(gc, "_http_status", _boom)
+    rel = gc.check_links([{"campo": "manchete", "link": "https://x.com/a"}])
+    assert rel["itens"][0]["erro"]
+    assert rel["suspeitos"] == []  # falha de instrumento não vira acusação
+
+
+# --------------------------------------------------------------- template encolhe junto
+def _render(content):
+    from jinja2 import Environment, FileSystemLoader
+    env = Environment(loader=FileSystemLoader(str(TEMPLATES)), autoescape=False)
+    return env.get_template("woow-daily-drops.html.j2").render(
+        content=content, imagem_manchete_url="", unsubscribe_url="#")
+
+
+def _content_render(n):
+    c = {"cabecalho": "[WDD]", "titulo_edicao": "T", "sumario": [f"i{i}" for i in range(n)]}
+    for campo in gc.BLOCK_FIELDS[:n]:
+        c[campo] = {"headline": f"H {campo}", "corpo": f"<p>corpo {campo}</p>"}
+    return c
+
+
+def test_template_com_cinco_itens_mostra_tudo():
+    html = _render(_content_render(5))
+    assert "Sinais do dia" in html
+    for campo in gc.BLOCK_FIELDS:
+        assert f"H {campo}" in html
+
+
+def test_template_sem_sinais_nao_mostra_o_cabecalho_da_secao():
+    html = _render(_content_render(3))
+    assert "Sinais do dia" not in html
+    assert "H secundaria_2" in html and "H sinal_1" not in html
+
+
+@pytest.mark.parametrize("n,bandeirinhas", [(1, 0), (2, 1), (3, 2), (5, 2)])
+def test_bandeirinha_some_junto_com_o_bloco_que_ela_precede(n, bandeirinhas):
+    """A listra colorida pertence ao bloco que ela anuncia. Fora do condicional, a edição
+    curta terminaria numa faixa de cor anunciando notícia que não existe."""
+    html = _render(_content_render(n))
+    assert html.count(CELULA_DE_BANDEIRINHA) == bandeirinhas * CELULAS_POR_BANDEIRINHA
+
+
+def test_template_nao_deixa_titulo_vazio_quando_encolhe():
+    import re
+    html = _render(_content_render(3))
+    assert not re.search(r"<h[23][^>]*>\s*</h[23]>", html)
+
+
+# ------------------------------------------------- a procedência chega ao painel
+def test_generate_espelha_procedencia_e_links_no_estado(tmp_path, monkeypatch):
+    """Descarte silencioso é o mesmo que descarte nenhum: quem opera precisa ver no
+    `queue` que a edição saiu com 4 itens e por que o quinto caiu."""
+    import json
+    import orchestrator
+    from state_manager import StateManager, LocalStore
+
+    sm = StateManager(LocalStore(tmp_path))
+    wd = tmp_path / "wd"
+    (wd / "renders").mkdir(parents=True)
+    (wd / "content").mkdir()
+    prov = {"pool_size": 8, "publicados": 4,
+            "itens": [{"campo": "manchete", "source_id": 2, "source": "AR Insider",
+                       "link": "https://arinsider.co/x", "titulo_fonte": "T"}],
+            "descartados": [{"campo": "sinal_2", "headline": "H", "source_id": 99,
+                             "motivo": "source_id_fora_do_pool", "detalhe": ""}]}
+    checagem = {"checked_at": "2026-09-02T10:00:00", "sem_path": [],
+                "suspeitos": [{"campo": "manchete", "link": "https://x", "status": 404,
+                               "motivo": "http_4xx"}]}
+
+    def _fake_run(w, script, args):
+        if script == "generate_content.py":
+            (w / "content" / "2026-09-03.json").write_text(json.dumps(
+                {"meta": {"subject": "S", "edition_date": "2026-09-03"},
+                 "content": {}, "provenance": prov, "link_check": checagem}), encoding="utf-8")
+            (w / "content" / "2026-09-03.usage.json").write_text("{}", encoding="utf-8")
+        return ""
+
+    monkeypatch.setattr(orchestrator, "_sm", lambda: sm)
+    monkeypatch.setattr(orchestrator, "_workdir", lambda ed: wd)
+    monkeypatch.setattr(orchestrator, "_restore_content", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator, "_run_script", _fake_run)
+    monkeypatch.setattr(orchestrator, "_publish_edition_html",
+                        lambda s, w, ed, src, by="": (f"https://pub/{ed}.html", ""))
+
+    out = orchestrator.run_stage("2026-09-03", "generate", {})
+    assert out["itens"] == 4
+    assert out["descartados"] == ["source_id_fora_do_pool"]
+    assert out["links_suspeitos"][0]["status"] == 404
+    st = sm.get_state("2026-09-03")
+    assert st["provenance"]["publicados"] == 4
+    assert st["link_check"]["suspeitos"][0]["campo"] == "manchete"
