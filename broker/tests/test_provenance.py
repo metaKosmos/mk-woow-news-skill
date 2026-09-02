@@ -575,3 +575,66 @@ def test_template_nao_deixa_titulo_vazio_quando_encolhe_de_verdade():
     c["secundaria_1"]["headline"] = ""
     html = _render(c)
     assert re.search(r"<h[23][^>]*>\s*</h[23]>", html), "o detector de título vazio não detecta"
+
+
+@pytest.mark.parametrize("link", [
+    "https://ex.com/a?x=1&sect=moda", "https://ex.com/a?x=1&copy=2",
+    "https://ex.com/a?p=1&notify=x", "https://ex.com/a?b=1&times=3",
+])
+def test_link_com_entidade_html_na_querystring_nao_e_descartado(link):
+    """A guarda descartava o href que ela mesma tinha acabado de injetar: `html.unescape`
+    transforma `&sect=` em `§=` no link cru, mas o href passou por `html.escape` antes."""
+    pool = [{"id": 0, "title": "T", "source": "F", "link": link}]
+    c = {"cabecalho": "c", "titulo_edicao": "t", "sumario": ["a"],
+         "manchete": {"headline": "H", "source_id": 0,
+                      "corpo": "<p><strong data-link>f</strong></p>"}}
+    _, prov = gc.apply_provenance(c, pool)
+    assert prov["descartados"] == [], f"descartou link legítimo: {link}"
+    assert prov["publicados"] == 1
+
+
+def test_link_forasteiro_com_entidade_continua_sendo_recusado():
+    """Controle positivo da correção acima: aceitar as duas formas do link da pauta não
+    pode virar porta para link de fora."""
+    pool = [{"id": 0, "title": "T", "source": "F", "link": "https://ex.com/a?x=1&sect=moda"}]
+    c = {"cabecalho": "c", "titulo_edicao": "t", "sumario": ["a"],
+         "manchete": {"headline": "H", "source_id": 0,
+                      "corpo": "<p><strong data-link>f</strong> "
+                               "<a href='https://news.shopify.com?x=1&sect=y'>z</a></p>"}}
+    _, prov = gc.apply_provenance(c, pool)
+    assert [d["motivo"] for d in prov["descartados"]] == ["link_fora_do_pool"]
+
+
+def test_sumario_maior_sem_descarte_e_cortado_em_vez_de_matar_a_edicao():
+    c = _content([0, 1, 2, 3, 4], sumario=["um", "dois", "três", "quatro", "cinco", "sobrando"])
+    out, prov = gc.apply_provenance(c, _pool(5))
+    assert prov["descartados"] == []
+    assert out["sumario"] == ["um", "dois", "três", "quatro", "cinco"]
+    gc.validate(out, prov)
+
+
+def test_sumario_desalinhado_com_descarte_ainda_recusa():
+    """Quando houve corte, o alinhamento posicional não é recuperável: adivinhar poria a
+    chamada de uma notícia em cima de outra."""
+    c = _content([0, 1, 99, 3, 4], sumario=["um", "dois"])
+    out, prov = gc.apply_provenance(c, _pool(5))
+    with pytest.raises(SystemExit):
+        gc.validate(out, prov)
+
+
+@pytest.mark.parametrize("valor", [True, False])
+def test_source_id_booleano_nao_vira_indice(valor):
+    """Mutação que a suíte não pegava: sem a guarda de bool, `source_id: true` publicaria
+    o link do item de índice 1."""
+    c = _content([0, 1, 2, 3, 4])
+    c["manchete"]["source_id"] = valor
+    _, prov = gc.apply_provenance(c, _pool(5))
+    assert [d["motivo"] for d in prov["descartados"]] == ["source_id_ausente"]
+
+
+def test_raiz_de_dominio_com_barra_final_e_marcada(monkeypatch):
+    """`ebay.com/` foi a assinatura do incidente de 24/08. Sem o strip("/") o path vira "/"
+    e a raiz deixa de ser marcada."""
+    monkeypatch.setattr(gc, "_http_status", lambda url, timeout: (200, url))
+    rel = gc.check_links([{"campo": "manchete", "link": "https://www.ebay.com/"}])
+    assert rel["sem_path"] == ["manchete"]

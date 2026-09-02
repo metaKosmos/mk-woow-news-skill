@@ -245,6 +245,18 @@ def _texto(valor):
     return strip_html(valor) if isinstance(valor, str) else ""
 
 
+def _formas(link):
+    """As duas formas em que um link da pauta pode aparecer no HTML: crua e escapada.
+
+    Precisa das duas porque `html.unescape` não é simétrico numa querystring: um link com
+    `&sect=`, `&copy=`, `&times=` ou `&not=` vira `§=`, `©=`, `×=` quando desescapado cru,
+    mas o href injetado passou antes por `html.escape` (`&` -> `&amp;`) e desescapa de volta
+    para `&sect=`. Comparar só uma das formas fazia a guarda descartar o href que ela mesma
+    acabou de injetar, matando uma nota legítima com motivo `link_fora_do_pool`."""
+    link = (link or "").strip()
+    return {_norm_link(link), _norm_link(html.escape(link, quote=True))}
+
+
 def _descarte(campo, headline, source_id, motivo, detalhe=""):
     return {"campo": campo, "headline": headline, "source_id": source_id,
             "motivo": motivo, "detalhe": detalhe}
@@ -321,7 +333,10 @@ def enforce_provenance(blocos, pool):
     """Rede de segurança: o prompt proíbe <a>, mas se o Escritor escrever um assim mesmo,
     o destino tem que estar na pauta do dia. Mede procedência, não formatação: link que
     ESTÁ no pool passa, senão a guarda recusaria tudo e pareceria estar funcionando."""
-    permitidos = {_norm_link(c.get("link")) for c in pool if (c.get("link") or "").strip()}
+    permitidos = set()
+    for c in pool:
+        if (c.get("link") or "").strip():
+            permitidos |= _formas(c["link"])
     ok, descartes = [], []
     for b in blocos:
         fora = [h for h in _hrefs(b["corpo"]) if _norm_link(h) not in permitidos]
@@ -352,6 +367,11 @@ def recompose(content, blocos):
     if len(sumario) == len(entregues):
         pos = {campo: i for i, campo in enumerate(entregues)}
         novo["sumario"] = [sumario[pos[b["campo"]]] for b in blocos]
+    elif len(sumario) > len(entregues) and len(blocos) == len(entregues):
+        # Sumário mais longo que as notas, sem nenhum descarte: o excedente está no fim (o
+        # sumário é escrito na ordem das notícias) e cortar é melhor que perder uma edição
+        # de procedência limpa por um item sobrando.
+        novo["sumario"] = sumario[:len(blocos)]
     else:
         novo["sumario"] = sumario
     return novo
