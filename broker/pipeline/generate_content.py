@@ -199,13 +199,24 @@ def score(cfg, key, prompt, items):
     return sorted(scored, key=lambda x: x.get("score", 0), reverse=True)
 
 
+# O único campo que o Escritor não pode ver. Tirar SÓ o link, em vez de reduzir o pool ao
+# _slim de classify/score, preserva o texto integral da matéria e o `score`: o prompt manda
+# escolher a manchete pelo maior score em cinco pontos diferentes, e enxugar demais aqui
+# trocaria uma alucinação de link por uma seleção pior.
+CAMPOS_FORA_DO_ESCRITOR = ("link",)
+
+
+def _para_escritor(pool):
+    return [{k: v for k, v in c.items() if k not in CAMPOS_FORA_DO_ESCRITOR} for c in pool]
+
+
 def write_edition(cfg, key, prompt, pool, edition_date):
     """Redige a edição. O pool vai ENXUTO, sem o campo `link`: o Escritor aponta a fonte
     pelo `id` e não tem URL para copiar nem para inventar. A alucinação de 31/08 aconteceu
     com os links reais dentro do prompt, então tirá-los é parte da correção, não detalhe."""
     data = (f"DATA DA EDIÇÃO: {edition_date}\n\n"
             "Notícias pontuadas para esta edição (JSON):\n"
-            + json.dumps(_slim(pool, 800), ensure_ascii=False))
+            + json.dumps(_para_escritor(pool), ensure_ascii=False))
     # etapa criativa: deixa o Escritor raciocinar (checklist de 16 itens), com folga de output
     return gemini_json(cfg, key, cfg["model_write"], prompt, data, expect=dict,
                        thinking_budget=cfg.get("write_thinking_budget", 4096),
@@ -262,8 +273,13 @@ def bind_links(content, pool):
         bloco = content.get(campo)
         if not isinstance(bloco, dict):
             continue
-        headline = bloco.get("headline", "")
+        headline = _texto(bloco.get("headline"))
         sid = _como_id(bloco.get("source_id"))
+        if not headline.strip():
+            # o template imprime a headline num <h2>/<h3> fixo: vazia, o e-mail sai com um
+            # título em branco em cima da nota, e nenhuma outra guarda olha esse campo.
+            descartes.append(_descarte(campo, "", sid, "headline_vazia"))
+            continue
         if sid is None:
             descartes.append(_descarte(campo, headline, bloco.get("source_id"),
                                        "source_id_ausente"))

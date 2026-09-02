@@ -192,13 +192,23 @@ def test_write_edition_nao_manda_link_ao_escritor(monkeypatch):
 
     monkeypatch.setattr(gc, "gemini_json", _fake)
     pool = _pool(5)
+    # `content` e `score` existem no pool real (vêm do feed e do score()); sem eles a
+    # asserção passaria por vacuidade, sem provar que o campo certo foi retirado.
+    for i, c in enumerate(pool):
+        c["content"] = f"Resumo da matéria {i}, com números e contexto."
+        c["score_justification"] = "cabe no território"
     gc.write_edition({"model_write": "m", "write_thinking_budget": 0}, "k", "prompt",
                      pool, "quarta-feira, 02 de setembro de 2026")
     enviado = capturado["user_data"]
     for item in pool:
         assert item["link"] not in enviado
     assert "exemplo0.com.br" not in enviado
-    assert '"id": 0' in enviado  # o id continua indo, é como o Escritor aponta a fonte
+    assert "link" not in enviado
+    # controle positivo: tudo o mais continua indo. O prompt decide a manchete pelo maior
+    # score em cinco pontos, e o corpo da nota sai do `content`.
+    assert '"id": 0' in enviado
+    assert '"score": 100' in enviado
+    assert "Resumo da matéria 0" in enviado
 
 
 # --------------------------------------------------------------- checagem de link (registra)
@@ -538,3 +548,30 @@ def test_queue_de_edicao_sem_procedencia_nao_quebra(tmp_path):
     sm.upsert_edition("2026-08-24", {"stage": "sent"})
     linha = next(r for r in sm.get_queue()["editions"] if r["edition"] == "2026-08-24")
     assert linha["itens"] is None and linha["descartados"] == 0
+
+
+def test_headline_vazia_derruba_o_bloco():
+    """O template imprime a headline num <h2> fixo: vazia, o e-mail sai com título em branco."""
+    c = _content([0, 1, 2, 3, 4])
+    c["secundaria_1"]["headline"] = "   "
+    out, prov = gc.apply_provenance(c, _pool(5))
+    assert [d["motivo"] for d in prov["descartados"]] == ["headline_vazia"]
+    assert prov["publicados"] == 4
+
+
+def test_headline_que_e_so_tag_conta_como_vazia():
+    c = _content([0, 1, 2, 3, 4])
+    c["sinal_1"]["headline"] = "<a href='https://news.shopify.com'></a>"
+    _, prov = gc.apply_provenance(c, _pool(5))
+    assert [d["motivo"] for d in prov["descartados"]] == ["headline_vazia"]
+
+
+def test_template_nao_deixa_titulo_vazio_quando_encolhe_de_verdade():
+    """O teste anterior com esse nome não podia falhar: a entrada sempre trazia headline.
+    Aqui a headline vazia entra no render de propósito, para provar que o <h2> em branco
+    seria detectado se algum dia escapasse da guarda."""
+    import re
+    c = _content_render(3)
+    c["secundaria_1"]["headline"] = ""
+    html = _render(c)
+    assert re.search(r"<h[23][^>]*>\s*</h[23]>", html), "o detector de título vazio não detecta"

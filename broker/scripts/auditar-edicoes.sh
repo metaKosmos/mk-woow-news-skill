@@ -31,8 +31,19 @@ for ed in "$@"; do
     echo "=== $ed === NÃO BAIXOU ($url)"; falhas=$((falhas + 1)); continue
   fi
   echo "=== $ed ==="
-  links="$(printf '%s' "$html" | grep -oE "href=['\"][^'\"]+['\"]" | sed "s/^href=//; s/[\"']//g" \
-           | grep -Ev "$IGNORAR" | sort -u)"
+  todos="$(printf '%s' "$html" | grep -oE "href=['\"][^'\"]+['\"]" | sed "s/^href=//; s/[\"']//g" \
+           | grep -Ev "$IGNORAR")"
+  # Repetição é sinal próprio: duas notas com o mesmo link significam uma fonte só servindo
+  # de fonte para as duas. O `sort -u` de antes apagava exatamente essa evidência.
+  repetidos="$(printf '%s\n' "$todos" | sort | uniq -d)"
+  if [ -n "$repetidos" ]; then
+    while IFS= read -r r; do
+      [ -z "$r" ] && continue
+      echo "  REPETIDO $(printf '%s\n' "$todos" | grep -cxF "$r")x  $r"
+      suspeitos=$((suspeitos + 1))
+    done <<< "$repetidos"
+  fi
+  links="$(printf '%s\n' "$todos" | sort -u)"
   if [ -z "$links" ]; then
     echo "  NENHUM link de matéria encontrado (edição vazia ou HTML inesperado)"
     falhas=$((falhas + 1)); continue
