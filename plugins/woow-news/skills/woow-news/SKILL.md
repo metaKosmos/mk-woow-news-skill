@@ -59,8 +59,10 @@ qual item veio é descartada da edição, e a edição sai com menos itens em ve
 item inventado. O piso é 3: abaixo disso o `generate` falha de propósito e nada é enviado.
 
 Isso existe porque, até 02/09/2026, o modelo escrevia o próprio `<a href>` e três edições
-saíram com link para matéria que não existe (MAR-483). Se `status` ou `queue` mostrarem
-`descartados`, é a guarda funcionando, não erro: o motivo vem junto.
+saíram com link para matéria que não existe (MAR-483). No `woow.py status`, a edição passa a
+mostrar `4 itens · 1 descartado(s): source_id_fora_do_pool` quando houve corte. Isso é a
+guarda funcionando, não erro. O detalhe por bloco (qual headline caiu, qual era o link) está
+em `queue`, no campo `provenance` de cada edição.
 
 A checagem de HTTP **registra e não bloqueia**. Publisher que barra IP de datacenter
 devolve 403 para link legítimo, então 403 aparece no relatório sem derrubar a notícia.

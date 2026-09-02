@@ -111,3 +111,20 @@ def test_operador_nao_recebe_a_lista_e_ve_so_a_contagem():
     })
     assert "tabela completa só para admin" in saida
     assert _marcados(saida) == {"patrick@metakosmos.com.br"}  # fallback semver na própria linha
+
+
+def test_status_mostra_descarte_e_link_suspeito(monkeypatch, capsys):
+    """MAR-483: o descarte precisa aparecer no comando que o operador roda todo dia."""
+    import woow
+    monkeypatch.setattr(woow.bc, "queue", raising=False, value=lambda: {"editions": [
+        {"edition": "2026-09-03", "date": "2026-09-03", "stage": "ready",
+         "itens": 4, "descartados": 1, "links_suspeitos": 2,
+         "motivos": ["source_id_fora_do_pool"]},
+        {"edition": "2026-09-02", "date": "2026-09-02", "stage": "sent",
+         "itens": 5, "descartados": 0, "links_suspeitos": 0},
+    ]})
+    woow.cmd_status(None)
+    out = capsys.readouterr().out
+    assert "4 itens" in out and "1 descartado(s): source_id_fora_do_pool" in out
+    assert "2 link(s) suspeito(s)" in out
+    assert "5 itens" not in out  # edição completa não polui a listagem

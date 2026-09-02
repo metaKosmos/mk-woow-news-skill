@@ -514,3 +514,27 @@ def test_prompt_admite_edicao_com_menos_de_cinco():
     p = _prompt()
     assert "até 5 notícias" in p
     assert "UM item por notícia escrita" in p
+
+
+def test_queue_carrega_a_procedencia(tmp_path):
+    """O descarte precisa aparecer onde alguém olha. `woow status` e o painel leem a queue,
+    não o estado da edição, então sem estes campos a guarda trabalha em silêncio."""
+    from state_manager import StateManager, LocalStore
+    sm = StateManager(LocalStore(tmp_path))
+    sm.upsert_edition("2026-09-03", {
+        "stage": "ready",
+        "provenance": {"publicados": 4, "descartados": [{"campo": "sinal_2", "motivo": "x"}]},
+        "link_check": {"suspeitos": [{"campo": "manchete"}]}})
+    linha = next(r for r in sm.get_queue()["editions"] if r["edition"] == "2026-09-03")
+    assert linha["itens"] == 4
+    assert linha["descartados"] == 1
+    assert linha["links_suspeitos"] == 1
+
+
+def test_queue_de_edicao_sem_procedencia_nao_quebra(tmp_path):
+    """Edição legada (gerada antes desta versão) não tem provenance nenhum."""
+    from state_manager import StateManager, LocalStore
+    sm = StateManager(LocalStore(tmp_path))
+    sm.upsert_edition("2026-08-24", {"stage": "sent"})
+    linha = next(r for r in sm.get_queue()["editions"] if r["edition"] == "2026-08-24")
+    assert linha["itens"] is None and linha["descartados"] == 0
