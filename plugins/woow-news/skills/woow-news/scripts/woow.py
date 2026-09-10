@@ -48,6 +48,12 @@ STAGE_GLYPH = {"sent": "✓ Enviado   ", "ready": "◷ Pronto    ", "generated":
 # dizer: `status` roda todo dia e não vai gastar uma chamada a /curadoria para descobrir
 # que a edição é do Daily Drops. Quem decide a padrão continua sendo o broker.
 CAMPANHA_PADRAO = "daily-drops"
+# Abaixo disto, "0 publicada(s)" diz mais sobre o tamanho da memória do que sobre a fonte.
+# A procedência que alimenta o índice só existe desde 02/09/2026, então no início toda fonte
+# de publicação esparsa aparece com zero, e a acusação "NUNCA PUBLICOU" mais o conselho de
+# desativar caem em fonte saudável. Desativar fonte encolhe a pauta, e a pauta tem piso de 3
+# blocos no generate: era conselho acionável para quebrar a edição.
+MEMORIA_CURTA_EDICOES = 20
 
 
 def cmd_status(_):
@@ -98,8 +104,14 @@ def _render_research(r):
     """Checkpoint 1: a pauta mais o que a curadoria tirou dela.
 
     O que foi barrado sai FORA do summary porque o summary é cortado no broker, e o dia
-    de muitos barrados é justamente o dia em que o corte comeria o que interessa."""
-    print(r.get("summary", "")[:2000])
+    de muitos barrados é justamente o dia em que o corte comeria o que interessa.
+
+    O summary sai INTEIRO. Ele já chega cortado em 4000 pelo `run_stage`, e o `.research.md`
+    reserva 3700 desses para a seção "Já publicados (barrados)": cortar em 2000 aqui fazia a
+    lista de candidatos e a cobertura por fonte desaparecerem da única tela em que o operador
+    revisa a pauta, a partir de 6 barrados. Medido: 10 barrados deixavam a tela com 2.862
+    caracteres, zero candidatos e os mesmos itens impressos duas vezes."""
+    print(r.get("summary", ""))
     if r.get("barrados"):
         campanha = r.get("campanha") or CAMPANHA_PADRAO
         print(f"\nCuradoria ({campanha}): {r['barrados']} item(ns) fora da pauta por já terem saído")
@@ -430,33 +442,44 @@ def _print_report(report):
     print("onde a pesquisa baixa os feeds — pode diferir do que você vê no navegador.")
 
 
-def _fmt_contribuicao(f):
+def _memoria_curta(edicoes):
+    """A memória é curta demais para "0 publicadas" acusar a fonte?"""
+    return isinstance(edicoes, int) and 0 <= edicoes < MEMORIA_CURTA_EDICOES
+
+
+def _fmt_contribuicao(f, edicoes=None):
     """O que a fonte entregou de verdade, não se o feed responde.
 
     `publicadas` ausente é o terceiro resultado: o broker não conseguiu calcular a
     contribuição (memória ilegível, por exemplo). Não é o mesmo que zero, e chamar de
-    zero acusaria de inútil uma fonte que ninguém mediu."""
+    zero acusaria de inútil uma fonte que ninguém mediu.
+
+    `edicoes` é o alcance da memória. Zero publicadas com memória curta é dado sobre a
+    memória, não sobre a fonte, e a frase muda para dizer isso."""
     pub = f.get("publicadas")
     if pub is None:
         return "contribuição não medida"
     barradas = f.get("barradas") or 0
     if pub:
         txt = f"{pub} publicada(s) · {f.get('materias', pub)} matéria(s)"
-    elif f.get("enabled", True):
-        txt = "⚠ NUNCA PUBLICOU nesta campanha"
-    else:
+    elif not f.get("enabled", True):
         txt = "0 publicada(s) (desativada)"  # desativada não publicar não é achado
+    elif _memoria_curta(edicoes):
+        txt = f"0 publicada(s) nas {edicoes} edição(ões) que a memória alcança"
+    else:
+        txt = "⚠ NUNCA PUBLICOU nesta campanha"
     return txt + (f" · {barradas} barrada(s)" if barradas else "")
 
 
 def cmd_sources_list(a):
     r = bc.get_sources(campanha=a.campanha)
     feeds = r.get("feeds", [])
+    edicoes = r.get("edicoes_na_memoria")
     print("WooW! Daily Drops — Fontes da pesquisa  (✓ = ativa)\n" + "━" * 51)
     for f in feeds:
         mark = "✓" if f.get("enabled", True) else "·"
         print(f"{mark} {(f.get('source') or '')[:24]:24} {_fmt_last_test(f.get('last_test'))}")
-        print(f"    {_fmt_contribuicao(f)}")
+        print(f"    {_fmt_contribuicao(f, edicoes)}")
         print(f"    {f.get('url')}")
         if f.get("note"):
             print(f"    nota: {f['note']}")
@@ -468,9 +491,16 @@ def cmd_sources_list(a):
     # Fonte ativa que nunca publicou é o achado que a lista antiga escondia: ela responde,
     # passa no teste e mesmo assim não entrega pauta nenhuma. Repetido no rodapé porque é
     # decisão de operador (trocar ou desativar), não detalhe de linha.
-    mudas = [f.get("source") for f in feeds
+    # `or "(sem nome)"` e não um filtro: feed sem `source` é justamente o que merece
+    # aparecer, e sem a guarda o join estourava TypeError depois de já ter impresso a lista
+    # inteira, deixando o operador com um traceback no lugar do rodapé.
+    mudas = [f.get("source") or "(sem nome)" for f in feeds
              if f.get("enabled", True) and f.get("publicadas") == 0]
-    if mudas:
+    if mudas and _memoria_curta(edicoes):
+        print(f"{len(mudas)} fonte(s) ativa(s) sem publicação nas {edicoes} edição(ões) que a "
+              f"memória alcança: {', '.join(mudas)}")
+        print("  Memória curta: ainda NÃO é motivo para desativar. Confira de novo quando ela crescer.")
+    elif mudas:
         print(f"⚠ {len(mudas)} fonte(s) ativa(s) sem nenhuma publicação: {', '.join(mudas)}")
         print("  Ativa e sem entregar pauta: considere 'sources test', trocar a URL ou desativar.")
     if r.get("set_by"):

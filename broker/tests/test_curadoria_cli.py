@@ -458,3 +458,86 @@ def test_checkpoint1_so_relata_quando_a_camada_nao_barrou(broker, capsys):
     saida = capsys.readouterr().out
     assert "relatório, não barrou" in saida
     assert "camada de TÍTULO" not in saida
+
+
+# ---------------------------------------- os resíduos que a auditoria de prontidão achou
+def test_sources_list_sobrevive_a_feed_sem_nome(broker):
+    """Regressão nova da 1.7.0: na base, todo acesso ao nome era guardado com
+    `(f.get('source') or '')`. O `mudas` nasceu sem a guarda e o `', '.join` estourava
+    TypeError DEPOIS de imprimir a lista inteira, deixando o operador com um traceback no
+    lugar do rodapé. `main()` não captura TypeError, então o exit era 1."""
+    broker.respostas["/sources"] = {
+        "source": "state",
+        "feeds": [{"source": "Glossy", "url": "https://glossy.co/feed", "enabled": True,
+                   "last_test": None, "publicadas": 3, "materias": 3, "barradas": 0},
+                  {"url": "https://retaildive.com/feeds/news/", "enabled": True,
+                   "last_test": None, "publicadas": 0, "materias": 0, "barradas": 0}]}
+    saida = _roda(woow.cmd_sources_list, campanha=None)
+    assert "(sem nome)" in saida
+    # O vizinho que continua passando: sem ele, "não estourou" imita "a guarda funciona".
+    assert "3 publicada(s)" in saida
+    assert "1 fonte(s) ativa(s) sem nenhuma publicação" in saida
+
+
+def test_sources_list_nao_manda_desativar_quando_a_memoria_e_curta(broker):
+    """Procedência só existe desde 02/09/2026. No começo, "0 publicadas" é dado sobre o
+    tamanho da memória, não sobre a fonte, e o conselho de desativar caía em fonte saudável.
+    Desativar fonte encolhe a pauta, e a pauta tem piso de 3 blocos no generate."""
+    broker.respostas["/sources"] = {
+        "source": "state", "campanha": "daily-drops", "edicoes_na_memoria": 8,
+        "feeds": [{"source": "Business of Fashion", "url": "https://bof.com/feed",
+                   "enabled": True, "last_test": None,
+                   "publicadas": 0, "materias": 0, "barradas": 0}]}
+    saida = _roda(woow.cmd_sources_list, campanha=None)
+    assert "NUNCA PUBLICOU" not in saida
+    assert "considere 'sources test', trocar a URL ou desativar" not in saida
+    assert "0 publicada(s) nas 8 edição(ões) que a memória alcança" in saida
+    assert "ainda NÃO é motivo para desativar" in saida
+
+
+def test_sources_list_volta_a_acusar_quando_a_memoria_cresce(broker):
+    """O caminho que segue aberto: com memória longa, 0 publicadas é achado de verdade, e
+    era esse o achado que motivou a coluna. Sem este teste, o conserto acima poderia ter
+    silenciado a acusação para sempre e nada apontaria isso."""
+    broker.respostas["/sources"] = {
+        "source": "state", "campanha": "daily-drops", "edicoes_na_memoria": 40,
+        "feeds": [{"source": "Business of Fashion", "url": "https://bof.com/feed",
+                   "enabled": True, "last_test": None,
+                   "publicadas": 0, "materias": 0, "barradas": 0}]}
+    saida = _roda(woow.cmd_sources_list, campanha=None)
+    assert "NUNCA PUBLICOU" in saida
+    assert "considere 'sources test', trocar a URL ou desativar" in saida
+
+
+def test_sources_list_sem_o_alcance_da_memoria_mantem_o_comportamento_antigo(broker):
+    """Broker 1.7.0 anterior a este conserto não manda `edicoes_na_memoria`. Ausência não
+    pode virar "memória curta", senão a acusação desaparece contra broker antigo."""
+    broker.respostas["/sources"] = {
+        "source": "state",
+        "feeds": [{"source": "Business of Fashion", "url": "https://bof.com/feed",
+                   "enabled": True, "last_test": None,
+                   "publicadas": 0, "materias": 0, "barradas": 0}]}
+    assert "NUNCA PUBLICOU" in _roda(woow.cmd_sources_list, campanha=None)
+
+
+def test_checkpoint_1_nao_perde_a_pauta_no_dia_de_muitos_barrados(broker):
+    """O broker corta o summary em 4000 e o `.research.md` reserva 3700 para a seção de
+    barrados. Cortar em 2000 aqui fazia a lista de candidatos e a cobertura por fonte
+    desaparecerem da ÚNICA tela em que o operador revisa a pauta, a partir de 6 barrados, e
+    não existe outro caminho para vê-la: não há rota para o `.research.md` e o workdir do
+    broker é apagado no `finally` do `run_stage`."""
+    barrados_md = "\n".join(f"- Item repetido número {i} com manchete de tamanho realista "
+                            f"https://exemplo.com/materia-{i}" for i in range(30))
+    summary = ("## Pesquisa\nJanela: 3 dias\n\n"
+               f"## Já publicados (barrados)\n{barrados_md}\n\n"
+               "## Candidatos\n- Marca X abre loja com provador AR\n\n"
+               "## Cobertura por fonte\n- Glossy: 20\n")
+    assert len(summary) > 2000, "o cenário precisa passar dos 2000 para valer de teste"
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        woow._render_research({"summary": summary, "barrados": 30, "campanha": "daily-drops",
+                               "barrados_itens": []})
+    saida = buf.getvalue()
+    assert "## Candidatos" in saida
+    assert "Marca X abre loja com provador AR" in saida
+    assert "## Cobertura por fonte" in saida

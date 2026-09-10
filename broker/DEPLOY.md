@@ -208,6 +208,47 @@ gcloud functions logs read woow-news-broker --gen2 --region=$REGION --limit=20
 
 ---
 
+## 8. Rollback, e a volta
+
+O rollback do **código** é seguro nas duas direções: nenhuma versão faz migração de estado,
+e todo artefato derivado (`queue.json`, `publicados/<campanha>.json`) se reconstrói a partir
+dos states. Uma versão antiga simplesmente ignora os campos que não conhece.
+
+```bash
+# 1. Qual revisão está no ar, e quais existem
+gcloud run revisions list --service=woow-news-broker --region=$REGION --project=$PROJECT
+
+# 2. Voltar 100% do tráfego para a revisão anterior (instantâneo, não rebuilda nada)
+gcloud run services update-traffic woow-news-broker --region=$REGION --project=$PROJECT \
+  --to-revisions=<REVISAO-ANTERIOR>=100
+
+# 3. Confirmar. Este passo NÃO é opcional: /version lê a env var SKILL_VERSION, não o
+#    código, então uma revisão com a env errada mente sobre o que está rodando.
+curl -s "$(gcloud functions describe woow-news-broker --gen2 --region=$REGION --format='value(serviceConfig.uri)')/version"
+```
+
+**O que o rollback NÃO desfaz, e o que fazer na volta.** Enquanto a versão antiga estiver no
+ar, o índice de publicados para de receber os links das edições enviadas nesse período. O
+reupgrade não fecha esse buraco sozinho, porque só um blob **ausente** dispara reconstrução:
+o blob existente e desatualizado fica como está. Depois de voltar para a versão nova, rode
+uma vez:
+
+```bash
+python3 scripts/woow.py curadoria rebuild    # admin; reconstrói dos states, nada se perde
+```
+
+Sem isso, a primeira pesquisa depois da volta pode devolver à pauta uma matéria enviada
+durante a janela do rollback, e a tela do operador não tem como distinguir isso de um dia
+sem repetição.
+
+**Nunca faça rollback com `gcloud functions deploy`.** Sem `--source`, esse comando reenvia
+o **diretório corrente** como código novo, o que quer dizer que rodá-lo de um clone de outra
+revisão publica aquele código em silêncio enquanto `/version` continua anunciando a versão
+antiga. `update-traffic` troca a revisão sem tocar em código nem em env var, e é o único
+caminho de rollback deste serviço.
+
+---
+
 ## Cron tick (agendamento da News)
 
 O agendamento da News (horário/dias/auto-send) é dado mutável em `schedule.json` no bucket

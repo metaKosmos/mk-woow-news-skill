@@ -492,3 +492,78 @@ def test_reset_bem_sucedido_nao_avisa(tmp_path, monkeypatch):
     _enviada(sm, "2026-09-08", [("Glossy", "https://glossy.co/a", "A")])
     assert "aviso" not in orchestrator.reset_edition("2026-09-08")
     assert sm.get_publicados("daily-drops")["links"] == []
+
+
+# ------------------------------------------------- a edição de referência dos relatórios
+# O bucket de produção tem 9 chaves que NÃO são data (`webinar-*`, `2026-wNN`,
+# `teste-remetente-*`), nenhuma com campo `campanha`, logo todas lidas como a padrão. A
+# queue ordena por chave, e 'w' > '2': a última linha era `webinar-ultima-chamada` para
+# sempre. As 407 fixtures da suíte usavam só chave de data, então nada disto aparecia.
+def _linha(sm, edition, stage="sent", date=None, campanha=None, barrados=None):
+    patch = {"stage": stage, "date": date if date is not None else edition}
+    if campanha:
+        patch["campanha"] = campanha
+    if barrados is not None:
+        patch["health"] = {"barrados": len(barrados),
+                           "barrados_itens": [{"titulo": t, "fonte": f, "link": l,
+                                               "motivo": "url"} for t, f, l in barrados]}
+    sm.upsert_edition(edition, patch)
+
+
+def test_edicao_de_referencia_ignora_chave_que_nao_e_data(tmp_path, monkeypatch):
+    """Controle positivo do caso de produção: a chave de webinar não pode ganhar da diária."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    _linha(sm, "2026-09-10", barrados=[("Marca X abre loja", "Glossy", "https://glossy.co/a")])
+    for morta in ("webinar-ultima-chamada", "webinar-lembrete-1h", "webinar-confirmacao",
+                  "teste-remetente-2026-07-16", "2026-w27"):
+        _linha(sm, morta, date="")
+    r = contrib = orchestrator.contribuicao_por_fonte(sm)
+    assert r["edicao_referencia"] == "2026-09-10", r["edicao_referencia"]
+    # A consequência que o operador sentia: a coluna barradas ficava 0 para sempre.
+    assert contrib["por_fonte"]["Glossy"]["barradas"] == 1
+
+
+def test_edicao_de_referencia_e_a_maior_data_nao_a_maior_chave(tmp_path, monkeypatch):
+    sm = _local_sm(tmp_path, monkeypatch)
+    _linha(sm, "2026-09-09")
+    _linha(sm, "2026-09-10", barrados=[("t", "Glossy", "https://glossy.co/a")])
+    _linha(sm, "webinar-2026-08-21", date="2026-08-21")   # chave alta, data velha
+    r = orchestrator.contribuicao_por_fonte(sm)
+    assert r["edicao_referencia"] == "2026-09-10"
+
+
+def test_chave_nao_data_com_campo_date_valido_ainda_perde_o_empate(tmp_path, monkeypatch):
+    """Empate de data: ganha a edição cuja CHAVE é a data, que é a diária."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    _linha(sm, "2026-09-10", barrados=[("t", "Glossy", "https://glossy.co/a")])
+    _linha(sm, "webinar-confirmacao", date="2026-09-10")
+    r = orchestrator.contribuicao_por_fonte(sm)
+    assert r["edicao_referencia"] == "2026-09-10"
+    assert r["por_fonte"]["Glossy"]["barradas"] == 1
+
+
+def test_so_chaves_sem_data_devolve_referencia_nenhuma(tmp_path, monkeypatch):
+    """Sem candidata legítima, `None` e a tela cala. Cair no hoje do `_resolve_edition_date`
+    faria toda edição de webinar empatar em primeiro lugar: o mesmo defeito por outra porta."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    _linha(sm, "webinar-ultima-chamada", date="")
+    _linha(sm, "2026-w25", date="")
+    assert orchestrator.contribuicao_por_fonte(sm)["edicao_referencia"] is None
+
+
+def test_edicao_vazia_nao_e_referencia(tmp_path, monkeypatch):
+    sm = _local_sm(tmp_path, monkeypatch)
+    _linha(sm, "2026-09-09", barrados=[("t", "Glossy", "https://glossy.co/a")])
+    _linha(sm, "2026-09-11", stage="empty")
+    r = orchestrator.contribuicao_por_fonte(sm)
+    assert r["edicao_referencia"] == "2026-09-09"
+
+
+def test_relatorio_diz_quantas_edicoes_a_memoria_alcanca(tmp_path, monkeypatch):
+    """Sem este número o CLI não separa "fonte que não entrega" de "memória curta"."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    _enviada(sm, "2026-09-09", [("Glossy", "https://glossy.co/a", "t")])
+    _enviada(sm, "2026-09-10", [("Glossy", "https://glossy.co/b", "t")])
+    r = orchestrator.get_sources_report({}, sm)
+    assert r["edicoes_na_memoria"] == 2
+    assert orchestrator.contribuicao_por_fonte(sm)["edicoes_na_memoria"] == 2

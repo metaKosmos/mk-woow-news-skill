@@ -735,7 +735,8 @@ def get_sources_report(payload=None, sm=None):
                       {"publicadas": 0, "materias": 0, "barradas": 0})}
              for f in base["feeds"]]
     return {**base, "feeds": feeds, "campanha": contrib["campanha"],
-            "edicao_referencia": contrib["edicao_referencia"]}
+            "edicao_referencia": contrib["edicao_referencia"],
+            "edicoes_na_memoria": contrib.get("edicoes_na_memoria")}
 
 
 def get_sources(sm=None):
@@ -1267,18 +1268,37 @@ def contribuicao_por_fonte(sm=None, campanha=None):
     # `estrito`: isto alimenta RELATÓRIO (`sources list`), não a pesquisa. O fail-open que
     # protege a pesquisa de ficar sem newsletter, aqui só produziria uma acusação falsa.
     slug, _regra_, _doc = _regra(sm, campanha, estrito=True)
+    doc_pub = sm.get_publicados(slug)
     publicadas, materias = {}, {}
-    for e in (sm.get_publicados(slug).get("links") or []):
+    for e in (doc_pub.get("links") or []):
         fonte = e.get("source") or ""
         if not fonte:
             continue
         publicadas[fonte] = publicadas.get(fonte, 0) + 1
         materias.setdefault(fonte, set()).add(e.get("link"))
     barradas = {}
-    ultima = None
+    # A referência é a edição mais recente POR DATA, não a última linha da queue. A queue
+    # ordena por CHAVE (`rows.sort(key=lambda r: r["edition"])`), e o bucket de produção tem
+    # 9 chaves que não são data (`webinar-*`, `2026-wNN`, `teste-remetente-*`), nenhuma com
+    # campo `campanha`, logo todas lidas como a padrão. Como 'w' > '2' em ASCII,
+    # `webinar-ultima-chamada` era o máximo para sempre: a coluna `barradas` ficava 0
+    # permanentemente e o `curadoria status` anunciava "sem registro de barrados" no dia em
+    # que a trava barrou. Chave que não resolve em data fica FORA em vez de cair no hoje do
+    # `_resolve_edition_date`: aquele fallback empataria toda edição de webinar em primeiro
+    # lugar, que é o mesmo defeito por outro caminho.
+    candidatas = []
     for linha in (sm.get_queue().get("editions") or []):
-        if linha.get("campanha", CAMPANHA_PADRAO) == slug and linha.get("stage") != "empty":
-            ultima = linha["edition"]
+        if linha.get("campanha", CAMPANHA_PADRAO) != slug or linha.get("stage") == "empty":
+            continue
+        ed = linha.get("edition") or ""
+        chave_e_data = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", ed))
+        data = ed if chave_e_data else (linha.get("date") or "").strip()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", data):
+            continue
+        # Empate de data: ganha a edição cuja CHAVE é a data. Sem isto uma campanha de
+        # webinar carimbada no mesmo dia disputaria a vaga com a edição diária.
+        candidatas.append((data, chave_e_data, ed))
+    ultima = max(candidatas)[2] if candidatas else None
     if ultima:
         health = (sm.get_state(ultima).get("health") or {})
         for item in (health.get("barrados_itens") or []):
@@ -1289,6 +1309,11 @@ def contribuicao_por_fonte(sm=None, campanha=None):
             if fonte:
                 barradas[fonte] = barradas.get(fonte, 0) + 1
     return {"campanha": slug, "edicao_referencia": ultima,
+            # Quantas edições a memória alcança. Sem este número o CLI não consegue separar
+            # "fonte que não entrega" de "memória curta demais para ter visto essa fonte":
+            # procedência só existe desde 02/09, então no dia 1 toda fonte de publicação
+            # esparsa aparece com zero, e a tela recomendava desativar fonte saudável.
+            "edicoes_na_memoria": doc_pub.get("edicoes"),
             "por_fonte": {f: {"publicadas": publicadas.get(f, 0),
                               "materias": len(materias.get(f, ())),
                               "barradas": barradas.get(f, 0)}
