@@ -299,6 +299,11 @@ def _build_send_args(edition, st, deliv, sender, active_list):
 
 
 def run_stage(edition, stage, payload):
+    # A régua do id vale em TODA porta que escreve estado com ele, não só na criação. O
+    # `_persist_content` logo abaixo usa a string como PADRÃO DE GLOB, e `nl/hist/<id>/` a usa
+    # como segmento de path: um `--edition "e*"` ou `--edition a/b` chegando por aqui produz
+    # exatamente os modos de falha que a guarda documenta, e /run é a rota mais usada de todas.
+    edition = _valida_edition_id(edition)
     sm = _sm()
     wd = None
     try:
@@ -388,6 +393,7 @@ def run_stage(edition, stage, payload):
 
 
 def add_pauta(edition, pauta):
+    edition = _valida_edition_id(edition)
     if not pauta:
         raise EntradaInvalida("campo 'pauta' obrigatório")
     sm = _sm()
@@ -421,12 +427,24 @@ def create_campaign(payload):
     # 200, pulava a checagem de existência e criava a edição na campanha padrão — o operador
     # ficava com confirmação escrita de ter criado na campanha certa.
     campanha = payload.get("campanha")
+    prefixo, data = split_edition_id(edition)
+    if campanha is None and prefixo is not None:
+        # O id COMPOSTO declara a campanha sozinho, e é assim que ele aparece no `woow
+        # status`, de onde o operador copia. Sem adotar o prefixo, colar
+        # `woow-beauty--2026-09-15` sem `--campanha` gravava um state SEM o campo: o id dizia
+        # uma campanha e `campanha_da_edicao` respondia `daily-drops`, com 200 e sem log. Os
+        # links da Beauty entravam na memória da diária, o `curadoria status` da Beauty ficava
+        # vazio, e o auditor de repetição — que atribui campanha pelo FORMATO DO ID — passava
+        # a discordar do broker sobre a mesma edição.
+        #
+        # Adotar não conflita com a decisão 3 (divergência é recusada, nunca resolvida em
+        # silêncio): aqui não há duas declarações discordando, há uma só.
+        campanha = prefixo
     if campanha is not None:
         slug = _valida_slug(campanha)
         if slug not in get_curadoria(sm)["campanhas"]:
             raise EntradaInvalida(
                 f"campanha não encontrada: {slug!r}. Crie antes: curadoria criar --campanha {slug}")
-        prefixo, data = split_edition_id(edition)
         if prefixo is not None and prefixo != slug:
             # Divergência entre o id e a campanha é recusada, nunca resolvida em silêncio:
             # os dois são declaração do operador e um deles está errado.
@@ -623,6 +641,7 @@ def set_html(payload):
     html = payload.get("html")
     if not edition or not html:
         raise EntradaInvalida("campos 'edition' e 'html' obrigatórios")
+    edition = _valida_edition_id(edition)
     sm = _sm()
     st = sm.get_state(edition)
     # tempdir mínimo: set_html só escreve o HTML e publica (não precisa dos secrets do _workdir).
@@ -668,7 +687,9 @@ def get_queue():
     return _sm().get_queue()
 
 
-METRICS_POR_CAMPANHA = 3
+# 4 por campanha porque era esse o tamanho da janela global de antes: com uma campanha só —
+# a realidade de hoje — o `metrics` mostra exatamente as mesmas 4 edições que mostrava.
+METRICS_POR_CAMPANHA = 4
 METRICS_TETO_GLOBAL = 12
 
 
@@ -677,20 +698,36 @@ def _ultimas_enviadas(queue):
 
     Ordena por `date` e não pela chave: a fila é ordenada lexicograficamente pelo id, e id
     composto ordena depois de qualquer data. O desempate pelo id mantém determinismo quando
-    duas edições da mesma campanha têm a mesma data."""
+    duas edições da mesma campanha têm a mesma data.
+
+    O teto é aplicado em RODÍZIO — a mais recente de cada campanha, depois a segunda de cada,
+    e assim por diante — e não por recência global. Por recência, `4 x 12` comporta três
+    campanhas e a quarta em diante some inteira: a que publica com menos frequência perde
+    todas as vagas para as diárias, que é exatamente o defeito que este recorte existe para
+    consertar, entrando de novo pela porta do teto."""
     por_campanha = {}
     for e in (queue.get("editions") or []):
         if e.get("stage") != "sent":
             continue
         por_campanha.setdefault(e.get("campanha") or CAMPANHA_PADRAO, []).append(e)
-    escolhidas = []
+
+    filas = []
     for _slug, linhas in sorted(por_campanha.items()):
         linhas.sort(key=lambda e: ((e.get("date") or ""), e.get("edition") or ""))
-        escolhidas += linhas[-METRICS_POR_CAMPANHA:]
-    # O teto corta as campanhas menos recentes, não as primeiras da ordem alfabética: sem
-    # isto, a campanha de slug 'a' comeria a cota e a de slug 'z' nunca apareceria.
+        filas.append(linhas[-METRICS_POR_CAMPANHA:])
+
+    escolhidas = []
+    for rodada in range(METRICS_POR_CAMPANHA):
+        for fila in filas:
+            # -1 é a mais recente daquela campanha, -2 a seguinte, e assim por diante.
+            if rodada < len(fila):
+                escolhidas.append(fila[-1 - rodada])
+            if len(escolhidas) >= METRICS_TETO_GLOBAL:
+                break
+        if len(escolhidas) >= METRICS_TETO_GLOBAL:
+            break
     escolhidas.sort(key=lambda e: ((e.get("date") or ""), e.get("edition") or ""))
-    return escolhidas[-METRICS_TETO_GLOBAL:]
+    return escolhidas
 
 
 def _refresh_metrics(sm):
@@ -743,6 +780,7 @@ def do_sync():
 
 
 def reset_edition(edition):
+    edition = _valida_edition_id(edition)
     _queue, indice_ok = _sm().reset_edition(edition)
     out = {"reset": edition}
     if not indice_ok:
@@ -1240,6 +1278,7 @@ def set_curadoria(payload):
                 raise EntradaInvalida(
                     f"{slug!r} é a campanha padrão e não pode ser removida; troque a padrão antes")
             campanhas.pop(slug)
+            _neutraliza_schedule(sm, slug)
         alvo["set_by"], alvo["set_at"] = email, now
 
     novo = {"default": doc["default"], "campanhas": campanhas}
@@ -1376,13 +1415,20 @@ def get_publicados_report(payload=None, sm=None):
     dias = _valida_dias(payload.get("dias"))
 
     def _data(e):
-        """A mesma régua que `_memoria_publicados` aplica no recorte da janela.
+        """Data comparável da entrada, ou "" quando ela não tem data nenhuma.
 
-        Aqui ela faltava: o filtro e a ordenação usavam `date or edition` cru, sem a guarda
-        de `fullmatch`. Com id composto, `"woow-..." > "2026-..."` em ASCII, e os links da
-        campanha nova ficavam no topo do histórico para sempre — e `--dias 7` os mantinha
-        sempre dentro do corte, porque a comparação é de string."""
-        return data_da_edicao(e.get("edition") or "", {"date": e.get("date")})
+        A mesma régua que `_memoria_publicados` aplica no recorte da janela, INCLUSIVE o
+        `fullmatch` — que era o que faltava aqui. O filtro e a ordenação usavam
+        `date or edition` cru, e a comparação é de STRING: com id composto,
+        `"woow-..." > "2026-..."`; com chave semanal legada, `"2026-w25" >= "2026-09-03"`
+        também é verdadeiro. Nos dois casos a entrada ficava no topo do histórico para sempre
+        e `--dias 7` nunca a cortava.
+
+        O "" não some do histórico: ele ordena por ÚLTIMO (a lista é decrescente) e só fica
+        de fora quando o operador pede uma janela explícita — que é a leitura honesta de
+        "os últimos N dias" para uma entrada sem data."""
+        d = data_da_edicao(e.get("edition") or "", {"date": e.get("date")})
+        return d if re.fullmatch(r"\d{4}-\d{2}-\d{2}", d or "") else ""
 
     if dias:
         corte = (datetime.now(BRT) - timedelta(days=dias)).strftime("%Y-%m-%d")
@@ -1627,7 +1673,12 @@ def get_schedule(sm=None, campanha=None):
     O legado é da padrão e de mais ninguém: herdá-lo numa campanha nova a faria nascer com
     `enabled: True` e mandar e-mail sozinha no primeiro tick."""
     sm = sm or _sm()
-    campanha = campanha or CAMPANHA_PADRAO
+    # A leitura valida igual à escrita. Sem isto, `schedule status --campanha woow-beuty`
+    # respondia 200 com SCHEDULE_DEFAULTS carimbados com o typo, desenhando uma tela
+    # plausível ("Estado: desligado / 10:00 BRT") indistinguível de uma agenda real
+    # desligada — enquanto `set_schedule` recusava a mesma string. A assimetria é que faz
+    # o operador jurar que ligou a campanha certa.
+    campanha = _valida_campanha_existente(sm, campanha)
     raw = sm.store.read(_schedule_key(campanha))
     if raw is None and campanha == CAMPANHA_PADRAO:
         raw = sm.store.read(SCHEDULE_KEY_LEGADO)
@@ -1673,6 +1724,26 @@ def set_schedule(payload):
     s["set_at"] = datetime.now(BRT).isoformat(timespec="seconds")
     _grava_schedule(sm, campanha, s)
     return s
+
+
+def _neutraliza_schedule(sm, campanha):
+    """Zera a agenda de uma campanha removida, em vez de deixar o blob órfão.
+
+    `curadoria remover` tirava o slug de `campanhas.json` e deixava `schedules/<slug>.json`
+    no bucket. Recriar o mesmo slug fazia `get_schedule` reencontrar o blob antigo, e a
+    campanha "nova" nascia com `enabled: true` e `auto_send: true` herdados: o primeiro tick
+    disparava a newsletter sozinho, contra o que o `schema.md` promete.
+
+    Regravar em vez de apagar porque o store (Local e Gcs) não tem `delete` — e aqui as duas
+    coisas são equivalentes para todo leitor, porque blob ausente e blob com os defaults
+    devolvem o mesmo documento. A única leitura que distingue ausência é o fallback para o
+    `schedule.json` legado, e ela é exclusiva da campanha padrão, que este ramo recusa
+    remover. Falha de escrita não derruba a remoção: a campanha sai do cadastro de qualquer
+    jeito, e o tick nem a enxerga mais."""
+    try:
+        _grava_schedule(sm, campanha, dict(SCHEDULE_DEFAULTS))
+    except Exception as e:  # noqa: BLE001 — o cadastro é a fonte; a agenda é satélite
+        print(f"[curadoria] não zerei a agenda de {campanha}: {e}")
 
 
 def _grava_schedule(sm, campanha, s):
@@ -1807,10 +1878,22 @@ def cron_tick():
     pendentes = [{"campanha": s, "edition": e} for _l, s, e, _sc in aprovadas[1:]]
     _mark_schedule_run(sm, hoje, slug)  # claim: não re-tenta no mesmo dia, nesta campanha
     # `run_daily` nunca gravou o campo `campanha`, e `create_campaign` é o único escritor
-    # dele. Sem esta linha, TODA edição nascida do cron — de qualquer campanha — cairia em
+    # dele. Sem esta escrita, TODA edição nascida do cron — de qualquer campanha — cairia em
     # `publicados/daily-drops.json` no rebuild, barrando a pauta da campanha errada.
+    #
+    # No seu PRÓPRIO try, e não solta entre o claim e o pipeline: o dia já está claimado neste
+    # ponto, e uma falha transitória de escrita aqui levantava para fora do `cron_tick` — que
+    # fica fora do try/except do main.py, virando 500 — com `run_daily` nunca chamado. Todos
+    # os ticks seguintes responderiam "já rodou hoje", e a newsletter não sairia mais naquele
+    # dia. O índice de publicados é DERIVADO e se refaz; um dia perdido, não. Por isso o
+    # pipeline segue, e a falha sobe no retorno em vez de sumir.
     if slug != CAMPANHA_PADRAO and campanha_da_edicao(sm.get_state(edition)) != slug:
-        sm.upsert_edition(edition, {"campanha": slug})
+        try:
+            sm.upsert_edition(edition, {"campanha": slug})
+        except Exception as e:  # noqa: BLE001 — dia já claimado; perder o dia é pior
+            print(f"[tick] {slug}: não gravei o campo campanha em {edition}: {e}")
+            erros.append({"campanha": slug, "edition": edition,
+                          "error": f"campo campanha não gravado: {str(e)[:400]}"})
     try:
         result = run_daily(edition, sched.get("auto_send"))
     except Exception as e:  # noqa: BLE001 — dia já claimado; erro fica no health, sem 500/retry

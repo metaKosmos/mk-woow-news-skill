@@ -281,7 +281,8 @@ def test_id_de_edicao_perigoso_e_recusado(tmp_path, monkeypatch, ruim):
 ])
 def test_id_de_edicao_legitimo_continua_passando(tmp_path, monkeypatch, bom):
     """O vizinho da régua: ela recusa o perigoso sem recusar o que já existe no bucket."""
-    _local_sm(tmp_path, monkeypatch)
+    sm = _local_sm(tmp_path, monkeypatch)
+    _campanha(sm, "woow-beauty")  # o id composto adota o prefixo, e a campanha tem de existir
     assert _cria(edition=bom)["edition"] == bom
 
 
@@ -393,3 +394,116 @@ def test_metricas_nao_perdem_o_daily_drops_quando_existe_id_composto(tmp_path, m
     assert any(split_edition_id(e) == (None, e) for e in edicoes), \
         f"o Daily Drops sumiu do /metrics: {edicoes}"
     assert any(e.startswith("woow-beauty--") for e in edicoes)
+
+
+# ---------------------- achados da revisão adversarial: coerência entre id e campo
+
+def test_id_composto_sem_campanha_adota_o_prefixo(tmp_path, monkeypatch):
+    """`woow status` mostra o id composto, e o operador o copia. Sem isto, colar
+    `woow-beauty--2026-09-15` sem `--campanha` gravava um state SEM o campo `campanha`:
+    `campanha_da_edicao` devolvia daily-drops, os links da Beauty entravam na memória da
+    diária, e o `curadoria status` da Beauty ficava vazio. O id dizia uma coisa e a
+    autoridade dizia outra, com 200 e sem log."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    _campanha(sm, "woow-beauty")
+    r = _cria(edition="woow-beauty--2026-09-15")
+    assert r["campanha"] == "woow-beauty"
+    assert sm.get_state("woow-beauty--2026-09-15")["campanha"] == "woow-beauty"
+
+
+def test_id_composto_de_campanha_inexistente_e_recusado(tmp_path, monkeypatch):
+    """Fail-loud: o prefixo virou declaração de campanha, então vale a mesma régua."""
+    _local_sm(tmp_path, monkeypatch)
+    with pytest.raises(orchestrator.EntradaInvalida) as e:
+        _cria(edition="nao-existe--2026-09-15")
+    assert "nao-existe" in str(e.value)
+
+
+def test_id_nu_sem_campanha_continua_na_padrao(tmp_path, monkeypatch):
+    """O vizinho obrigatório: id nu não declara campanha nenhuma e não pode passar a
+    declarar. Se este quebrar, o adotar-prefixo virou adotar-qualquer-coisa."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    assert _cria(edition="2026-09-15")["campanha"] == CAMPANHA_PADRAO
+    assert "campanha" not in sm.get_state("2026-09-15")
+
+
+def test_chave_legada_sem_campanha_continua_na_padrao(tmp_path, monkeypatch):
+    _local_sm(tmp_path, monkeypatch)
+    assert _cria(edition="webinar-2026-08-21")["campanha"] == CAMPANHA_PADRAO
+
+
+def test_historico_nao_deixa_chave_legada_furar_o_recorte_de_dias(tmp_path, monkeypatch):
+    """`--dias 7` mantinha link de junho para sempre.
+
+    O docstring de `_data` promete "a mesma régua que `_memoria_publicados` aplica", e a
+    régua de lá DESCARTA data que não é data. Aqui a comparação é de string e
+    `"2026-w25" >= "2026-09-03"` é verdadeiro ('w' > '0'), então a entrada legada entrava em
+    qualquer janela e ficava no topo da ordenação.
+    """
+    sm = _local_sm(tmp_path, monkeypatch)
+    sm.store.write("publicados/daily-drops.json", json.dumps({
+        "campanha": CAMPANHA_PADRAO, "updated_at": "", "edicoes": 2, "links": [
+            {"link": "https://ex.com/legado", "edition": "2026-w25", "date": "2026-w25"},
+            {"link": "https://ex.com/ontem", "edition": "2026-09-09", "date": "2026-09-09"},
+        ]}))
+    _congela(monkeypatch, datetime(2026, 9, 10, 15, 0, tzinfo=timezone.utc))
+    r = orchestrator.get_publicados_report({"dias": 7})
+    assert [e["link"] for e in r["links"]] == ["https://ex.com/ontem"]
+
+    # vizinho obrigatório: sem recorte, a entrada legada continua aparecendo (não some do
+    # histórico), só que no fim, não no topo
+    todos = orchestrator.get_publicados_report({})
+    assert [e["link"] for e in todos["links"]] == ["https://ex.com/ontem",
+                                                   "https://ex.com/legado"]
+
+
+def test_metricas_mantem_a_janela_de_quatro_com_uma_campanha_so(tmp_path, monkeypatch):
+    """A realidade de hoje é uma campanha só, e a janela não pode encolher sem aviso."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    for d in ("2026-09-10", "2026-09-11", "2026-09-12", "2026-09-13", "2026-09-14"):
+        sm.upsert_edition(d, {"stage": "sent", "date": d})
+    monkeypatch.setattr(orchestrator.secrets_store, "get_zma_gemini_env", lambda: {})
+    edicoes = [e["edition"] for e in orchestrator._refresh_metrics(sm)["editions"]]
+    assert len(edicoes) == 4
+    assert edicoes[-1] == "2026-09-14"
+
+
+def test_metricas_nao_matam_de_fome_a_campanha_menos_frequente(tmp_path, monkeypatch):
+    """Com 5+ campanhas, o teto global cortava por recência e eliminava TODAS as edições da
+    que publica menos. É o mesmo defeito que este recorte existe para consertar."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    for i in range(5):
+        slug = f"camp-{i}"
+        # camp-4 é semanal: publica uma vez, e há muito tempo
+        datas = ["2026-09-01"] if i == 4 else ["2026-09-12", "2026-09-13", "2026-09-14",
+                                               "2026-09-15"]
+        for d in datas:
+            sm.upsert_edition(f"{slug}--{d}", {"stage": "sent", "date": d, "campanha": slug})
+    monkeypatch.setattr(orchestrator.secrets_store, "get_zma_gemini_env", lambda: {})
+    edicoes = [e["edition"] for e in orchestrator._refresh_metrics(sm)["editions"]]
+    campanhas = {e.split("--")[0] for e in edicoes}
+    assert "camp-4" in campanhas, f"a semanal sumiu do /metrics: {edicoes}"
+    assert len(edicoes) <= orchestrator.METRICS_TETO_GLOBAL
+
+
+@pytest.mark.parametrize("rota,chamada", [
+    ("run", lambda ed: orchestrator.run_stage(ed, "research", {})),
+    ("add-pauta", lambda ed: orchestrator.add_pauta(ed, {"title": "t"})),
+    ("set-html", lambda ed: orchestrator.set_html({"edition": ed, "html": "<p>x</p>"})),
+    ("admin/reset", lambda ed: orchestrator.reset_edition(ed)),
+])
+def test_a_regua_do_id_vale_em_toda_porta_que_escreve(tmp_path, monkeypatch, rota, chamada):
+    """A guarda nascera ligada só no `create_campaign`, e outras quatro rotas aceitavam
+    `edition` cru do corpo. Os três modos de falha que ela documenta continuavam
+    alcançáveis: `a/b` grava fora, `e*` casa o glob errado, espaço em branco some da tela."""
+    _local_sm(tmp_path, monkeypatch)
+    with pytest.raises(orchestrator.EntradaInvalida):
+        chamada("../queue")
+
+
+def test_a_regua_nao_recusa_id_legitimo_em_nenhuma_porta(tmp_path, monkeypatch):
+    """O vizinho: a guarda tem de deixar passar tudo que já existe. `reset` é a porta mais
+    barata de exercitar sem tocar no pipeline."""
+    _local_sm(tmp_path, monkeypatch)
+    for bom in ("2026-09-15", "woow-beauty--2026-09-15", "2026-w37", "webinar-2026-08-21"):
+        assert orchestrator.reset_edition(bom)["reset"] == bom

@@ -127,6 +127,14 @@ fi
 if [ "$todas" -eq 1 ] && [ ${#edicoes_arg[@]} -gt 0 ]; then
   echo "--todas não combina com lista explícita de edições" >&2; exit 2
 fi
+# `--desde` só é lido dentro do ramo `--todas`. Com lista explícita ele era validado,
+# aceito e depois nunca usado: a auditoria rodava sobre a lista inteira sem avisar que a
+# janela pedida foi descartada. O script já recusa barulhento a combinação análoga logo
+# acima; esta ficava muda (pré-existente).
+if [ "$todas" -eq 0 ] && [ -n "$desde" ]; then
+  echo "--desde só vale com --todas (a lista explícita já diz quais edições auditar)" >&2
+  exit 2
+fi
 if [ "$todas" -eq 0 ] && [ ${#edicoes_arg[@]} -eq 0 ]; then
   uso; exit 2
 fi
@@ -319,7 +327,20 @@ for ed in ${edicoes[@]+"${edicoes[@]}"}; do
     echo "=== $ed === data de edição não reconhecida (esperado YYYY-MM-DD ou <slug>--YYYY-MM-DD), pulando" >&2
     falhas=$((falhas + 1)); falhas_lista+=("$ed"); continue
   fi
-  canon="$(printf '%s\n' "$links_unicos" | python3 "$PYNORM" | sort -u)"
+  # O rc do normalizador é CONFERIDO (pré-existente: não era). Sem isto, um python3 que
+  # falhe — sintaxe, interpretador sumido, stdin quebrado — devolve $canon vazia, nada vai
+  # para o $ACUM, `processadas` é incrementada assim mesmo, e o rodapé anuncia "N edições
+  # processadas, 0 não auditadas, 0 pares" com exit 0. É o atestado de saúde falso que o
+  # cabeçalho deste arquivo existe para não emitir, e ele apagaria justamente o controle
+  # positivo em que o número desta auditoria se apoia.
+  if ! canon="$(printf '%s\n' "$links_unicos" | python3 "$PYNORM" | sort -u)"; then
+    echo "=== $ed === normalizador falhou (python3), pulando" >&2
+    falhas=$((falhas + 1)); falhas_lista+=("$ed"); continue
+  fi
+  if [ -z "$canon" ]; then
+    echo "=== $ed === normalizador devolveu vazio para $(printf '%s\n' "$links_unicos" | wc -l | tr -d ' ') link(s), pulando" >&2
+    falhas=$((falhas + 1)); falhas_lista+=("$ed"); continue
+  fi
   processadas=$((processadas + 1))
   while IFS= read -r c; do
     [ -z "$c" ] && continue

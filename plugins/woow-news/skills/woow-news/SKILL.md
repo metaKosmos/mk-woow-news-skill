@@ -181,11 +181,22 @@ Trocar o **remetente** e trocar o **HTML** de uma edição deixaram de ser taref
   o histórico de HTML da edição e o `preview_url` sempre aponta pro mais recente.
 
 ## Agendamento (automação de envio)
-A News pode rodar sozinha, todo dia no horário, sem sessão Claude logada. O agendamento
-vive em `schedule.json` no GCS (estado mutável, igual ao alvo de lista) e é editado pelos
-comandos `schedule` acima, sem redeploy. Um job de infra (Cloud Scheduler) bate de tempos
-em tempos no broker (`POST /cron/tick`); o broker lê o `schedule.json` e roda a edição de
-hoje quando dá o horário (dedup por dia, não dispara 2x).
+A News pode rodar sozinha, todo dia no horário, sem sessão Claude logada. **O agendamento é
+por campanha**: vive em `schedules/<campanha>.json` no GCS (estado mutável, igual ao alvo de
+lista) e é editado pelos comandos `schedule` acima, sem redeploy. Todos aceitam `--campanha`;
+omitido, gravam na padrão e a tela diz em qual gravaram.
+
+Um job de infra (Cloud Scheduler) bate de tempos em tempos no broker (`POST /cron/tick`), e o
+tick **roda UMA campanha por vez** — a vencida há mais tempo, com dedup por dia e por
+campanha, não dispara 2x. Uma, e não todas em série, porque cada pipeline tem timeout de 600s
+e N deles numa request estouram o attempt-deadline do Scheduler. Com o tick a cada 15 min, N
+campanhas no mesmo horário saem em N ticks; o retorno traz `pendentes` (as que ficaram para o
+próximo tick, o número que responde "quantas ainda saem hoje") e `ignoradas` (por que cada
+uma das outras não rodou).
+
+Campanha nova nasce **desligada e sem auto-send**: ela não manda e-mail sozinha até alguém
+ligar. O `schedule.json` antigo, sem campanha, continua sendo lido pela padrão enquanto ela
+não tiver arquivo próprio — não há migração a fazer.
 
 Dois modos:
 - **Revisão (default, `auto_send=false`):** o tick roda pesquisa + geração e **para em

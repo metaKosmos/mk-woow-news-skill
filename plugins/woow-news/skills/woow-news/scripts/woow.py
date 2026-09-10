@@ -365,8 +365,16 @@ def cmd_create_campaign(a):
     # `--campanha` (qual newsletter recorrente, e portanto qual regra de curadoria a edição
     # herda) é ortogonal a `--type` (qual pipeline roda). Omitido, o broker usa a padrão.
     extra = {"campanha": a.campanha} if a.campanha else None
+    # A EDIÇÃO É A QUE O BROKER DEVOLVE, não a que o operador digitou. Desde a v1.8.0
+    # `--edition <data> --campanha <slug>` COMPÕE `<slug>--<data>` no broker, e reusar
+    # `a.edition` daqui para baixo faz todo passo seguinte bater na edição do Daily Drops
+    # daquele dia. No `news_auto` isso sai como instrução copiável errada; no `manual_html`
+    # é perda de dado: a edição alvo é `news_auto`, o `run generate` cai no pipeline
+    # automático e DESCARTA o html e o subject, com 200 e sem log nenhum.
+    # `or edition` porque broker anterior à v1.8.0 pode não devolver o campo.
     if a.type == "news_auto":
         r = bc.create_campaign(edition, "news_auto", extra)
+        edition = r.get("edition") or edition
         print(f"Campanha {edition!r} registrada como news_auto (stage {r.get('stage')}).")
         print(f"Curadoria: herda a regra da campanha {(r.get('campanha') or CAMPANHA_PADRAO)!r}.")
         print(f"Rode o pipeline: python scripts/woow.py run --edition {edition}")
@@ -377,7 +385,8 @@ def cmd_create_campaign(a):
     html = Path(a.html).read_text(encoding="utf-8")
     if not html.strip():
         sys.exit(f"Arquivo HTML vazio: {a.html}")
-    bc.create_campaign(edition, "manual_html", extra)
+    r = bc.create_campaign(edition, "manual_html", extra)
+    edition = r.get("edition") or edition
     g = bc.run(edition, "generate", {"html": html, "subject": a.subject,
                                      "preheader": a.preheader or "", "list_key": a.list_key})
     print(f"Campanha manual {edition!r} pronta.")

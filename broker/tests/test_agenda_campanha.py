@@ -345,3 +345,76 @@ def test_should_run_now_continua_puro_e_intacto():
     sched = {**orchestrator.SCHEDULE_DEFAULTS, "enabled": True}
     ok, motivo = orchestrator._should_run_now(sched, datetime(2026, 9, 15, 12, 0), "empty")
     assert ok is True and motivo == "ok"
+
+
+# ---------------------- achados da revisão adversarial
+
+def test_remover_campanha_neutraliza_a_agenda_dela(tmp_path, monkeypatch):
+    """`curadoria remover` tirava o slug de campanhas.json e deixava
+    `schedules/<slug>.json` órfão no bucket. Recriar o mesmo slug fazia a campanha "nova"
+    nascer com `enabled: true` e `auto_send: true` herdados, e o primeiro tick disparava a
+    newsletter sozinho — contra o que o schema.md desta mesma PR promete."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    _campanha("woow-beauty")
+    _liga("woow-beauty", auto_send=True)
+    orchestrator._mark_schedule_run(sm, "2026-09-15", "woow-beauty")
+
+    orchestrator.set_curadoria({"op": "remover", "campanha": "woow-beauty",
+                                "_email": "david@metakosmos.com.br"})
+    _campanha("woow-beauty")
+
+    s = orchestrator.get_schedule(campanha="woow-beauty")
+    assert s["enabled"] is False
+    assert s["auto_send"] is False
+    assert s["last_run_date"] is None
+
+
+def test_remover_nao_encosta_na_agenda_das_outras(tmp_path, monkeypatch):
+    """O vizinho: neutralizar a agenda da removida não pode desligar as vizinhas."""
+    _local_sm(tmp_path, monkeypatch)
+    _campanha("woow-beauty")
+    _campanha("woow-food")
+    _liga("woow-beauty")
+    _liga("woow-food", send_time="08:00")
+    orchestrator.set_curadoria({"op": "remover", "campanha": "woow-beauty",
+                                "_email": "d@x"})
+    s = orchestrator.get_schedule(campanha="woow-food")
+    assert s["enabled"] is True
+    assert s["send_time"] == "08:00"
+
+
+def test_get_schedule_recusa_campanha_que_nao_existe(tmp_path, monkeypatch):
+    """Assimetria perigosa: `set_schedule` recusava o typo e `get_schedule` respondia 200
+    com os defaults carimbados. `schedule status --campanha woow-beuty` desenhava
+    "Estado: desligado", indistinguível de uma campanha real com a agenda desligada."""
+    _local_sm(tmp_path, monkeypatch)
+    with pytest.raises(orchestrator.EntradaInvalida):
+        orchestrator.get_schedule(campanha="woow-beuty")
+    # vizinho: a que existe continua respondendo, e a padrão não precisa de cadastro
+    _campanha("woow-beauty")
+    assert orchestrator.get_schedule(campanha="woow-beauty")["campanha"] == "woow-beauty"
+    assert orchestrator.get_schedule()["campanha"] == CAMPANHA_PADRAO
+
+
+def test_falha_ao_gravar_a_campanha_nao_perde_o_dia(tmp_path, monkeypatch):
+    """O upsert do campo `campanha` ficava entre o claim e o try do pipeline. Uma falha
+    transitória ali levantava para fora do cron_tick (500 no /cron/tick, que está fora do
+    try do main.py) com o dia JÁ claimado: run_daily nunca rodava, e os ticks seguintes
+    respondiam "já rodou hoje". A newsletter não sairia mais naquele dia."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    _campanha("woow-beauty")
+    _liga("woow-beauty")
+
+    real = StateManager.upsert_edition
+
+    def _upsert_que_falha(self, edition, patch):
+        if "campanha" in patch:
+            raise RuntimeError("GCS piscou")
+        return real(self, edition, patch)
+
+    monkeypatch.setattr(StateManager, "upsert_edition", _upsert_que_falha)
+    rodadas = []
+    r = _tick(monkeypatch, rodadas)
+    assert r["ran"] is True
+    assert rodadas == ["woow-beauty--2026-09-15"], "o pipeline não rodou"
+    assert sm is not None
