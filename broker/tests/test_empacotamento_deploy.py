@@ -50,8 +50,13 @@ def test_o_que_precisa_subir():
     runtime = [str(p.relative_to(BROKER)) for p in BROKER.rglob("*.py")
                if "tests" not in p.parts and "__pycache__" not in p.parts]
     assert len(runtime) >= 8, f"achei só {len(runtime)} módulos de runtime, cenário errado"
+    # `formatos.yaml` entrou na v1.8.0 e é lido pelos DOIS scripts do pipeline. Ele não
+    # derruba nada se faltar (os dois caem no formato de hoje), e é exatamente por isso que
+    # precisa estar aqui: a ausência sairia como campanha escrevendo no formato errado, sem
+    # erro nenhum, e ninguém procuraria no empacotamento.
     for dentro in runtime + ["requirements.txt", "config/newsletter.yaml",
-                             "config/feeds.yaml", "config/prompts/write.md",
+                             "config/feeds.yaml", "config/formatos.yaml",
+                             "config/prompts/write.md",
                              "templates/woow-daily-drops.html.j2"]:
         assert not _ignorado(dentro, padroes), f"{dentro} NÃO subiria, e o runtime precisa dele"
 
