@@ -35,7 +35,7 @@ Uso:
   python scripts/woow.py schedule on | off
   python scripts/woow.py schedule auto-send on | off
 """
-import argparse, sys
+import argparse, re, sys
 from collections import Counter
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -661,6 +661,37 @@ def cmd_curadoria_set(a):
     _print_regra((r.get("campanhas") or {}).get(r.get("campanha"), {}))
 
 
+def _ultima_edicao(linhas, slug):
+    """A edição mais recente da campanha, POR DATA. Devolve None se não houver nenhuma.
+
+    Não é `linhas[-1]`. A queue vem ordenada por CHAVE (`rows.sort(key=r["edition"])` no
+    `state_manager`), e o bucket tem 9 edições cuja chave não é data e que nasceram antes do
+    campo `campanha` existir, logo são lidas como a padrão: `webinar-*`, `2026-wNN`,
+    `teste-remetente-*`. Como 'w' e 't' > '2' em ASCII e chave de data começa sempre com '2',
+    `webinar-ultima-chamada` era a última para sempre, e o `curadoria status` respondia
+    "Última pesquisa: webinar-ultima-chamada / sem registro de barrados (pesquisa anterior à
+    trava)" no dia em que a trava barrou. É a frase que responde "a trava ligou?".
+
+    Medido em produção em 2026-09-11: a pesquisa barrou 4 itens e esta linha dizia zero.
+
+    Chave que não resolve em data fica FORA em vez de usar hoje como padrão: dar hoje às
+    cinco edições de webinar as colocaria empatadas em primeiro lugar, que é o mesmo defeito
+    por outra porta. Empate de data: ganha aquela cuja CHAVE é a data, que é a diária.
+    Espelha `contribuicao_por_fonte` no broker, que resolve o mesmo problema para o
+    `sources list`."""
+    candidatas = []
+    for e in linhas:
+        if (e.get("campanha") or CAMPANHA_PADRAO) != slug or e.get("stage") == "empty":
+            continue
+        ed = e.get("edition") or ""
+        chave_e_data = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", ed))
+        data = ed if chave_e_data else (e.get("date") or "").strip()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", data):
+            continue
+        candidatas.append((data, chave_e_data, ed, e))
+    return max(candidatas)[3] if candidatas else None
+
+
 def cmd_curadoria_status(a):
     """O comando que responde 'por que essa matéria não apareceu na edição de hoje'."""
     slug, regra, default = _regra_atual(a.campanha)
@@ -672,10 +703,8 @@ def cmd_curadoria_status(a):
     print(f"Memória       : {regra.get('memoria_links', 0)} link(s) de "
           f"{regra.get('memoria_edicoes', 0)} edição(ões) enviada(s)")
 
-    linhas = [e for e in (bc.queue().get("editions") or [])
-              if (e.get("campanha") or CAMPANHA_PADRAO) == slug and e.get("stage") != "empty"]
-    if linhas:
-        ult = linhas[-1]
+    ult = _ultima_edicao(bc.queue().get("editions") or [], slug)
+    if ult:
         print(f"\nÚltima pesquisa: {ult['edition']} ({ult.get('stage')})")
         if ult.get("barrados") is None:
             print("  sem registro de barrados (pesquisa anterior à trava)")

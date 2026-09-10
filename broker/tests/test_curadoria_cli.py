@@ -541,3 +541,84 @@ def test_checkpoint_1_nao_perde_a_pauta_no_dia_de_muitos_barrados(broker):
     assert "## Candidatos" in saida
     assert "Marca X abre loja com provador AR" in saida
     assert "## Cobertura por fonte" in saida
+
+
+# ------------------------------------------- "Última pesquisa" do `curadoria status`
+# A queue de produção (45 edições, medida em 2026-09-11) tem 9 chaves que não são data e
+# nasceram antes do campo `campanha`, logo caem na padrão. A queue vem ordenada por chave, e
+# 'w' e 't' > '2' em ASCII: `linhas[-1]` devolvia `webinar-ultima-chamada` para sempre.
+# Medido em produção: a pesquisa de 2026-09-11 barrou 4 itens e a linha dizia
+# "sem registro de barrados (pesquisa anterior à trava)".
+QUEUE_PRODUCAO = [
+    {"edition": "2026-09-10", "date": "2026-09-10", "stage": "sent",
+     "campanha": "daily-drops", "barrados": 0},
+    {"edition": "2026-09-11", "date": "2026-09-11", "stage": "researched",
+     "campanha": "daily-drops", "barrados": 4},
+    {"edition": "2026-w25", "date": "", "stage": "sent", "campanha": None},
+    {"edition": "2026-w26", "date": "2026-06-23", "stage": "sent", "campanha": None},
+    {"edition": "2026-w27", "date": "2026-06-23", "stage": "sent", "campanha": None},
+    {"edition": "teste-remetente-2026-07-16", "date": "2026-07-16", "stage": "sent",
+     "campanha": None},
+    {"edition": "webinar-2026-08-21", "date": "2026-08-15", "stage": "ready", "campanha": None},
+    {"edition": "webinar-confirmacao", "date": "2026-08-15", "stage": "ready", "campanha": None},
+    {"edition": "webinar-lembrete-1h", "date": "2026-08-15", "stage": "ready", "campanha": None},
+    {"edition": "webinar-lembrete-24h", "date": "2026-08-15", "stage": "ready", "campanha": None},
+    {"edition": "webinar-ultima-chamada", "date": "2026-08-15", "stage": "ready",
+     "campanha": None},
+]
+
+
+def test_ultima_pesquisa_e_a_edicao_mais_recente_por_data(broker):
+    """Controle: a queue vem NA ORDEM DE PRODUÇÃO, com a chave de webinar por último."""
+    assert QUEUE_PRODUCAO[-1]["edition"] == "webinar-ultima-chamada", "fixture fora de ordem"
+    broker.respostas["/queue"] = {"editions": QUEUE_PRODUCAO}
+    saida = _roda(woow.cmd_curadoria_status, campanha=None)
+    assert "Última pesquisa: 2026-09-11 (researched)" in saida
+    assert "webinar" not in saida
+    assert "4 item(ns) barrado(s) por já terem saído" in saida
+    assert "sem registro de barrados" not in saida
+
+
+def test_sem_edicao_diaria_o_legado_mais_RECENTE_ganha_nao_o_de_chave_maior(broker):
+    """O limite honesto deste conserto, medido em vez de suposto.
+
+    As 5 edições de webinar têm `date: 2026-08-15`, uma data VÁLIDA, e nasceram sem o campo
+    `campanha`, então `campanha_da_edicao` as lê como `daily-drops`. Elas continuam
+    candidatas legítimas: excluir chave não-data não as tira da disputa, porque quem as
+    qualifica é o campo `date`.
+
+    O que o conserto elimina é a resposta PERMANENTEMENTE errada. Antes, `webinar-ultima-
+    chamada` ganhava de qualquer edição diária, para sempre, por ordem de string. Agora ela
+    só aparece quando não existe nenhuma edição diária mais recente, o que na cadência diária
+    dura menos de um dia.
+
+    O resíduo é higiene de dado, não de código: aquelas 5 edições deveriam estar numa
+    campanha própria. Enquanto não estiverem, elas SÃO daily-drops para o sistema.
+    Desempate entre as cinco (mesma data, nenhuma com chave de data): pela chave, que dá
+    `webinar-ultima-chamada`, determinístico."""
+    broker.respostas["/queue"] = {"editions": [e for e in QUEUE_PRODUCAO
+                                               if not e["edition"].startswith("2026-09")]}
+    saida = _roda(woow.cmd_curadoria_status, campanha=None)
+    assert "Última pesquisa: webinar-ultima-chamada" in saida, saida
+    # e não `teste-remetente-2026-07-16`, que tem a chave "maior" que 'w'? Não: 't' < 'w'.
+    # O ponto é a DATA: 2026-08-15 é mais recente que 2026-07-16.
+    assert "teste-remetente" not in saida
+
+
+def test_sem_edicao_nenhuma_o_bloco_de_ultima_pesquisa_some(broker):
+    """O caminho que segue aberto: sem candidata, o comando cala em vez de inventar."""
+    broker.respostas["/queue"] = {"editions": [
+        {"edition": "2026-w25", "date": "", "stage": "sent", "campanha": None}]}
+    saida = _roda(woow.cmd_curadoria_status, campanha=None)
+    assert "Última pesquisa" not in saida
+    assert "Memória" in saida          # e o resto do comando continua funcionando
+
+
+def test_ultima_pesquisa_respeita_a_campanha(broker):
+    """Edição de outra campanha não pode virar a "última pesquisa" desta."""
+    broker.respostas["/queue"] = {"editions": QUEUE_PRODUCAO + [
+        {"edition": "2026-09-12", "date": "2026-09-12", "stage": "researched",
+         "campanha": "woow-beauty", "barrados": 9}]}
+    saida = _roda(woow.cmd_curadoria_status, campanha=None)
+    assert "Última pesquisa: 2026-09-11 (researched)" in saida
+    assert "2026-09-12" not in saida
