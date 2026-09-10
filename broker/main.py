@@ -24,8 +24,11 @@ Rotas:
   GET  /sources       operador — fontes RSS + quanto cada uma publicou e teve barrado
   POST /sources/set   operador — edita as fontes (add|remove|enable|disable|set-url)
   POST /sources/test  operador — baixa os feeds de dentro do broker e devolve o status
-  GET  /curadoria     operador — regra de curadoria por campanha + tamanho da memória
-  POST /curadoria/set operador — edita a regra (criar|janela|titulo|bloquear|liberar|remover)
+  GET  /campanhas     operador — as campanhas e a config de cada uma (5 eixos + memória)
+  POST /campanhas/set operador — edita a campanha (as 11 ops; ver _CURADORIA_OPS)
+  GET  /campanhas/status operador — raio-X de UMA campanha (?campanha=<slug>)
+  GET  /curadoria     operador — alias de /campanhas (nome da v1.7.0, segue respondendo)
+  POST /curadoria/set operador — alias de /campanhas/set
   GET  /publicados    operador — o que já foi enviado numa campanha (a memória da trava)
   POST /admin/publicados/rebuild admin — reconstrói a memória a partir dos states
   GET  /clients       operador — quem opera a skill e em que versão (tabela só p/ admin)
@@ -40,6 +43,13 @@ import os
 import re
 
 ADMIN_ONLY = {"/admin/reset", "/admin/release", "/admin/publicados/rebuild"}
+
+# `/campanhas` é o nome da v1.8.0; `/curadoria` é o da v1.7.0 e continua respondendo o mesmo,
+# porque há CLI instalado no time apontando para lá. Aliases de PATH, não handler duplicado.
+# Ficam como constante, e não inline no despacho, para o teste poder afirmar que o nome antigo
+# segue alcançável sem precisar do flask.
+ROTAS_CAMPANHA = ("/campanhas", "/curadoria")
+ROTAS_CAMPANHA_SET = ("/campanhas/set", "/curadoria/set")
 
 
 def outdated(client_version, published_version):
@@ -182,7 +192,7 @@ def _handlers():
             if path == "/queue" and method == "GET":
                 return jj(orchestrator.get_queue())
             if path == "/metrics" and method == "GET":
-                return jj(orchestrator.get_metrics())
+                return jj(orchestrator.get_metrics(request.args.to_dict()))
             if path == "/run" and method == "POST":
                 return jj(orchestrator.run_stage(payload.get("edition"), payload.get("stage"), payload))
             if path == "/add-pauta" and method == "POST":
@@ -208,10 +218,19 @@ def _handlers():
                 return jj(orchestrator.set_sources({**payload, "_email": email}))
             if path == "/sources/test" and method == "POST":
                 return jj(orchestrator.test_sources({**payload, "_email": email}))
-            if path == "/curadoria" and method == "GET":
+            # `/campanhas` é o nome novo; `/curadoria` continua respondendo o mesmo, porque
+            # a v1.7.0 o publicou e há CLI instalado apontando para lá. Aliases de PATH, não
+            # de handler duplicado: uma implementação só, duas portas.
+            #
+            # `campanha` vem por QUERY, e o status não é `/campanhas/<slug>`: o despacho aqui
+            # é por IGUALDADE de path, então rota com parâmetro no caminho cairia no 404
+            # genérico, que o CLI traduz como "broker fora do ar". Mesmo motivo do /schedule.
+            if path in ROTAS_CAMPANHA and method == "GET":
                 return jj(orchestrator.get_curadoria_report(request.args.to_dict()))
-            if path == "/curadoria/set" and method == "POST":
+            if path in ROTAS_CAMPANHA_SET and method == "POST":
                 return jj(orchestrator.set_curadoria({**payload, "_email": email}))
+            if path == "/campanhas/status" and method == "GET":
+                return jj(orchestrator.get_campanha_status(request.args.to_dict()))
             if path == "/publicados" and method == "GET":
                 return jj(orchestrator.get_publicados_report(request.args.to_dict()))
             if path == "/admin/publicados/rebuild" and method == "POST":

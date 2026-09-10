@@ -883,8 +883,25 @@ def _refresh_metrics(sm):
     return {"editions": out}
 
 
-def get_metrics():
-    return _refresh_metrics(_sm())
+def get_metrics(payload=None):
+    """Métricas das últimas enviadas. Com `campanha`, só as daquela.
+
+    O filtro é aplicado DEPOIS do refresh e não dentro dele: o refresh já tem teto próprio
+    (`METRICS_TETO_GLOBAL`) e é ele que paga as chamadas de rede ao ZMA. Filtrar antes faria
+    cada operador olhando a própria campanha disparar um refresh que não atualiza as outras,
+    e as métricas das outras envelheceriam sem ninguém ver."""
+    payload = payload or {}
+    sm = _sm()
+    out = _refresh_metrics(sm)
+    bruto = payload.get("campanha")
+    if bruto in (None, ""):
+        return out
+    slug = _valida_campanha_existente(sm, bruto)
+    fila = {l.get("edition"): (l.get("campanha") or CAMPANHA_PADRAO)
+            for l in (sm.get_queue().get("editions") or [])}
+    return {**out, "campanha": slug,
+            "editions": [e for e in out["editions"]
+                         if fila.get(e.get("edition"), CAMPANHA_PADRAO) == slug]}
 
 
 def do_sync():
@@ -1728,6 +1745,78 @@ def set_curadoria(payload):
     if aviso:
         out["aviso_gravacao"] = aviso
     return out
+
+
+def get_campanha_status(payload=None, sm=None):
+    """O raio-X de UMA campanha: os cinco eixos de config juntos, mais agenda e memória.
+
+    É a mitigação da superfície que a v1.8.0 cria. Cinco eixos de config por campanha só são
+    operáveis se existir uma tela que mostre os cinco lado a lado: sem ela, "por que esta
+    edição saiu assim?" vira uma caça a cinco documentos diferentes, e o operador desiste
+    antes de achar.
+
+    `estrito=True`: aqui campanha desconhecida LEVANTA. É relatório, e um `?campanha=daily-drop`
+    (typo de uma letra) devolveria 200 com tudo zerado — o operador não distinguiria erro de
+    digitação de campanha vazia, que é a diferença entre "está tudo certo" e "não é isso que
+    você está olhando"."""
+    payload = payload or {}
+    sm = sm or _sm()
+    slug, regra, doc = _regra(sm, payload.get("campanha"), estrito=True)
+    hoje = datetime.now(BRT).strftime("%Y-%m-%d")
+    referencia = edition_id(slug, hoje)
+
+    sel = _fontes_da_campanha(regra)
+    cadastro = {_norm_name(f.get("source")): f for f in get_sources(sm)["feeds"]}
+    entram = [f["source"] for f in _effective_feeds(sm, slug)]
+    # Nome selecionado que não entra mais: ou saiu do cadastro, ou foi desativado
+    # globalmente. Vira AVISO e não erro — o cadastro é global e desativar uma fonte não
+    # pode quebrar a config de outra campanha. Mas some da pesquisa, e some em silêncio se
+    # ninguém contar aqui.
+    avisos = []
+    for nome in sel["nomes"]:
+        f = cadastro.get(_norm_name(nome))
+        if f is None:
+            avisos.append(f"{nome!r} não está mais no cadastro de fontes")
+        elif not f.get("enabled", True):
+            avisos.append(f"{nome!r} está desativada no cadastro global")
+
+    try:
+        edicoes = _edicoes_da_campanha(sm, slug)
+    except Exception as exc:  # noqa: BLE001 — relatório não cai por causa da fila
+        print(f"[campanha] não listei as edições de {slug!r}: {exc}")
+        edicoes = []
+    ultimas, custo = [], 0.0
+    for ed in edicoes[-5:]:
+        st = sm.get_state(ed)
+        ultimas.append({"edition": ed, "date": data_da_edicao(ed, st),
+                        "stage": st.get("stage", "empty"), "subject": st.get("subject", "")})
+        custo += float((st.get("cost") or {}).get("total_brl") or 0)
+
+    try:
+        agenda = get_schedule(sm, slug)
+    except Exception as exc:  # noqa: BLE001 — blob de agenda podre não cega o resto da tela
+        agenda = {"erro": str(exc)[:200]}
+    mem = sm.get_publicados(slug)
+    formato = _formato_da_campanha(regra) or FORMATO_PADRAO
+    return {
+        "campanha": slug, "nome": regra.get("nome") or slug, "padrao": slug == doc["default"],
+        "ativa": _campanha_ativa(regra),
+        "regra": {"janela_dias": regra.get("janela_dias"),
+                  "titulo_modo": regra.get("titulo_modo") or "relatorio",
+                  "bloqueados": len(regra.get("bloqueados") or []),
+                  "liberados": len(regra.get("liberados") or [])},
+        "fontes": {"modo": sel["modo"], "selecionadas": sel["nomes"],
+                   "entram": entram, "avisos": avisos},
+        "entrega": resolve_entrega(sm, referencia, {}, slug),
+        "formato": {"nome": formato, **(_formatos().get(formato) or {})},
+        "perfil": _perfil_da_campanha(regra),
+        "agenda": agenda,
+        "memoria": {"links": len(mem.get("links") or []), "edicoes": mem.get("edicoes", 0)},
+        "edicoes": {"total": len(edicoes), "ultimas": ultimas,
+                    "custo_brl_ultimas": round(custo, 4)},
+        "edicao_referencia": referencia,
+        "set_by": regra.get("set_by", ""), "set_at": regra.get("set_at", ""),
+    }
 
 
 def get_curadoria_report(payload=None, sm=None):

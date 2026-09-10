@@ -81,21 +81,30 @@ def _sem_nulos(d):
 def run(edition, stage, extra=None):  return _req("POST", "/run", {"edition": edition, "stage": stage, **(extra or {})})
 def add_pauta(edition, pauta):        return _req("POST", "/add-pauta", {"edition": edition, "pauta": pauta})
 def queue():                          return _req("GET", "/queue")
-def metrics():                        return _req("GET", "/metrics")
+def metrics(campanha=None):           return _req("GET", "/metrics" + _qs(campanha=campanha))
 def sync():                           return _req("GET", "/sync")
 def list_lists():                     return _req("GET", "/lists")
 def create_list(name, emails, description=None):
     return _req("POST", "/lists/create", {"name": name, "emails": emails, "description": description})
-def set_active_list(list_key, list_name=None):
-    return _req("POST", "/lists/set-active", {"list_key": list_key, "list_name": list_name})
+def set_active_list(list_key, list_name=None, campanha=None):
+    return _req("POST", "/lists/set-active",
+                _sem_nulos({"list_key": list_key, "list_name": list_name, "campanha": campanha}))
 def get_schedule(campanha=None):      return _req("GET", "/schedule" + _qs(campanha=campanha))
 def set_schedule(cfg):                return _req("POST", "/schedule/set", cfg)
 def create_campaign(edition, type, extra=None):
     return _req("POST", "/campaigns/create", {"edition": edition, "type": type, **(extra or {})})
 def set_html(edition, html):          return _req("POST", "/campaigns/set-html", {"edition": edition, "html": html})
 def get_sources(campanha=None):       return _req("GET", "/sources" + _qs(campanha=campanha))
-def get_curadoria():                  return _req("GET", "/curadoria")
-def set_curadoria(op, **kw):          return _req("POST", "/curadoria/set", {"op": op, **_sem_nulos(kw)})
+# `/campanhas` é o nome da v1.8.0; `/curadoria` continua respondendo o mesmo no broker,
+# porque a v1.7.0 o publicou. O cliente fala o nome novo: skill velha contra broker novo
+# segue funcionando pelo alias, e skill nova contra broker velho é justamente o caso que o
+# aviso de versão existe para pegar.
+def get_campanhas():                  return _req("GET", "/campanhas")
+def set_campanha(op, **kw):           return _req("POST", "/campanhas/set", {"op": op, **_sem_nulos(kw)})
+def get_campanha_status(campanha=None):
+    return _req("GET", "/campanhas/status" + _qs(campanha=campanha))
+def get_curadoria():                  return get_campanhas()
+def set_curadoria(op, **kw):          return set_campanha(op, **kw)
 def get_publicados(campanha=None, dias=None):
     return _req("GET", "/publicados" + _qs(campanha=campanha, dias=dias))
 def rebuild_publicados():             return _req("POST", "/admin/publicados/rebuild")
@@ -104,8 +113,10 @@ def test_sources(**kw):               return _req("POST", "/sources/test", kw)
 def get_clients():                    return _req("GET", "/clients")
 def set_release(notes):               return _req("POST", "/admin/release", {"notes": notes})
 def get_senders():                    return _req("GET", "/senders")
-def set_sender(from_email, from_name=None):
-    return _req("POST", "/senders/set-active", {"from_email": from_email, "from_name": from_name})
+def set_sender(from_email, from_name=None, campanha=None):
+    return _req("POST", "/senders/set-active",
+                _sem_nulos({"from_email": from_email, "from_name": from_name,
+                            "campanha": campanha}))
 
 
 def version():
