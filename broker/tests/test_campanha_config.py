@@ -616,3 +616,51 @@ def test_render_woow_usa_o_template_do_formato(tmp_path, monkeypatch):
     render_newsletter.render_woow("2026-09-15")
     assert pedidos == ["outro.html.j2"], pedidos
     assert cfg.exists()
+
+
+def test_campanha_pode_trocar_so_o_nome_exibido_do_remetente(tmp_path, monkeypatch):
+    """Achado do ensaio local. `from_name` é o nome exibido e é INDEPENDENTE do endereço:
+    "WooW! Beauty <patrick@metakosmos.com.br>" é o arranjo que a v1.8.0 recomenda enquanto só
+    o patrick@ estiver verificado no ZMA. Tratando os dois como par, a campanha que define só
+    o nome — o caminho recomendado — tinha a escolha ignorada em silêncio e o e-mail saía
+    assinado "WooW! Daily Drops"."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    _campanha("woow-beauty", nome="WooW! Beauty")
+    orchestrator.set_curadoria({"op": "entrega", "campanha": "woow-beauty",
+                                "from_name": "WooW! Beauty"})
+    r = orchestrator.resolve_entrega(sm, "woow-beauty--2026-09-15", {}, "woow-beauty")
+    assert (r["from_name"], r["origem"]["from_name"]) == ("WooW! Beauty", "campanha")
+    assert (r["from_email"], r["origem"]["from_email"]) == \
+        (orchestrator._delivery()["from_email"], "config")
+    args = orchestrator._build_send_args(
+        "woow-beauty--2026-09-15", {}, orchestrator._delivery(),
+        {"from_email": "x@y", "from_name": "X"}, {}, r)
+    assert args[args.index("--from-name") + 1] == "WooW! Beauty"
+
+
+def test_nome_da_lista_continua_colado_na_chave(tmp_path, monkeypatch):
+    """O vizinho, e o motivo de a LISTA continuar sendo par: chave e nome identificam o mesmo
+    objeto no ZMA. Se a campanha define só o nome, quem manda no envio segue sendo a chave do
+    nível de baixo, e mostrar o nome da campanha ao lado dela seria descrever uma lista que
+    não é a alvo."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    _campanha("woow-beauty")
+    orchestrator.set_curadoria({"op": "entrega", "campanha": "woow-beauty",
+                                "list_name": "Beleza mK"})
+    _grava_settings(sm, active_list_key="LK-SETTINGS", active_list_name="Time mK")
+    r = orchestrator.resolve_entrega(sm, "woow-beauty--2026-09-15", {}, "woow-beauty")
+    assert r["list_key"] == "LK-SETTINGS"
+    assert (r["list_name"], r["origem"]["list_name"]) == ("Time mK", "settings")
+
+
+def test_nome_de_lista_nao_e_herdado_de_um_nivel_mais_geral(tmp_path, monkeypatch):
+    """Segundo achado do ensaio. Campanha com `list_key` e sem `list_name` fazia o nome cair
+    para o do container: a tela anunciava "Time mK Daily Drops" ao lado da chave da lista de
+    beleza. Rótulo errado é pior que rótulo nenhum."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    _campanha("woow-beauty")
+    orchestrator.set_curadoria({"op": "entrega", "campanha": "woow-beauty",
+                                "list_key": "LK-BEAUTY"})
+    r = orchestrator.resolve_entrega(sm, "woow-beauty--2026-09-15", {}, "woow-beauty")
+    assert (r["list_key"], r["origem"]["list_key"]) == ("LK-BEAUTY", "campanha")
+    assert (r["list_name"], r["origem"]["list_name"]) == ("", "ausente")
