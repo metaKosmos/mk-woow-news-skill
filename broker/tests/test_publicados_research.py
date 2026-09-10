@@ -6,8 +6,9 @@
 #
 # O que estes testes protegem, em ordem de importância: (1) a guarda barra o repetido E
 # deixa passar o vizinho, (2) memória quebrada não barra ninguém, (3) a régua de URL é uma
-# só, compartilhada com o dedup, (4) a seção de barrados cabe no resumo de 4000 chars que
-# o orchestrator devolve no Checkpoint 1.
+# só, compartilhada com o dedup, pelo `liberar` e pela camada de título, (4) `titulo_modo`
+# faz o que promete nos três modos, (5) a seção de barrados cabe no resumo de 4000 chars
+# que o orchestrator devolve no Checkpoint 1.
 import json
 import sys, pathlib
 
@@ -29,9 +30,17 @@ def _mem(link, edicao="2026-09-08", data="2026-09-08", titulo="", campo="manchet
             "source": "Glossy", "titulo": titulo}
 
 
-def _doc(*entradas, campanha="daily-drops", janela=14):
-    return {"campanha": campanha, "janela_dias": janela, "aviso_ready": 0,
-            "links": list(entradas)}
+def _doc(*entradas, campanha="daily-drops", janela=14, liberados=None, titulo_modo=None):
+    """O `config/publicados.json` que o orchestrator injeta. `liberados` e `titulo_modo` só
+    entram quando pedidos: o doc SEM eles é o caso legado (e o do fallback do orchestrator,
+    que não tem os dois), e ele precisa seguir valendo como identidade."""
+    doc = {"campanha": campanha, "janela_dias": janela, "aviso_ready": 0,
+           "links": list(entradas)}
+    if liberados is not None:
+        doc["liberados"] = liberados
+    if titulo_modo is not None:
+        doc["titulo_modo"] = titulo_modo
+    return doc
 
 
 # ------------------------------------------------------------------------------ a régua
@@ -130,7 +139,82 @@ def test_barrado_diz_quando_saiu():
     _, barrados = research.separa_publicados([c], idx)
     assert barrados[0]["publicado_em"] == "2026-08-30"
     assert barrados[0]["publicado_date"] == "2026-08-30"
+    assert barrados[0]["motivo"] == "url"  # e não "titulo": foi o link que casou
     assert "publicado_em" not in c  # função pura: o item de entrada não foi mexido
+
+
+# --------------------------------------------------------------------------- liberar
+# A campanha manda a lista de `liberados` DENTRO do doc injetado, e quem compara é aqui.
+# Enquanto o orchestrator filtrava por igualdade de string, o operador que digitava a URL
+# como ela aparece no site não liberava nada — e nada avisava.
+def test_liberar_normaliza_os_dois_lados():
+    """O caso real, reproduzido: o operador copia o link do site, a memória guardou a
+    versão do feed (com `www.`, barra final e `utm_source`). Mesma matéria, mesma chave
+    canônica; comparadas como string, nunca casam."""
+    digitado = "https://glossy.co/beauty/materia-x"
+    guardado = "https://www.glossy.co/beauty/materia-x/?utm_source=rss"
+    idx = research.indice_publicados(_doc(_mem(guardado), liberados=[digitado]))
+    assert idx == {}
+
+    novos, barrados = research.separa_publicados([_cand("Matéria X", guardado)], idx)
+    assert barrados == [] and len(novos) == 1
+
+
+def test_liberar_um_link_nao_libera_os_vizinhos():
+    """O vizinho que continua barrado. Sem ele, um `liberados` que esvaziasse o índice
+    inteiro passaria no teste de cima exatamente igual."""
+    solto = _cand("Zara abre flagship", "https://www.glossy.co/fashion/zara-flagship/")
+    preso = _cand("Zara testa espelho", "https://www.glossy.co/fashion/zara-espelho/")
+    idx = research.indice_publicados(
+        _doc(_mem(solto["link"]), _mem(preso["link"]),
+             liberados=["https://glossy.co/fashion/zara-flagship"]))
+
+    novos, barrados = research.separa_publicados([solto, preso], idx)
+    assert [n["link"] for n in novos] == [solto["link"]]
+    assert [b["link"] for b in barrados] == [preso["link"]]
+
+
+@pytest.mark.parametrize("liberados", [
+    None,                      # campo ausente (doc legado e fallback do orchestrator)
+    [],                        # lista vazia
+    ["", None, "nada", 7],     # lixo: nada disso pode liberar nem levantar
+    [{"link": ""}, {}],        # forma de dicionário, também vazia
+    "https://x.com/a",         # nem lista é: iterar caractere a caractere viraria chave
+])
+def test_liberados_ausente_vazio_ou_com_lixo_e_identidade(liberados):
+    guardado = "https://www.glossy.co/fashion/zara-flagship/"
+    doc = _doc(_mem(guardado), liberados=liberados)
+    idx = research.indice_publicados(doc)          # não levanta
+    assert list(idx) == ["glossy.co/fashion/zara-flagship"]
+
+    _, barrados = research.separa_publicados([_cand("Zara", guardado)], idx)
+    assert len(barrados) == 1                      # segue barrado
+
+
+def test_liberar_aceita_a_forma_de_dicionario():
+    """O contrato é lista de strings, mas quem guarda guarda `{"link": ...}`. Errar a forma
+    aqui é falha silenciosa — nada liberado, nenhum aviso —, e tolerar as duas custa uma
+    linha."""
+    guardado = "https://www.glossy.co/beauty/materia-x/?utm_source=rss"
+    idx = research.indice_publicados(
+        _doc(_mem(guardado), liberados=[{"link": "https://glossy.co/beauty/materia-x"}]))
+    assert idx == {}
+
+
+def test_liberar_alcanca_tambem_a_camada_de_titulo():
+    """Liberar tem que liberar de verdade: com `titulo_modo: on`, a MESMA entrada que saiu
+    do índice de URL voltaria a barrar o candidato pela headline, e o comando do operador
+    seria engolido de novo, agora por outro caminho."""
+    guardado = "https://www.glossy.co/zara-provador/"
+    volta = _cand(_TIT_MEM, guardado)
+    doc = _doc(_mem(guardado, titulo=_TIT_MEM), titulo_modo="on",
+               liberados=["https://glossy.co/zara-provador"])
+
+    novos, barrados = research.separa_publicados([volta], research.indice_publicados(doc))
+    assert barrados == []                                   # a trava de URL liberou
+    novos, por_titulo, parecidos = research.aplica_camada_titulo(novos, doc)
+    assert por_titulo == [] and parecidos == []             # e a de título não o repescou
+    assert [n["link"] for n in novos] == [guardado]
 
 
 # ------------------------------------------------------------------------- fail-open
@@ -222,6 +306,80 @@ def test_parecidos_ignora_memoria_sem_titulo():
     assert research.parecidos_no_historico([_cand(_TIT_MEM, "https://y.com/a")], doc) == []
 
 
+# ------------------------------------------------------------------------- titulo_modo
+def _quase():
+    return _cand("Zara amplia provador virtual com realidade aumentada na Europa",
+                 "https://outro-publisher.com/zara-provador-virtual")
+
+
+def _doc_titulo(modo):
+    return _doc(_mem("https://www.glossy.co/zara-provador/", titulo=_TIT_MEM),
+                titulo_modo=modo)
+
+
+@pytest.mark.parametrize("modo", ["sim", "ligado", "true", "", "   ", 7, None, ["on"]])
+def test_modo_desconhecido_cai_em_relatorio_nunca_em_on(modo):
+    """Fail-open: um typo na config não pode ligar um filtro que encolhe a pauta."""
+    assert research.modo_titulo(dict(_doc_titulo("on"), titulo_modo=modo)) == "relatorio"
+
+
+def test_modo_ausente_e_relatorio_e_a_caixa_nao_importa():
+    assert research.modo_titulo(_doc()) == "relatorio"
+    assert research.modo_titulo({}) == "relatorio"
+    assert research.modo_titulo(dict(_doc(), titulo_modo=" ON ")) == "on"
+    assert research.modo_titulo(dict(_doc(), titulo_modo="Off")) == "off"
+
+
+def test_titulo_off_nao_calcula_e_nao_relata(monkeypatch):
+    """`off` existe para poupar o cálculo, não só para calar o relatório: se ele ainda
+    rodasse a similaridade, o botão estaria mentindo de novo, agora sobre o custo."""
+    def explode(*a, **k):
+        raise AssertionError("off não pode calcular similaridade")
+    monkeypatch.setattr(research, "_acha_parecidos", explode)
+
+    q = _quase()
+    novos, barrados, parecidos = research.aplica_camada_titulo([q], _doc_titulo("off"))
+    assert barrados == [] and parecidos == []
+    assert [n["link"] for n in novos] == [q["link"]]
+
+
+def test_titulo_relatorio_calcula_relata_e_nao_remove():
+    q = _quase()
+    novos, barrados, parecidos = research.aplica_camada_titulo([q], _doc_titulo("relatorio"))
+    assert barrados == []
+    assert novos == [q] and novos[0] is q          # o aprovado sai intacto e é o mesmo
+    assert len(parecidos) == 1 and parecidos[0]["parecido_com"] == _TIT_MEM
+
+
+def test_titulo_on_barra_diz_o_motivo_e_deixa_o_vizinho_passar():
+    q = _quase()
+    vizinho = _cand("Nubank lança conta remunerada para menores", "https://x.com/nubank")
+    novos, barrados, parecidos = research.aplica_camada_titulo([q, vizinho],
+                                                               _doc_titulo("on"))
+    assert [n["link"] for n in novos] == [vizinho["link"]]
+    assert len(barrados) == 1 and len(parecidos) == 1
+    b = barrados[0]
+    assert b["link"] == q["link"] and b["motivo"] == "titulo"
+    assert b["parecido_com"] == _TIT_MEM          # o operador precisa saber com o quê casou
+    assert b["publicado_em"] == "2026-09-08" and b["publicado_date"] == "2026-09-08"
+    assert "motivo" not in q                      # função pura: a entrada não foi mexida
+
+
+def test_titulo_desconhecido_nao_barra():
+    """O par do fail-open, agora no comportamento e não só na leitura do campo."""
+    q = _quase()
+    novos, barrados, _ = research.aplica_camada_titulo([q], _doc_titulo("meia-boca"))
+    assert barrados == [] and [n["link"] for n in novos] == [q["link"]]
+
+
+def test_titulo_sem_memoria_com_titulo_nao_barra_ninguem():
+    """Memória sem `titulo` é o caso do bloqueio manual e do legado: com `on` ligado, ela
+    não pode virar uma trava que recusa tudo."""
+    doc = _doc(_mem("https://www.glossy.co/zara-provador/", titulo=""), titulo_modo="on")
+    novos, barrados, parecidos = research.aplica_camada_titulo([_quase()], doc)
+    assert barrados == [] and parecidos == [] and len(novos) == 1
+
+
 # ------------------------------------------------------------------------------- health
 def test_build_health_aceita_dois_posicionais():
     """Chamada antiga (test_orchestrator_health.py) não pode quebrar."""
@@ -241,7 +399,11 @@ def test_health_corta_barrados_itens_em_20():
     assert h["barrados_itens"][0] == {"titulo": "T0", "fonte": "Glossy",
                                       "link": "https://x.com/0",
                                       "publicado_em": "2026-09-01",
-                                      "publicado_date": "2026-09-01"}
+                                      "publicado_date": "2026-09-01",
+                                      # o painel precisa saber POR QUE o item saiu: o
+                                      # barrado por título traz um link que não está na
+                                      # memória, e sem este campo o operador procura em vão.
+                                      "motivo": "url"}
     assert h["pool_alerta"] is True and h["alerta"] == "ALERTA: x" and h["parecidos"] == 1
 
 
@@ -430,3 +592,76 @@ def test_main_sem_pool_min_alerta_no_yaml_nao_alerta(tmp_path, monkeypatch):
                         .read_text(encoding="utf-8"))
     assert health["pool_alerta"] is False
     assert health["alerta"] is None
+
+
+def test_main_com_titulo_on_barra_de_ponta_a_ponta(tmp_path, monkeypatch, capsys):
+    """A ligação entre a config e a camada, exercida pelo `main`.
+
+    Teste de unidade sozinho deixaria passar o caso em que o `main` não repassa o modo —
+    o botão confirmando `titulo_modo: on` no relatório e nada mudando na pauta. É o mesmo
+    furo que já apareceu nesta branch com o `pool_min_alerta`, e o vizinho que fecha a
+    dupla é `test_secao_de_parecidos_aparece_e_nao_remove`: doc sem `titulo_modo`, mesma
+    pauta, item nenhum removido."""
+    quase = _cand("Zara amplia provador virtual com realidade aumentada na Europa",
+                  "https://outro-publisher.com/zara-provador-virtual")
+    outros = [_cand(f"Assunto {i}", f"https://x.com/{i}") for i in range(3)]
+    _prepara(tmp_path, monkeypatch,
+             json.dumps(_doc(_mem("https://www.glossy.co/zara-provador/", titulo=_TIT_MEM),
+                             titulo_modo="on")))
+    _roda(monkeypatch, ["--edition", "2026-w37"], [quase] + outros)
+    content = tmp_path / "content"
+
+    pauta = json.loads((content / "2026-w37.research.json").read_text(encoding="utf-8"))
+    assert [c["link"] for c in pauta] == [o["link"] for o in outros]  # saiu da pauta
+
+    health = json.loads((content / "2026-w37.research.health.json").read_text(encoding="utf-8"))
+    assert health["barrados"] == 1 and health["parecidos"] == 1
+    item = health["barrados_itens"][0]
+    assert item["link"] == quase["link"] and item["motivo"] == "titulo"
+    assert item["publicado_em"] == "2026-09-08"
+
+    md = (content / "2026-w37.research.md").read_text(encoding="utf-8")
+    assert "## Já publicados (barrados)" in md
+    assert "barrado por TÍTULO" in md and _TIT_MEM[:40] in md
+    assert quase["link"] in md                      # o link está na lista, achável
+    # a seção de "não barrados" seria mentira aqui: eles foram barrados.
+    assert "## Parecidos com o já publicado (não barrados)" not in md
+    assert "JÁ PUBLICADO (por TÍTULO" in capsys.readouterr().out
+
+
+def test_main_com_titulo_off_nao_relata_nada(tmp_path, monkeypatch):
+    """O terceiro modo pelo mesmo caminho: nem seção, nem contagem, nem remoção."""
+    quase = _cand("Zara amplia provador virtual com realidade aumentada na Europa",
+                  "https://outro-publisher.com/zara-provador-virtual")
+    outros = [_cand(f"Assunto {i}", f"https://x.com/{i}") for i in range(3)]
+    _prepara(tmp_path, monkeypatch,
+             json.dumps(_doc(_mem("https://www.glossy.co/zara-provador/", titulo=_TIT_MEM),
+                             titulo_modo="off")))
+    _roda(monkeypatch, ["--edition", "2026-w37"], [quase] + outros)
+    content = tmp_path / "content"
+
+    pauta = json.loads((content / "2026-w37.research.json").read_text(encoding="utf-8"))
+    assert len(pauta) == 4                                   # nada removido
+    health = json.loads((content / "2026-w37.research.health.json").read_text(encoding="utf-8"))
+    assert health["parecidos"] == 0 and health["barrados"] == 0
+    md = (content / "2026-w37.research.md").read_text(encoding="utf-8")
+    assert "Parecidos com o já publicado" not in md
+
+
+def test_main_aplica_o_liberados_do_doc_injetado(tmp_path, monkeypatch):
+    """`main` passa o doc INTEIRO para o índice: um recorte só com `links` mataria o
+    `liberar` sem erro nenhum, que é a forma como este defeito nasceu."""
+    guardado = "https://www.glossy.co/beauty/materia-x/?utm_source=rss"
+    volta = _cand("Matéria X", guardado)
+    outro = _cand("Matéria Y", "https://www.glossy.co/beauty/materia-y/")
+    _prepara(tmp_path, monkeypatch,
+             json.dumps(_doc(_mem(guardado), _mem(outro["link"]),
+                             liberados=["https://glossy.co/beauty/materia-x"])))
+    _roda(monkeypatch, ["--edition", "2026-w37"], [volta, outro])
+    content = tmp_path / "content"
+
+    pauta = json.loads((content / "2026-w37.research.json").read_text(encoding="utf-8"))
+    assert [c["link"] for c in pauta] == [guardado]          # liberado voltou à pauta
+    health = json.loads((content / "2026-w37.research.health.json").read_text(encoding="utf-8"))
+    assert health["barrados"] == 1                           # e o vizinho segue barrado
+    assert health["barrados_itens"][0]["link"] == outro["link"]

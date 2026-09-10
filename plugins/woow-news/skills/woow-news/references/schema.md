@@ -247,6 +247,33 @@ queue, nada aqui é fonte — `curadoria rebuild` (admin) refaz tudo do zero sem
   `corte <= date < data_da_edicao`. O `<` estrito é o que impede rerodar o research de uma
   edição já enviada barrar os links dela mesma.
 
+### config/publicados.json (no workdir da edição) — o que o research recebe
+O broker recorta a memória e injeta este arquivo no workdir, do mesmo jeito que já injeta o
+`config/feeds.yaml`. O `research.py` **não fala com o GCS e não sabe o que é campanha**.
+```json
+{
+  "campanha": "daily-drops", "janela_dias": 14, "titulo_modo": "relatorio",
+  "aviso_ready": 0,
+  "links": [{"link": "https://...", "edition": "2026-09-08", "date": "2026-09-08",
+             "campo": "manchete", "source": "Glossy", "titulo": "Título no feed"}],
+  "liberados": ["https://glossy.co/materia-x"]
+}
+```
+- `links` já vem recortado pela janela, e já inclui os **bloqueios manuais** da campanha,
+  como entradas com `edition: "bloqueado"`. Bloqueio é veto explícito, não memória: ele vale
+  mesmo com `janela_dias: 0`.
+- `liberados` vem **cru e sem filtrar**, e quem aplica é o research. Não é distração: quem
+  guarda pode guardar link cru, mas quem COMPARA tem que normalizar. Filtrar por igualdade
+  de string do lado do broker fazia o operador que digita a URL como vê no site não liberar
+  nada, porque a memória guarda o link publicado, com `www.`, barra final e `utm_source`, e
+  nada avisava que o comando não teve efeito.
+- `titulo_modo` decide a camada de similaridade de título: `off` não calcula, `relatorio`
+  calcula e reporta sem barrar, `on` barra. Modo desconhecido cai em `relatorio`: barrar por
+  heurística tem que ser escolha explícita.
+- `aviso_ready` conta edições da mesma campanha que estão em `ready` dentro da janela, ou
+  seja, geradas e ainda não enviadas. Elas **não** estão na memória (só `sent` conta), e o
+  número existe para o relatório dizer isso em vez de o operador descobrir sozinho.
+
 ## release.json (no GCS) — nota da versão publicada
 ```json
 {

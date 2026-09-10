@@ -33,12 +33,13 @@
 # research.py (evitar depender de pyyaml/feedparser só pra isso, quando a normalização
 # usa só a stdlib); é uma reimplementação standalone, conferida linha a linha contra
 # research.canonical_url — inclusive nos casos de borda (porta explícita, host maiúsculo,
-# link relativo, IPv6 malformado, valor de query vazio). Uma diferença deliberada: porta
-# fora de 0-65535 faz o research.py explodir (ValueError não tratado na property .port,
-# fora do try/except que só cobre a chamada de urlsplit); aqui cai no mesmo fallback
-# "host sem porta" que a própria função já usa para outras entradas malformadas — não
-# deve ocorrer em link de matéria real, e existe só para o auditor nunca morrer no meio
-# da rodada por causa de um href ruim.
+# link relativo, IPv6 malformado, valor de query vazio, porta fora de 0-65535 ou não
+# numérica). Neste último caso as duas caem no MESMO fallback ("devolve a URL bruta em
+# minúsculas"): research.canonical_url trata netloc, hostname e port dentro de um único
+# try/except ValueError (commit a223a74), e a reimplementação abaixo segue a mesma
+# estrutura de propósito — um comentário antigo aqui dizia que o research.py "explodia"
+# nesse caso e que o fallback era uma divergência deliberada; isso deixou de ser verdade
+# em a223a74, e o texto ficou descrevendo um contrato que não existe mais.
 #
 # Falha de download NÃO pode virar "0 repetições": conte e reporte as edições não
 # auditadas separadamente, do mesmo jeito que o auditar-edicoes.sh já faz. Silêncio por
@@ -66,9 +67,13 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "--desde precisa de uma data (YYYY-MM-DD)" >&2; exit 2; }
       desde="$2"; shift 2 ;;
     -h|--help) uso; exit 0 ;;
-    --) shift; while [ $# -gt 0 ]; do edicoes_arg+=("$1"); shift; done ;;
+    # Argumento em branco ("") não é edição nenhuma: sem o `-n`, `edicoes_arg` ficava com um
+    # elemento vazio, o teste `${#edicoes_arg[@]} -eq 0` logo abaixo não pegava o caso, e o
+    # script só ia morrer mais adiante (array de edições que sobra vazio, "unbound variable"
+    # no bash 3.2 sob set -u) em vez de cair no bloco de uso aqui.
+    --) shift; while [ $# -gt 0 ]; do [ -n "$1" ] && edicoes_arg+=("$1"); shift; done ;;
     -*) echo "opção desconhecida: $1" >&2; uso; exit 2 ;;
-    *) edicoes_arg+=("$1"); shift ;;
+    *) [ -n "$1" ] && edicoes_arg+=("$1"); shift ;;
   esac
 done
 
@@ -106,18 +111,19 @@ def canonical_url(u):
     if not bruto:
         return ""
     try:
+        # netloc, hostname E port dentro do MESMO try: .port é lazy (o ValueError de porta
+        # fora de 0-65535 ou não numérica só nasce ao acessar o atributo, uma linha depois
+        # de urlsplit), e research.canonical_url trata os três como uma falha só, caindo
+        # no mesmo fallback "devolve a URL bruta em minúsculas". Ver cabeçalho do arquivo.
         partes = urlsplit(bruto)
-    except ValueError:
-        return bruto.lower()
-    if not partes.netloc:
-        return bruto.lower()
-    host = (partes.hostname or "").lower()
-    if host.startswith("www."):
-        host = host[4:]
-    try:
+        if not partes.netloc:
+            return bruto.lower()
+        host = (partes.hostname or "").lower()
         porta = partes.port
     except ValueError:
-        porta = None  # divergência deliberada do research.py p/ nunca morrer; ver cabeçalho
+        return bruto.lower()
+    if host.startswith("www."):
+        host = host[4:]
     padrao = _PORTA_PADRAO.get(partes.scheme.lower(), "")
     if porta is not None and str(porta) != padrao:
         host = "%s:%s" % (host, porta)
@@ -157,11 +163,15 @@ if [ "$todas" -eq 1 ]; then
             | sort -u)
   if [ -n "$desde" ]; then
     filtradas=()
-    for ed in "${edicoes[@]}"; do
-      [[ "$ed" < "$desde" ]] && continue
-      filtradas+=("$ed")
-    done
-    edicoes=("${filtradas[@]}")
+    # "${edicoes[@]}" sozinho já é seguro aqui porque $edicoes vem do grep+sort da listagem
+    # (nunca fica com zero elementos sem cair no exit 1 abaixo antes de chegar aqui na
+    # primeira passada) — mas filtradas pode MESMO zerar quando --desde corta tudo, e no
+    # bash 3.2 (o /bin/bash desta estação) "${arr[@]}" de um array declarado com zero
+    # elementos é "unbound variable" sob set -u, não uma lista vazia. O idioma
+    # ${arr[@]+"${arr[@]}"} testa se o array está setado antes de expandir e evita o erro;
+    # sem ele, "--desde" no futuro (nenhuma edição sobra) morria aqui em vez de cair na
+    # mensagem "nenhuma edição encontrada" três linhas abaixo.
+    edicoes=(${filtradas[@]+"${filtradas[@]}"})
   fi
   if [ ${#edicoes[@]} -eq 0 ]; then
     echo "nenhuma edição encontrada no bucket ${BUCKET} (prefix nl/, --desde ${desde:-<nenhum>})" >&2
@@ -180,7 +190,11 @@ falhas_lista=()
 processadas=0
 : > "$ACUM"
 
-for ed in "${edicoes[@]}"; do
+# Mesmo idioma da normalização de --desde acima: argumento em branco (ex.: "" sozinho) some
+# no filtro `[ -z "$ed" ] && continue` da montagem de $edicoes e deixa o array com zero
+# elementos, e no bash 3.2 "${edicoes[@]}" de um array assim é "unbound variable" sob
+# set -u — o script morria aqui em vez de já ter caído no bloco de uso (linha 82).
+for ed in ${edicoes[@]+"${edicoes[@]}"}; do
   url="https://storage.googleapis.com/${BUCKET}/nl/${ed}.html"
   # Falha de download NÃO pode virar "0 repetições": ver cabeçalho.
   if ! html_edicao="$(curl -fsS --max-time 30 -A "$UA" "$url")"; then

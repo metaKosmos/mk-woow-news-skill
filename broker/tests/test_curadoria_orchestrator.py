@@ -1,6 +1,6 @@
 # broker/tests/test_curadoria_orchestrator.py — regra de curadoria por campanha e a memória
 # do que já foi publicado, do lado do orchestrator (estado, recorte e injeção no workdir).
-import sys, pathlib, json
+import sys, pathlib, json, re
 BROKER = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BROKER))
 sys.path.insert(0, str(BROKER / "pipeline"))
@@ -152,13 +152,20 @@ def test_janela_zero_desliga_a_memoria_mas_nao_o_bloqueio(tmp_path, monkeypatch)
     assert [e["link"] for e in mem["links"]] == ["https://glossy.co/vetado"]
 
 
-def test_liberar_tira_da_memoria(tmp_path, monkeypatch):
+def test_liberados_viajam_no_doc_sem_serem_filtrados_aqui(tmp_path, monkeypatch):
+    """A liberação NÃO é aplicada aqui, e isso é a correção, não uma folga.
+
+    Filtrar por igualdade de string neste ponto fazia o operador que digita a URL como vê no
+    site não liberar nada: a memória guarda o link publicado, com `www.`, barra final e
+    `utm_source`. Quem guarda pode guardar cru; quem COMPARA tem que normalizar, e a régua
+    (`canonical_url`) mora no research. Aqui só provamos que a lista chega inteira até lá."""
     sm = _local_sm(tmp_path, monkeypatch)
-    _enviada(sm, "2026-09-08", [("Glossy", "https://glossy.co/a", "A"),
+    _enviada(sm, "2026-09-08", [("Glossy", "https://www.glossy.co/a/?utm_source=rss", "A"),
                                 ("Modern Retail", "https://modernretail.co/b", "B")])
     orchestrator.set_curadoria({"op": "liberar", "link": "https://glossy.co/a"})
     mem = orchestrator._memoria_publicados("2026-09-09", sm)
-    assert [e["link"] for e in mem["links"]] == ["https://modernretail.co/b"]
+    assert mem["liberados"] == ["https://glossy.co/a"]
+    assert len(mem["links"]) == 2  # o filtro é do research, não daqui
 
 
 def test_memoria_e_isolada_por_campanha(tmp_path, monkeypatch):
@@ -275,3 +282,74 @@ def test_barradas_por_fonte_atravessa_o_health_de_verdade(tmp_path, monkeypatch)
                                      "health": health})
     por_fonte = orchestrator.contribuicao_por_fonte(sm)["por_fonte"]
     assert por_fonte["Glossy"]["barradas"] == 1
+
+
+# ------------------------------------------------ correções da revisão adversarial
+def test_a_chave_da_edicao_manda_sobre_o_carimbo_do_pipeline():
+    """O `edition_date` é calculado no relógio do container, que roda em UTC: edição gerada
+    depois das 21h BRT carimba o dia seguinte. Como a memória é recortada por essa data, um
+    dia a mais faz a janela pular a véspera e devolve inteira a repetição de 1 dia, que é a
+    esmagadora maioria dos casos medidos. A chave é a identidade da edição e tem precedência."""
+    assert orchestrator._resolve_edition_date("2026-09-09", "2026-09-10") == "2026-09-09"
+    # e o vizinho: sem chave de data (legado wNN), o carimbo ainda serve
+    assert orchestrator._resolve_edition_date("2026-w25", "2026-09-10") == "2026-09-10"
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}",
+                        orchestrator._resolve_edition_date("2026-w25", None))
+
+
+def test_dias_invalido_e_entrada_do_operador_nao_broker_quebrado(tmp_path, monkeypatch):
+    sm = _local_sm(tmp_path, monkeypatch)
+    for ruim in ("abc", "7d", "-3", "0", "999999999", "1e9"):
+        with pytest.raises(orchestrator.EntradaInvalida):
+            orchestrator.get_publicados_report({"dias": ruim}, sm)
+    orchestrator.get_publicados_report({"dias": "7"}, sm)  # o vizinho válido segue passando
+
+
+def test_campanha_inexistente_no_relatorio_recusa(tmp_path, monkeypatch):
+    """No relatório, silêncio é pior que erro: `?campanha=daily-drop` devolvia 200 com zero
+    links, e o operador não distinguia typo de memória vazia. Na PESQUISA continua fail-open,
+    porque lá recusar significa edição sem newsletter."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    with pytest.raises(orchestrator.EntradaInvalida):
+        orchestrator.get_publicados_report({"campanha": "daily-drop"}, sm)
+    sm.upsert_edition("2026-09-09", {"campanha": "sumiu", "date": "2026-09-09"})
+    assert orchestrator._memoria_publicados("2026-09-09", sm)["links"] == []
+
+
+def test_slug_nao_texto_e_400_e_nao_502(tmp_path, monkeypatch):
+    _local_sm(tmp_path, monkeypatch)
+    for ruim in (7, ["a"], {"a": 1}, True):
+        with pytest.raises(orchestrator.EntradaInvalida):
+            orchestrator.set_curadoria({"op": "criar", "campanha": ruim})
+
+
+def test_gravacao_perdida_por_concorrencia_nao_devolve_confirmacao(tmp_path, monkeypatch):
+    """`campanhas.json` é read-modify-write sem trava. A corrida continua existindo; o que
+    não pode existir é o operador receber 200 com o próprio veto listado quando outra escrita
+    concorrente o sobrescreveu."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    original = sm.store.write
+
+    def engole_a_escrita(key, data):
+        if key == orchestrator.CAMPANHAS_KEY:
+            return  # simula a escrita do concorrente vencendo a nossa
+        return original(key, data)
+
+    monkeypatch.setattr(sm.store, "write", engole_a_escrita)
+    r = orchestrator.set_curadoria({"op": "bloquear", "link": "https://glossy.co/a"})
+    assert "aviso_gravacao" in r and "não ficou" in r["aviso_gravacao"]
+
+
+def test_gravacao_bem_sucedida_nao_gera_aviso(tmp_path, monkeypatch):
+    """O vizinho: sem ele, um aviso emitido sempre passaria pelo teste de cima."""
+    _local_sm(tmp_path, monkeypatch)
+    r = orchestrator.set_curadoria({"op": "bloquear", "link": "https://glossy.co/a"})
+    assert "aviso_gravacao" not in r
+
+
+def test_titulo_modo_viaja_no_doc(tmp_path, monkeypatch):
+    """O modo é do operador e quem aplica é o research: se ele não chegar no doc, o comando
+    vira um botão que não liga em nada."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    orchestrator.set_curadoria({"op": "titulo", "titulo_modo": "on"})
+    assert orchestrator._memoria_publicados("2026-09-09", sm)["titulo_modo"] == "on"

@@ -241,6 +241,12 @@ nos nas num numa são foi ser tem ter isso esse essa este esta aos até ainda en
 
 _PALAVRA_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
+# Modos da camada de similaridade de título, ditados pela regra da campanha e entregues no
+# doc injetado (`titulo_modo`). Desconhecido, vazio ou ausente cai em `relatorio`: barrar
+# por heurística é decisão explícita de quem opera, nunca default nem efeito de um typo.
+TITULO_MODOS = ("off", "relatorio", "on")
+TITULO_MODO_PADRAO = "relatorio"
+
 
 def load_publicados():
     """Lê a memória do que já saiu. Devolve o documento cru, ou {} quando não dá para ler.
@@ -271,18 +277,62 @@ def load_publicados():
     return doc
 
 
+def chaves_liberadas(doc):
+    """Conjunto de chaves canônicas que a campanha mandou LIBERAR de volta para a pauta.
+
+    Aceita a string crua (o contrato) e também `{"link": ...}`: tolerar as duas formas
+    custa uma linha, e errar a forma custa o defeito que esta função fecha — nada liberado
+    e nenhum aviso.
+
+    Item sem chave canônica (`""`, `None`, não-string) é DESCARTADO, nunca virado em chave
+    vazia: chave vazia casaria com toda entrada de memória sem link e liberaria a memória
+    inteira por causa de uma linha de lixo na lista do operador."""
+    lista = (doc or {}).get("liberados")
+    if not isinstance(lista, (list, tuple)):
+        # Uma string neste campo iteraria caractere a caractere e viraria chaves de uma
+        # letra: lixo silencioso, do tipo que só aparece no dia em que libera algo errado.
+        return set()
+    chaves = set()
+    for item in lista:
+        bruto = item.get("link") if isinstance(item, dict) else item
+        chave = canonical_url(bruto) if isinstance(bruto, str) else ""
+        if chave:
+            chaves.add(chave)
+    return chaves
+
+
+def _memoria_em_vigor(doc):
+    """Entradas de `links` que ainda barram alguém: as liberadas saem daqui também.
+
+    A camada de título compara contra a MESMA memória que a trava de URL. Sem isto,
+    liberar um link deixaria de liberar de fato com `titulo_modo: on` — a entrada que saiu
+    do índice voltaria a barrar o candidato pela headline, e o comando do operador seria
+    engolido de novo, agora por outro caminho."""
+    liberadas = chaves_liberadas(doc)
+    return [e for e in (doc or {}).get("links") or []
+            if isinstance(e, dict) and canonical_url(e.get("link")) not in liberadas]
+
+
 def indice_publicados(doc):
-    """{chave canônica -> entrada} da memória, pela MESMA régua do dedup (`canonical_url`).
+    """{chave canônica -> entrada} da memória, pela MESMA régua do dedup (`canonical_url`),
+    já descontada a lista de `liberados` da campanha.
 
     Chave vazia fica de fora: ela casaria com todo candidato sem link e barraria a pauta
     por engano. Repetição na memória mantém a PRIMEIRA entrada — se a mesma URL saiu duas
-    vezes, a edição mais antiga é a que explica o barramento."""
+    vezes, a edição mais antiga é a que explica o barramento.
+
+    O `liberar` é aplicado AQUI, e não por quem monta o documento, porque comparar link CRU
+    foi exatamente o defeito: o operador copia `https://glossy.co/x` do site, a memória
+    guardou `https://www.glossy.co/x/?utm_source=rss`, a igualdade de string falha e nada é
+    liberado — sem erro, sem aviso, com a pauta encolhendo. Quem GUARDA pode guardar cru;
+    quem COMPARA normaliza os dois lados, sempre, e quem compara é este módulo."""
+    liberadas = chaves_liberadas(doc)
     idx = {}
     for entrada in (doc or {}).get("links") or []:
         if not isinstance(entrada, dict):
             continue
         chave = canonical_url(entrada.get("link"))
-        if chave:
+        if chave and chave not in liberadas:
             idx.setdefault(chave, entrada)
     return idx
 
@@ -304,6 +354,9 @@ def separa_publicados(items, idx):
         marcado = dict(it)
         marcado["publicado_em"] = entrada.get("edition", "")
         marcado["publicado_date"] = entrada.get("date", "")
+        # `motivo` sempre presente: quando a camada de título também barra, o relatório
+        # precisa separar "o link está na memória" de "a headline parece com a de outro".
+        marcado["motivo"] = "url"
         barrados.append(marcado)
     return novos, barrados
 
@@ -319,25 +372,20 @@ def _jaccard(a, b):
     return len(a & b) / len(a | b)
 
 
-def parecidos_no_historico(candidates, doc, jac=0.45, seq=0.72):
-    """Aponta candidato APROVADO cujo título parece com algo já publicado. NÃO REMOVE NADA.
+def _acha_parecidos(candidates, doc, jac=0.45, seq=0.72):
+    """[(i, item, achado)] — o par mais forte de cada candidato, com o ÍNDICE preservado.
 
-    Por que só relata: medi as 35 edições já publicadas e todo par de headline parecida
-    tinha a mesma URL por trás, ou seja, o ganho marginal desta camada sobre a trava de
-    URL foi ZERO. Ela entra como instrumento, para descobrir se existe na prática o caso
-    da mesma história vinda de dois publishers — URLs diferentes, headline quase igual —,
-    que é o único buraco que a chave de URL não cobre. Vira trava quando o relatório
-    mostrar caso real, não antes: filtro promovido sem caso medido é exatamente como a
-    pauta encolhe sem ninguém saber por quê.
+    Quem só relata joga o índice fora; quem barra (`titulo_modo: on`) precisa dele para
+    tirar da pauta exatamente o item que casou. Reencontrar o item depois pelo título seria
+    uma segunda régua para a mesma pergunta, e duas réguas dão duas respostas.
 
     Dois sinais, OU entre eles, ambos stdlib: Jaccard de tokens pega reordenação e corte
     ("X compra Y" vs "Y é comprada por X"), e SequenceMatcher pega variação de grafia e
-    sufixo que muda os tokens sem mudar a matéria. Um candidato rende no máximo uma linha,
-    a do par mais forte — o relatório é para ler, não para auditar."""
-    memoria = [e for e in (doc or {}).get("links") or []
-               if isinstance(e, dict) and (e.get("titulo") or "").strip()]
-    achados = []
-    for c in candidates:
+    sufixo que muda os tokens sem mudar a matéria. Um candidato rende no máximo um par, o
+    mais forte — o relatório é para ler, não para auditar."""
+    memoria = [e for e in _memoria_em_vigor(doc) if (e.get("titulo") or "").strip()]
+    pares = []
+    for i, c in enumerate(candidates):
         titulo = (c.get("title") or "").strip()
         if not titulo:
             continue
@@ -354,15 +402,74 @@ def parecidos_no_historico(candidates, doc, jac=0.45, seq=0.72):
         if melhor is None:
             continue
         entrada, j, s = melhor
-        achados.append({
+        pares.append((i, c, {
             "titulo": titulo,
             "fonte": c.get("source", ""),
             "parecido_com": entrada["titulo"].strip(),
             "publicado_em": entrada.get("edition", ""),
+            "publicado_date": entrada.get("date", ""),
             "jaccard": round(j, 3),
             "seq": round(s, 3),
-        })
-    return achados
+        }))
+    return pares
+
+
+def parecidos_no_historico(candidates, doc, jac=0.45, seq=0.72):
+    """Aponta candidato APROVADO cujo título parece com algo já publicado. NÃO REMOVE NADA:
+    remover é decisão do modo, e mora em `aplica_camada_titulo`.
+
+    Por que a camada nasceu só relatando: medi as 35 edições já publicadas e todo par de
+    headline parecida tinha a mesma URL por trás, ou seja, o ganho marginal desta camada
+    sobre a trava de URL foi ZERO — a headline é reescrita a cada edição, mas o link é o
+    mesmo. Ela entra como instrumento, para descobrir se existe na prática o caso da mesma
+    história vinda de dois publishers — URLs diferentes, headline quase igual —, que é o
+    único buraco que a chave de URL não cobre."""
+    return [achado for _i, _c, achado in _acha_parecidos(candidates, doc, jac, seq)]
+
+
+def modo_titulo(doc):
+    """`off` | `relatorio` | `on`, lido do doc injetado (`titulo_modo`, regra da campanha).
+
+    Desconhecido, vazio ou ausente cai em `relatorio`, NUNCA em `on`: fail-open, mesma
+    política de `load_publicados`. Um typo na config não pode virar filtro ligado, porque
+    filtro ligado por engano encolhe a pauta sem erro nenhum no log."""
+    modo = (doc or {}).get("titulo_modo")
+    modo = modo.strip().lower() if isinstance(modo, str) else ""
+    return modo if modo in TITULO_MODOS else TITULO_MODO_PADRAO
+
+
+def aplica_camada_titulo(candidates, doc, jac=0.45, seq=0.72):
+    """(novos, barrados_por_titulo, parecidos), conforme o `titulo_modo` do doc injetado.
+
+    - `off`: não calcula e não relata. Serve a quem não quer o ruído, e poupa o cálculo.
+    - `relatorio` (padrão): calcula, relata no `.md` e no `health`, NÃO remove nada.
+    - `on`: calcula, relata e BARRA. O item sai da pauta como se fosse repetido e vai para
+      a lista de barrados com `motivo="titulo"` — sem esse motivo explícito, o operador vê
+      um item sumir e vai procurar o link dele na memória, onde ele não está.
+
+    `on` é para depois que o relatório mostrar caso real: medido contra as 35 edições
+    publicadas, esta camada não pega nada que a trava de URL já não pegue (a headline muda
+    a cada edição, o link não). O caso que justifica ligá-la é a mesma história vinda de
+    dois publishers diferentes."""
+    modo = modo_titulo(doc)
+    if modo == "off":
+        return list(candidates), [], []
+    pares = _acha_parecidos(candidates, doc, jac, seq)
+    achados = [achado for _i, _c, achado in pares]
+    if modo != "on":
+        return list(candidates), [], achados
+    barrados_idx = {i for i, _c, _a in pares}
+    novos = [c for i, c in enumerate(candidates) if i not in barrados_idx]
+    barrados = []
+    for _i, c, achado in pares:
+        marcado = dict(c)  # função pura: o candidato que entrou não é mexido
+        marcado["publicado_em"] = achado["publicado_em"]
+        marcado["publicado_date"] = achado["publicado_date"]
+        marcado["motivo"] = "titulo"
+        marcado["parecido_com"] = achado["parecido_com"]
+        marcado["jaccard"], marcado["seq"] = achado["jaccard"], achado["seq"]
+        barrados.append(marcado)
+    return novos, barrados, achados
 
 
 def avalia_pool(candidates, barrados, minimo, alerta_em=None):
@@ -427,10 +534,13 @@ def build_health(report, candidates, barrados=None, alerta=None, parecidos=None)
         # Só os campos que o painel mostra, e cortada em MAX_BARRADOS_RELATADOS: o item de
         # pauta inteiro traz o `content` do feed, e a lista completa inflaria o state (lido
         # inteiro a cada consulta de edição) e o espelho Firebase.
+        # `motivo` com default "url": o item barrado por TÍTULO leva um link que NÃO está
+        # na memória, e o painel sem esse campo manda o operador procurá-lo em vão.
         "barrados_itens": [{"titulo": b.get("title", ""), "fonte": b.get("source", ""),
                             "link": b.get("link", ""),
                             "publicado_em": b.get("publicado_em", ""),
-                            "publicado_date": b.get("publicado_date", "")}
+                            "publicado_date": b.get("publicado_date", ""),
+                            "motivo": b.get("motivo", "url")}
                            for b in barrados[:MAX_BARRADOS_RELATADOS]],
         "pool_alerta": bool(alerta),
         "alerta": alerta,
@@ -448,6 +558,7 @@ def write_research_md(path, edition, days, candidates, report,
                       barrados=None, alerta=None, parecidos=None, publicados=None):
     barrados = barrados or []
     parecidos = parecidos or []
+    modo = modo_titulo(publicados)
     lines = [f"# Pauta WooW! Daily Drops — {edition}", ""]
     if alerta:
         # No topo: o resumo do Checkpoint 1 é lido de cima para baixo, e alerta em rodapé
@@ -463,17 +574,29 @@ def write_research_md(path, edition, days, candidates, report,
         campanha = (publicados or {}).get("campanha") or "campanha não declarada"
         janela = (publicados or {}).get("janela_dias")
         janela_txt = f"últimos {janela} dias" if janela else "janela não declarada"
+        por_titulo = sum(1 for b in barrados if b.get("motivo") == "titulo")
+        detalhe = (f" Destes, **{por_titulo}** saiu(íram) por título parecido "
+                   f"(`titulo_modo: on`), não por URL." if por_titulo else "")
         lines.append("## Já publicados (barrados)")
         lines.append("")
         lines.append(f"Memória da campanha `{campanha}`, {janela_txt}. "
-                     f"**{len(barrados)}** item(ns) fora da pauta por já terem saído.")
+                     f"**{len(barrados)}** item(ns) fora da pauta por já terem saído."
+                     f"{detalhe}")
         lines.append("")
         mostrados = 0
         for b in barrados[:MAX_BARRADOS_RELATADOS]:
             saiu = b.get("publicado_em") or "edição não registrada"
             data = (b.get("publicado_date") or "")[:10]
+            if b.get("motivo") == "titulo":
+                # O link DESTE item não está na memória: quem casou foi a headline. Sem
+                # dizer isso na própria linha, o operador procura o link na lista e não
+                # acha — e passa a desconfiar do relatório inteiro.
+                razao = (f"barrado por TÍTULO, parecido com "
+                         f"“{(b.get('parecido_com') or '')[:120]}”, que saiu em {saiu}")
+            else:
+                razao = f"saiu em {saiu}"
             cabeca = (f"- **{(b.get('title') or 'sem título')[:140]}** — "
-                      f"{b.get('source', '')} — saiu em {saiu}")
+                      f"{b.get('source', '')} — {razao}")
             if data:
                 cabeca += f" ({data})"
             corpo = f"  {(b.get('link') or '')[:200]}"
@@ -486,7 +609,10 @@ def write_research_md(path, edition, days, candidates, report,
             lines.append(f"- … e mais {len(barrados) - mostrados} barrado(s): a lista inteira "
                          f"sai no stdout do research (log do Cloud Run).")
         lines.append("")
-    if parecidos:
+    # Em `on` esta seção seria mentira: os parecidos foram barrados, e já aparecem acima
+    # com o motivo e o link. Repeti-los aqui só gastaria o orçamento de 4000 chars do
+    # resumo do Checkpoint 1.
+    if parecidos and modo != "on":
         lines.append("## Parecidos com o já publicado (não barrados)")
         lines.append("")
         lines.append("Nenhum destes saiu da pauta: esta camada só relata. Ela existe para "
@@ -560,7 +686,11 @@ def main():
     # trocar uma URL que estava certa.
     publicados = load_publicados()
     candidates, barrados = separa_publicados(candidates, indice_publicados(publicados))
-    parecidos = parecidos_no_historico(candidates, publicados)
+    # O doc INTEIRO vai para a camada de título: é ele que traz o `titulo_modo` da campanha.
+    # Passar aqui um `{}` ou um modo fixo deixaria o botão do operador ligado em nada, que é
+    # o defeito que esta chamada existe para não repetir.
+    candidates, barrados_titulo, parecidos = aplica_camada_titulo(candidates, publicados)
+    barrados = barrados + barrados_titulo
     alerta = avalia_pool(candidates, barrados, POOL_MINIMO,
                          nl_cfg["research"].get("pool_min_alerta"))
 
@@ -578,12 +708,20 @@ def main():
     erros = [r for r in report if r[3]]
     print(f"OK research: {len(candidates)} candidatos -> {json_path.name} + {md_path.name}")
     for b in barrados:
-        print(f"  JÁ PUBLICADO em {b.get('publicado_em') or 'edição não registrada'}: "
+        marca = "JÁ PUBLICADO"
+        if b.get("motivo") == "titulo":
+            marca = f"JÁ PUBLICADO (por TÍTULO ≈ “{b.get('parecido_com', '')}”)"
+        print(f"  {marca} em {b.get('publicado_em') or 'edição não registrada'}: "
               f"{b.get('title')} ({b.get('source')}) {b.get('link')}")
     if barrados:
-        print(f"Barrados pela memória de publicados: {len(barrados)}")
+        extra = f" ({len(barrados_titulo)} por título)" if barrados_titulo else ""
+        print(f"Barrados pela memória de publicados: {len(barrados)}{extra}")
     if parecidos:
-        print(f"Parecidos com o histórico: {len(parecidos)} (só relatório, nada removido)")
+        # "nada removido" só vale fora do `on`: dizer isso com a trava ligada seria mentir
+        # no log, que é onde alguém vai conferir por que a pauta encolheu.
+        destino = ("barrados, titulo_modo=on" if barrados_titulo
+                   else "só relatório, nada removido")
+        print(f"Parecidos com o histórico: {len(parecidos)} ({destino})")
     if erros:
         print(f"Atenção: {len(erros)} feed(s) com erro:")
         for source, _, _, err in erros:

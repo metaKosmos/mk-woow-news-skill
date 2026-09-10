@@ -51,11 +51,20 @@ def _sm():
     return StateManager(GcsStore())
 
 
-def _resolve_edition_date(edition):
+def _resolve_edition_date(edition, carimbo=None):
     """Data da edição (YYYY-MM-DD). Daily Drops: a chave já é a data; se não casar
-    (legado wNN), cai para hoje em BRT. Conserta o bug de `date` em branco na gaveta."""
+    (legado wNN), usa o carimbo do pipeline e, sem ele, hoje em BRT.
+
+    A CHAVE tem precedência sobre o carimbo, e isso não é preferência de estilo. O
+    `edition_date` vem do `generate_content`, calculado no relógio do container, que roda em
+    UTC: edição gerada depois das 21h BRT carimba o dia seguinte. A trava de repetição
+    recorta a memória por esta data, então um dia a mais aqui faz a janela pular a véspera e
+    devolve inteira a repetição de 1 dia, que é a esmagadora maioria dos casos medidos.
+    Preferir a chave torna a classe toda de erro de fuso inalcançável para edição diária."""
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", edition or ""):
         return edition
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", (carimbo or "").strip()):
+        return carimbo.strip()
     return datetime.now(BRT).strftime("%Y-%m-%d")
 
 
@@ -324,7 +333,8 @@ def run_stage(edition, stage, payload):
                                         "preview_url": html_url,
                                         "provenance": prov,
                                         "link_check": gerado.get("link_check"),
-                                        "date": meta.get("edition_date") or _resolve_edition_date(edition)})
+                                        "date": _resolve_edition_date(edition,
+                                                                     meta.get("edition_date"))})
             _clear_stage_error(sm, edition)
             return {"stage": "ready", "preview_url": html_url, "image_url": img_url,
                     "subject": meta.get("subject", ""), "cost_brl": round(cost["total_brl"], 4),
@@ -940,6 +950,10 @@ def _campanha_nova(nome="", email="", janela=None):
 
 
 def _valida_slug(slug):
+    if slug is not None and not isinstance(slug, str):
+        # payload de operador vem de JSON: número ou lista aqui viraria AttributeError cru,
+        # e o handler devolveria 502 "broker quebrado" para um erro de digitação.
+        raise EntradaInvalida(f"slug de campanha inválido: {slug!r} (esperava texto)")
     s = (slug or "").strip().lower()
     if not _SLUG_RE.match(s):
         raise EntradaInvalida(
@@ -963,13 +977,22 @@ def get_curadoria(sm=None):
     return {"default": default, "campanhas": campanhas}
 
 
-def _regra(sm, campanha=None):
-    """Regra em vigor para uma campanha. Campanha desconhecida cai na regra da padrão em vez
-    de levantar: no caminho da pesquisa, não conhecer a campanha não pode virar edição sem
-    newsletter — fail-open é a política, aqui e no research."""
+def _regra(sm, campanha=None, estrito=False):
+    """Regra em vigor para uma campanha.
+
+    No caminho da PESQUISA, campanha desconhecida cai na regra da padrão em vez de levantar:
+    não conhecer a campanha não pode virar edição sem newsletter. Nos RELATÓRIOS, `estrito`
+    recusa: lá o silêncio é pior, porque `?campanha=daily-drop` (typo de uma letra) devolveria
+    200 com zero links e o operador não distinguiria erro de digitação de memória vazia."""
     doc = get_curadoria(sm)
-    slug = (campanha or doc["default"]).strip().lower()
-    return slug, doc["campanhas"].get(slug) or doc["campanhas"][doc["default"]], doc
+    slug = _valida_slug(campanha) if campanha else doc["default"]
+    regra = doc["campanhas"].get(slug)
+    if regra is None:
+        if estrito:
+            raise EntradaInvalida(
+                f"campanha não encontrada: {slug!r}. Rode: curadoria list")
+        regra = doc["campanhas"][doc["default"]]
+    return slug, regra, doc
 
 
 def set_curadoria(payload):
@@ -1039,8 +1062,25 @@ def set_curadoria(payload):
 
     novo = {"default": doc["default"], "campanhas": campanhas}
     sm.store.write(CAMPANHAS_KEY, json.dumps(novo, ensure_ascii=False, indent=2))
-    return {"op": op, "campanha": slug, "default": novo["default"],
-            "campanhas": campanhas, "set_by": email, "set_at": now}
+    # Relê antes de responder. `campanhas.json` é read-modify-write sem trava: dois
+    # operadores bloqueando links diferentes no mesmo instante perdem um dos bloqueios, e
+    # respondendo pelo dicionário LOCAL os dois recebiam 200 com o próprio veto listado.
+    # A corrida continua existindo (ver a issue de estado concorrente); o que não pode
+    # continuar existindo é confirmação escrita de um veto que não ficou gravado.
+    gravado = get_curadoria(sm)
+    aviso = None
+    if op in ("bloquear", "liberar"):
+        lista = "bloqueados" if op == "bloquear" else "liberados"
+        vigente = (gravado["campanhas"].get(slug) or {}).get(lista) or []
+        if not any(e.get("link") == payload.get("link") for e in vigente):
+            aviso = ("ATENÇÃO: a gravação não ficou. Outra escrita concorrente em "
+                     f"{slug!r} sobrescreveu esta. Rode o comando de novo e confira em "
+                     "`curadoria status`.")
+    out = {"op": op, "campanha": slug, "default": gravado["default"],
+           "campanhas": gravado["campanhas"], "set_by": email, "set_at": now}
+    if aviso:
+        out["aviso_gravacao"] = aviso
+    return out
 
 
 def get_curadoria_report(payload=None, sm=None):
@@ -1066,7 +1106,8 @@ def _memoria_publicados(edition, sm=None):
 
     NUNCA levanta. `_workdir` roda em TODO estágio, `send` incluído, e um índice podre não
     pode derrubar um envio de newsletter — mesmo raciocínio do fallback de sources.json."""
-    vazio = {"campanha": CAMPANHA_PADRAO, "janela_dias": 0, "links": [], "aviso_ready": 0}
+    vazio = {"campanha": CAMPANHA_PADRAO, "janela_dias": 0, "links": [], "liberados": [],
+             "titulo_modo": "relatorio", "aviso_ready": 0}
     try:
         sm = sm or _sm()
         st = sm.get_state(edition)
@@ -1085,33 +1126,54 @@ def _memoria_publicados(edition, sm=None):
                 if corte <= d < ate:
                     links.append(e)
         bloqueados = {b.get("link") for b in (regra.get("bloqueados") or []) if b.get("link")}
-        liberados = {l.get("link") for l in (regra.get("liberados") or []) if l.get("link")}
         # Bloqueio é veto explícito do operador, não memória: vale mesmo com a janela em 0.
         links += [{"link": b, "edition": "bloqueado", "date": "", "campo": "",
                    "source": "bloqueio manual", "titulo": ""} for b in bloqueados]
-        if liberados:
-            links = [e for e in links if e.get("link") not in liberados]
+        # `liberados` NÃO é filtrado aqui. Quem guarda pode guardar link cru; quem COMPARA
+        # tem que normalizar, e a régua (`canonical_url`) mora no research. Filtrar por
+        # igualdade de string neste ponto fazia o operador que digita a URL como vê no site
+        # não liberar nada: a memória guarda o link publicado, com `www.`, barra final e
+        # `utm_source`, e nada avisava que o comando não teve efeito.
+        liberados = [l.get("link") for l in (regra.get("liberados") or []) if l.get("link")]
         ready = 0
         for linha in (sm.get_queue().get("editions") or []):
             if (linha.get("stage") == "ready" and linha.get("campanha", CAMPANHA_PADRAO) == slug
                     and (linha.get("date") or "") < ate):
                 ready += 1
-        return {"campanha": slug, "janela_dias": janela, "links": links, "aviso_ready": ready}
+        return {"campanha": slug, "janela_dias": janela, "links": links,
+                "liberados": liberados,
+                "titulo_modo": regra.get("titulo_modo") or "relatorio",
+                "aviso_ready": ready}
     except Exception as exc:  # noqa: BLE001
         print(f"[publicados] não montei a memória de {edition}: {exc}")
         return vazio
+
+
+def _valida_dias(bruto):
+    """`dias` vem da query string, então chega sempre como texto e pode ser qualquer coisa.
+    Sem guarda, `int("abc")` e `timedelta(days=999999999)` viram 502 "broker quebrado" para
+    o que é erro de digitação do operador."""
+    if bruto in (None, ""):
+        return None
+    try:
+        dias = int(bruto)
+    except (TypeError, ValueError):
+        raise EntradaInvalida(f"'dias' inválido: {bruto!r} (esperava um número de dias)")
+    if dias < 1 or dias > 3650:
+        raise EntradaInvalida(f"'dias' fora de faixa: {dias} (use de 1 a 3650)")
+    return dias
 
 
 def get_publicados_report(payload=None, sm=None):
     """O histórico legível: o que já saiu naquela campanha, mais novo primeiro."""
     payload = payload or {}
     sm = sm or _sm()
-    slug, regra, doc = _regra(sm, payload.get("campanha"))
+    slug, regra, doc = _regra(sm, payload.get("campanha"), estrito=True)
     mem = sm.get_publicados(slug)
     links = list(mem.get("links") or [])
-    dias = payload.get("dias")
+    dias = _valida_dias(payload.get("dias"))
     if dias:
-        corte = (datetime.now(BRT) - timedelta(days=int(dias))).strftime("%Y-%m-%d")
+        corte = (datetime.now(BRT) - timedelta(days=dias)).strftime("%Y-%m-%d")
         links = [e for e in links if (e.get("date") or e.get("edition") or "") >= corte]
     links.sort(key=lambda e: (e.get("date") or e.get("edition") or ""), reverse=True)
     return {"campanha": slug, "janela_dias": regra.get("janela_dias"),
@@ -1129,10 +1191,14 @@ def rebuild_publicados():
 
 
 def contribuicao_por_fonte(sm=None, campanha=None):
-    """Quantas matérias cada fonte publicou de verdade, e quantas foram barradas na última
-    pesquisa. É o número que falta ao `sources list` para virar decisão: hoje ele diz se o
-    feed responde, não se ele entrega. Medido nas 35 edições de 2026: uma fonte cadastrada e
-    ativa nunca tinha publicado nada, e não havia como perceber."""
+    """Quantas matérias cada fonte publicou, e quantas foram barradas na última pesquisa.
+    É o número que falta ao `sources list` para virar decisão: hoje ele diz se o feed
+    responde, não se ele entrega.
+
+    Conta o que está NA MEMÓRIA, e a memória só enxerga edição com procedência, que passou a
+    ser gravada em 02/09/2026. Fonte de publicação esparsa pode aparecer com zero enquanto a
+    memória for curta, então "nunca publicou" aqui quer dizer "não publicou no que a memória
+    alcança" — o `curadoria list` mostra quantas edições são."""
     sm = sm or _sm()
     slug, _regra_, _doc = _regra(sm, campanha)
     publicadas, materias = {}, {}

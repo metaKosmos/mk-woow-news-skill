@@ -427,3 +427,34 @@ def test_create_campaign_sem_campanha_nao_manda_o_campo(broker):
     _roda(woow.cmd_create_campaign, edition="2026-09-09", type="news_auto", campanha=None,
           html=None, subject=None, preheader=None, list_key=None)
     assert broker.payload("/campaigns/create") == {"edition": "2026-09-09", "type": "news_auto"}
+
+
+def test_checkpoint1_diz_quando_o_barramento_foi_por_titulo(broker, capsys):
+    """Item barrado por título carrega um link que NÃO está na memória. Sem dizer o motivo,
+    o operador procura esse link no histórico, não acha, e conclui que a trava está errada.
+    E a frase 'relatório, não barrou' seria mentira para quem acabou de ver a pauta encolher."""
+    woow._render_research({
+        "summary": "# Pauta", "campanha": "daily-drops", "barrados": 2, "parecidos": 1,
+        "barrados_itens": [
+            {"titulo": "Saiu ontem", "fonte": "Glossy", "link": "https://glossy.co/a",
+             "publicado_em": "2026-09-08", "motivo": "url"},
+            {"titulo": "Mesma história, outro portal", "fonte": "Modern Retail",
+             "link": "https://modernretail.co/b", "publicado_em": "2026-09-08",
+             "motivo": "titulo"},
+        ]})
+    saida = capsys.readouterr().out
+    assert "por título" in saida
+    assert "camada de TÍTULO" in saida
+    assert "não barrou" not in saida
+
+
+def test_checkpoint1_so_relata_quando_a_camada_nao_barrou(broker, capsys):
+    """O vizinho: com a camada em relatório, a frase de 'não barrou' tem que continuar
+    existindo. Sem ele, um CLI que nunca mais dissesse isso passaria pelo teste de cima."""
+    woow._render_research({
+        "summary": "# Pauta", "campanha": "daily-drops", "barrados": 1, "parecidos": 3,
+        "barrados_itens": [{"titulo": "Saiu ontem", "fonte": "Glossy",
+                            "link": "https://glossy.co/a", "motivo": "url"}]})
+    saida = capsys.readouterr().out
+    assert "relatório, não barrou" in saida
+    assert "camada de TÍTULO" not in saida

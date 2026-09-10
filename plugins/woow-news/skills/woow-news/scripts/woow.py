@@ -110,10 +110,23 @@ def _render_research(r):
             # continuar bonito no dia em que o broker mudasse o nome do campo, e a
             # divergência só apareceria como coluna zerada em outro lugar.
             fonte = it.get("fonte") or "?"
-            print(f"  · {titulo[:58]}  [{fonte}]" + (f" — saiu em {quando}" if quando else ""))
+            # O motivo não é enfeite: item barrado por TÍTULO carrega um link que NÃO está
+            # na memória, e sem dizer isso o operador vai procurar esse link no histórico e
+            # não achar, e concluir que a trava está errada.
+            por_titulo = it.get("motivo") == "titulo"
+            marca = " (por título ≈, não por URL)" if por_titulo else ""
+            print(f"  · {titulo[:58]}  [{fonte}]{marca}"
+                  + (f" — saiu em {quando}" if quando else ""))
         if len(r.get("barrados_itens") or []) > 10:
             print(f"  ... e mais {len(r['barrados_itens']) - 10}")
-    if r.get("parecidos"):
+    # Quantos vieram da camada de título decide a frase seguinte. Dizer "não barrou" com a
+    # camada em `on` seria mentir para quem acabou de ver a pauta encolher.
+    barrou_por_titulo = sum(1 for it in (r.get("barrados_itens") or [])
+                            if it.get("motivo") == "titulo")
+    if barrou_por_titulo:
+        print(f"\n{barrou_por_titulo} desses saíram pela camada de TÍTULO "
+              "(`curadoria set --titulo relatorio` volta a só reportar).")
+    elif r.get("parecidos"):
         print(f"\n{r['parecidos']} título(s) parecido(s) com o que já saiu — relatório, não barrou.")
     if r.get("alerta"):
         print(f"\n⚠ {r['alerta']}")

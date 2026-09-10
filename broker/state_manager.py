@@ -115,13 +115,30 @@ class StateManager:
         st["edition"] = edition
         self.store.write(f"editions/{edition}.state.json", json.dumps(st, ensure_ascii=False, indent=2))
         self._rebuild_queue()
-        # Só envio e provenance mexem no índice de publicados. A condição não é economia
-        # de zelo: _refresh_metrics faz um upsert por edição em laço, e _rebuild_queue já
-        # relê todos os states a cada chamada (O(N²) de leituras). Sem a guarda, todo sync
-        # de métricas ganharia um segundo termo quadrático.
-        if patch.get("stage") == "sent" or "provenance" in patch:
-            self._rebuild_publicados()
+        # Só envio, provenance e troca de campanha mexem no índice de publicados. A condição
+        # não é economia de zelo: _refresh_metrics faz um upsert por edição em laço, e
+        # _rebuild_queue já relê todos os states a cada chamada (O(N²) de leituras). Sem a
+        # guarda, todo sync de métricas ganharia um segundo termo quadrático. `campanha`
+        # entra na lista porque move a edição inteira de blob: sem ela, os links de uma
+        # edição já enviada seguem indexados na campanha antiga (barrando a pauta dela) e
+        # faltam na nova, até que um envio qualquer dispare um rebuild por outro motivo.
+        if patch.get("stage") == "sent" or "provenance" in patch or "campanha" in patch:
+            self._rebuild_publicados_protegido(f"upsert {edition}")
         return st
+
+    def _rebuild_publicados_protegido(self, origem):
+        """Rebuild que registra a falha e segue, em vez de derrubar quem o chamou.
+
+        O patch `stage="sent"` é gravado DEPOIS de send_zma.py já ter disparado a newsletter.
+        Se o rebuild levantasse, o `except` do run_stage devolveria 502 num envio que já
+        saiu, o operador reenviaria e a lista receberia duas vezes. O custo dos dois erros é
+        assimétrico: índice desatualizado se conserta sozinho no próximo envio (ou na rota
+        de admin), envio duplicado não se desfaz."""
+        try:
+            return self._rebuild_publicados()
+        except Exception as e:  # noqa: BLE001 — índice é derivado; envio já saiu
+            print(f"[publicados] rebuild falhou ({origem}): {e}")
+            return None
 
     # -- queue derivado --
     def _rebuild_queue(self):
@@ -164,8 +181,9 @@ class StateManager:
         Derivado dos states como a queue: nada aqui é fonte, tudo se refaz. Só edição em
         `sent` conta — o que ainda não foi enviado não gastou pauta. Devolve
         {campanha: doc gravado}, que é o que a rota de admin mostra ao operador."""
+        todas = self.store.list_editions()
         por_campanha = {}
-        for ed in self.store.list_editions():
+        for ed in todas:
             st = self.get_state(ed)
             if st.get("stage") != "sent":
                 continue
@@ -176,7 +194,9 @@ class StateManager:
             edicoes.sort(key=lambda par: par[0], reverse=True)
             edicoes = edicoes[:PUBLICADOS_MAX_EDICOES]
             links = []
+            com_link = 0
             for ed, st in edicoes:
+                antes = len(links)
                 # Edição enviada antes da v1.6.0 não tem provenance: não contribui link
                 # nenhum e não é motivo para derrubar o índice das outras.
                 for item in ((st.get("provenance") or {}).get("itens") or []):
@@ -192,11 +212,27 @@ class StateManager:
                                   "campo": item.get("campo", ""),
                                   "source": item.get("source", ""),
                                   "titulo": item.get("titulo_fonte", "")})
+                if len(links) > antes:
+                    com_link += 1
+            # `edicoes` é quantas edições a memória COBRE, não quantas foram consideradas.
+            # Procedência só entrou em 02/09/2026: a maioria das enviadas não contribui link
+            # nenhum, e contar as consideradas faz o `curadoria list` anunciar uma cobertura
+            # que a memória não tem — o operador calibraria a janela pelo número errado.
             blob = {"campanha": campanha, "updated_at": _now_brt(),
-                    "edicoes": len(edicoes), "links": links}
+                    "edicoes": com_link, "links": links}
             self.store.write(f"{PUBLICADOS_PREFIX}{campanha}.json",
                              json.dumps(blob, ensure_ascii=False, indent=2))
             docs[campanha] = blob
+
+        # Zero edição é indistinguível de instrumento apontado para o lugar errado: bucket
+        # ou prefixo trocado, permissão perdida em `editions/` com `publicados/` ainda
+        # gravável. E o custo dos dois erros é assimétrico — não esvaziar deixa um índice
+        # velho barrando pauta que talvez já pudesse repetir (recuperável no próximo envio),
+        # enquanto esvaziar apaga a trava inteira em silêncio e ela NÃO volta sozinha, porque
+        # get_publicados só reconstrói no blob ausente, nunca no vazio. Sem edição nenhuma
+        # não há o que indexar: não se apaga nada.
+        if not todas:
+            return docs
 
         # Campanha que existia e ficou sem nenhuma edição enviada (reset, expurgo) some do
         # laço acima e o blob velho sobreviveria barrando pauta para sempre. Esvaziar, não
@@ -220,17 +256,29 @@ class StateManager:
         """Memória de links já publicados na campanha.
 
         Blob ausente reconstrói e relê (igual get_queue), então a memória nasce sozinha no
-        primeiro deploy, sem migração. Fail-open em todo o resto: blob ilegível devolve o
-        shape vazio e nunca levanta — uma trava que barra tudo quando quebra é
-        indistinguível de uma trava que funciona."""
+        primeiro deploy, sem migração. Fail-open em TUDO: store fora do ar, rebuild que
+        levanta ou blob ilegível devolvem o shape vazio, e nada daqui sobe — uma trava que
+        barra tudo quando quebra é indistinguível de uma trava que funciona, e esta função é
+        chamada no caminho de todo estágio, envio incluído."""
         key = f"{PUBLICADOS_PREFIX}{campanha}.json"
-        raw = self.store.read(key)
-        if raw is None:
-            self._rebuild_publicados()
-            raw = self.store.read(key)
+        blob = None
         try:
-            blob = json.loads(raw) if raw else None
-        except Exception:  # noqa: BLE001 — JSON podre não pode derrubar a pauta do dia
+            raw = self.store.read(key)
+            if raw is None:
+                self._rebuild_publicados()
+                raw = self.store.read(key)
+                if raw is None:
+                    # Campanha sem nenhuma edição enviada não ganha blob no rebuild, e a
+                    # AUSÊNCIA do blob é justo o gatilho da reconstrução: sem materializar o
+                    # vazio, toda chamada refaz o índice inteiro (uma listagem mais uma
+                    # leitura por edição), para sempre. Como o workdir é montado em todo
+                    # estágio, uma campanha nova pagaria isso a cada estágio do pipeline até
+                    # o primeiro envio dela.
+                    vazio = _publicados_vazio(campanha)
+                    self.store.write(key, json.dumps(vazio, ensure_ascii=False, indent=2))
+                    return vazio
+            blob = json.loads(raw)
+        except Exception:  # noqa: BLE001 — store fora do ar ou JSON podre não derrubam a pauta
             blob = None
         if not isinstance(blob, dict) or not isinstance(blob.get("links"), list):
             return _publicados_vazio(campanha)
@@ -249,7 +297,7 @@ class StateManager:
                          json.dumps({"edition": edition, "stage": "empty"}))
         # Sem reconstruir aqui, os links de uma edição resetada seguiriam travando a pauta
         # para sempre enquanto o state dela diz 'empty'.
-        self._rebuild_publicados()
+        self._rebuild_publicados_protegido(f"reset {edition}")
         return self._rebuild_queue()
 
     # -- espelho Firebase (produção; devolve erro estruturado se firebase_admin ausente) --
