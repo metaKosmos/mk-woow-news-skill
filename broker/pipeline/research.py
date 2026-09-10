@@ -228,7 +228,24 @@ POOL_MINIMO = 3
 # de barrados sai perto do topo e é cortada por este orçamento: sem ele, ela sumiria do
 # resumo exatamente no dia de muitos barrados, que é o dia em que alguém precisa lê-la.
 SUMMARY_LIMITE = 4000
-_ORCAMENTO_BARRADOS = 3700
+# Teto da seção "Já publicados (barrados)" DENTRO do resumo do Checkpoint 1, que o
+# `run_stage` corta em 4000 chars. O valor não é estético: acima dele a seção empurra a pauta
+# para fora do corte, e a pauta é a única coisa que o operador precisa ver ali. Medido com
+# este mesmo `write_research_md`, 63 candidatos em 9 fontes, contando quantos candidatos
+# sobram VISÍVEIS no resumo:
+#
+#   orçamento | 10 barrados | 30 barrados | 60 barrados
+#        3700 |  9 cands    |  0 cands    |  0 cands     <- o valor antigo
+#        2000 |  9          |  9          |  9
+#        1200 | 13          | 13          | 13           <- escolhido
+#         800 | 15          | 15          | 15
+#
+# O que decide é a coluna ficar CONSTANTE: abaixo de ~2000 a quantidade de barrados deixa de
+# poder comer a pauta, e é essa propriedade que se quer, não o número. 1200 mostra 5
+# exemplos de barrado, que basta para reconhecer o padrão; a lista inteira sai no stdout do
+# research (log do Cloud Run), no `curadoria historico` e no bloco que o CLI imprime a partir
+# de `barrados_itens`, que não passa por este corte.
+_ORCAMENTO_BARRADOS = 1200
 
 # Stopwords pt/en: palavras presentes em quase toda headline, que inflariam o Jaccard de
 # dois títulos sem relação. Palavras de até 2 letras já caem no filtro de tamanho.

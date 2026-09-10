@@ -494,7 +494,11 @@ def test_secao_de_barrados_cabe_no_resumo_de_4000(tmp_path, monkeypatch):
     fim = md.index("## Cobertura por fonte")
     assert inicio < fim <= 4000, f"seção termina em {fim}, fora do resumo de 4000"
     assert "e mais" in md[inicio:fim]           # a lista foi cortada, a seção não
-    assert md[inicio:fim].count("- **") >= 5    # e ainda sobrou item legível
+    assert md[inicio:fim].count("- **") >= 3    # e ainda sobrou item legível
+    # O que o orçamento existe para garantir, e que a versão anterior (3700) não garantia:
+    # a PAUTA continua dentro do resumo. Sem esta linha, o teste passava com a seção de
+    # barrados ocupando o resumo inteiro, que é exatamente o defeito.
+    assert md.index("## Candidatos") < 4000, "a pauta saiu do resumo do Checkpoint 1"
     # o corte é só do relatório: o health e o stdout continuam sabendo de todos.
     health = json.loads(
         (tmp_path / "content" / "2026-w37.research.health.json").read_text(encoding="utf-8"))
@@ -665,3 +669,53 @@ def test_main_aplica_o_liberados_do_doc_injetado(tmp_path, monkeypatch):
     health = json.loads((content / "2026-w37.research.health.json").read_text(encoding="utf-8"))
     assert health["barrados"] == 1                           # e o vizinho segue barrado
     assert health["barrados_itens"][0]["link"] == outro["link"]
+
+
+def _md_realista(tmp_path, n_barrados, n_cand=63, n_fontes=9):
+    """Chama o produtor REAL com um dia de tamanho realista: 63 candidatos em 9 fontes, que
+    é a ordem de grandeza medida em produção (68 candidatos, 10 fontes)."""
+    barrados = [{"title": f"Marca {i} abre loja com provador de realidade aumentada em SP",
+                 "source": "Glossy", "motivo": "url",
+                 "link": f"https://www.glossy.co/fashion/materia-numero-{i}-slug-longo-real",
+                 "publicado_em": "2026-09-09", "publicado_date": "2026-09-09"}
+                for i in range(n_barrados)]
+    cands = [{"title": f"Candidato {i} com manchete de tamanho realista para a pauta do dia",
+              "content": "Resumo do feed com algumas dezenas de caracteres, como o real.",
+              "date": "2026-09-10T09:00:00", "link": f"https://exemplo.com/materia-{i}",
+              "source": f"Fonte {i % n_fontes}", "categories": ""} for i in range(n_cand)]
+    report = [(f"Fonte {j}", 20, 7, None) for j in range(n_fontes)]
+    caminho = tmp_path / f"r{n_barrados}.md"
+    research.write_research_md(
+        caminho, "2026-09-11", 3, cands, report, barrados=barrados,
+        publicados={"campanha": "daily-drops", "janela_dias": 14, "titulo_modo": "relatorio"})
+    return caminho.read_text(encoding="utf-8")
+
+
+def test_a_pauta_nao_sai_do_resumo_por_mais_que_a_trava_barre(tmp_path):
+    """A propriedade que o orçamento compra: quantos candidatos o operador enxerga no
+    Checkpoint 1 não pode depender de quantos itens a trava barrou. Com o valor antigo
+    (3700), 30 barrados zeravam a pauta na tela, e 60 também. É a ÚNICA tela em que ele
+    revisa a pauta antes de gerar: não há rota para o `.research.md` e o workdir do broker é
+    apagado no `finally` do `run_stage`."""
+    visiveis = {}
+    for n in (0, 10, 30, 60):
+        resumo = _md_realista(tmp_path, n)[:4000]   # é o que `run_stage` manda ao CLI
+        assert "## Candidatos" in resumo, f"a pauta sumiu do resumo com {n} barrados"
+        visiveis[n] = resumo.count("- **Candidato ")
+    assert min(visiveis.values()) >= 8, f"pauta legível demais curta: {visiveis}"
+    # A propriedade que decide: uma vez que a seção de barrados existe, quantos candidatos o
+    # operador vê NÃO depende de quantos foram barrados. O dia de 60 tem que mostrar a mesma
+    # pauta que o dia de 10. (n=0 mostra mais porque não há seção nenhuma ocupando o resumo.)
+    com_secao = {n: v for n, v in visiveis.items() if n}
+    assert len(set(com_secao.values())) == 1, f"a pauta encolhe com os barrados: {visiveis}"
+    assert visiveis[0] >= max(com_secao.values())
+
+
+def test_a_secao_de_barrados_ainda_mostra_exemplo_e_diz_que_cortou(tmp_path):
+    """O caminho que segue aberto: encolher o orçamento não pode calar a seção. Sem este
+    teste, `_ORCAMENTO_BARRADOS = 0` passaria no teste de cima."""
+    md = _md_realista(tmp_path, 30)
+    trecho = md[md.index("## Já publicados (barrados)"):md.index("## Cobertura por fonte")]
+    assert trecho.count("- **") >= 3, "a seção ficou sem nenhum exemplo legível"
+    assert "e mais" in trecho, "cortou a lista sem dizer que cortou"
+    assert "**30** item(ns)" in trecho, "perdeu o total de barrados"

@@ -106,11 +106,10 @@ def _render_research(r):
     O que foi barrado sai FORA do summary porque o summary é cortado no broker, e o dia
     de muitos barrados é justamente o dia em que o corte comeria o que interessa.
 
-    O summary sai INTEIRO. Ele já chega cortado em 4000 pelo `run_stage`, e o `.research.md`
-    reserva 3700 desses para a seção "Já publicados (barrados)": cortar em 2000 aqui fazia a
-    lista de candidatos e a cobertura por fonte desaparecerem da única tela em que o operador
-    revisa a pauta, a partir de 6 barrados. Medido: 10 barrados deixavam a tela com 2.862
-    caracteres, zero candidatos e os mesmos itens impressos duas vezes."""
+    O summary sai INTEIRO. Ele já chega cortado em 4000 pelo `run_stage`; cortar de novo em
+    2000 aqui derrubava a pauta da tela a partir de 10 barrados. Subir o corte sozinho NÃO
+    resolvia, só movia o limiar para 20: quem empurrava a pauta para fora era o orçamento da
+    seção de barrados dentro do .md, e é lá que está o conserto (`_ORCAMENTO_BARRADOS`)."""
     print(r.get("summary", ""))
     if r.get("barrados"):
         campanha = r.get("campanha") or CAMPANHA_PADRAO
