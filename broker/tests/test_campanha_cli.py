@@ -282,3 +282,13 @@ def test_metrics_vazio_diz_que_esta_vazio(broker):
     broker.respostas["/metrics"] = {"campanha": "woow-beauty", "editions": []}
     saida = _roda(woow.cmd_metrics, campanha="woow-beauty")
     assert "Nenhuma edição enviada" in saida
+
+
+def test_aviso_do_remover_nao_promete_efeito_impossivel(broker, monkeypatch, capsys):
+    """O texto antigo dizia que as edições da campanha "passam a cair na regra da padrão".
+    Desde a v1.8.0 o broker RECUSA remover campanha com edição gravada, então esse efeito não
+    existe mais. Aviso que descreve o impossível ensina o operador a não ler aviso."""
+    monkeypatch.setattr("builtins.input", lambda *_: "n")
+    saida = _roda(woow.cmd_curadoria_remover, campanha="woow-beauty")
+    assert "passam a cair na regra da campanha padrão" not in saida
+    assert "campanha desativar --campanha woow-beauty" in saida

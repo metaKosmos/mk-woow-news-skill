@@ -890,8 +890,13 @@ def cmd_curadoria_remover(a):
     print(f"Remover a REGRA de curadoria da campanha {slug!r}"
           + (f" ({regra['nome']})" if regra.get("nome") else "") + "?")
     _print_regra(regra, prefixo="  ")
-    print("\nA memória do que já saiu nessa campanha NÃO é apagada aqui, e as edições")
-    print("que apontam para ela passam a cair na regra da campanha padrão.")
+    # O texto antigo dizia que as edições da campanha "passam a cair na regra da padrão".
+    # Desde a v1.8.0 isso não acontece mais, porque o broker RECUSA remover campanha que
+    # tenha edição gravada: aviso que descreve um efeito impossível ensina o operador a não
+    # ler o aviso.
+    print("\nA memória do que já saiu nessa campanha NÃO é apagada aqui.")
+    print("Campanha com edição gravada é recusada pelo broker: nesse caso use")
+    print(f"  python scripts/woow.py campanha desativar --campanha {slug}")
     if not _confirma():
         print("Cancelado."); return
     r = bc.set_curadoria("remover", campanha=a.campanha)
