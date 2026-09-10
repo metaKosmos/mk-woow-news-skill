@@ -507,3 +507,23 @@ def test_a_regua_nao_recusa_id_legitimo_em_nenhuma_porta(tmp_path, monkeypatch):
     _local_sm(tmp_path, monkeypatch)
     for bom in ("2026-09-15", "woow-beauty--2026-09-15", "2026-w37", "webinar-2026-08-21"):
         assert orchestrator.reset_edition(bom)["reset"] == bom
+
+
+def test_metricas_ordenam_por_data_dentro_da_campanha(tmp_path, monkeypatch):
+    """A `daily-drops` real mistura chave-data com `webinar-*` e `2026-wNN`, herdadas sem
+    campo `campanha`. Como 'w' > '2' em ASCII, ordenar pela CHAVE põe o webinar de junho
+    acima da edição de ontem e ele come as vagas — que é o mesmo defeito documentado no
+    `contribuicao_por_fonte`, entrando pelo /metrics.
+
+    Achado por teste de mutação: trocar a ordenação por data pela ordenação por id deixava a
+    suíte inteira verde, porque o rodízio por campanha já garantia que todas apareciam.
+    """
+    sm = _local_sm(tmp_path, monkeypatch)
+    sm.upsert_edition("webinar-ultima-chamada", {"stage": "sent", "date": "2026-06-10"})
+    for d in ("2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15"):
+        sm.upsert_edition(d, {"stage": "sent", "date": d})
+    monkeypatch.setattr(orchestrator.secrets_store, "get_zma_gemini_env", lambda: {})
+    edicoes = [e["edition"] for e in orchestrator._refresh_metrics(sm)["editions"]]
+    assert "webinar-ultima-chamada" not in edicoes, \
+        f"a chave legada de junho despejou uma edição de setembro: {edicoes}"
+    assert edicoes == ["2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15"]
