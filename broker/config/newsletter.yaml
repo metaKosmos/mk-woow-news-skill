@@ -17,6 +17,13 @@ structure:
 research:
   days_lookback: 3        # janela do filtro de recência (n8n usava 3 dias)
   max_per_source: 25      # teto de itens coletados por feed (evita feeds gigantes)
+  # Trava de repetição. Este é o default de FÁBRICA, usado ao criar uma campanha nova; a
+  # regra em vigor mora em campanhas.json e é do operador (`woow curadoria set --janela N`).
+  published_memory_days: 14
+  # Abaixo disto o relatório grita que a pauta ficou magra. Não é o piso: quem recusa a
+  # edição é o generate, em MIN_BLOCOS = 3. Avisar só ao chegar em 3 seria avisar quando já
+  # não há o que fazer, e o Escritor escolhe 5 notas de um pool de 8 (pool_to_writer).
+  pool_min_alerta: 12
 
 # Curadoria + redação (generate_content.py)
 gemini:

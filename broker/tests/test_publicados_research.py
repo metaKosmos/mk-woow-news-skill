@@ -375,3 +375,58 @@ def test_test_feeds_ignora_a_memoria(tmp_path, monkeypatch, capsys):
     assert sem_memoria == com_memoria
     assert json.loads(sem_memoria)["report"] == [{"source": "Glossy", "found": 2,
                                                   "kept": 2, "error": None}]
+
+
+def test_alerta_de_pauta_magra_avisa_antes_do_piso():
+    """O piso duro (o generate recusar a edição) chega tarde demais para ser útil: quando o
+    pool tem 3 itens não há mais o que fazer naquele dia. `alerta_em` é o aviso com folga."""
+    cands = [{"title": f"t{i}", "link": f"https://x.com/{i}"} for i in range(9)]
+    assert research.avalia_pool(cands, [], 3) is None          # sem folga configurada, cala
+    magro = research.avalia_pool(cands, [], 3, alerta_em=12)
+    assert magro and "pool magro" in magro
+    assert "A edição sai" in magro                             # avisa sem alarmar demais
+    farto = [{"title": f"t{i}", "link": f"https://x.com/{i}"} for i in range(20)]
+    assert research.avalia_pool(farto, [], 3, alerta_em=12) is None
+
+
+def test_pauta_magra_nao_encobre_o_alerta_de_piso():
+    """Ordem importa: pool abaixo do piso é 'a edição NÃO sai', e não pode ser rebaixado
+    para o aviso ameno de pauta magra só porque também está abaixo da folga."""
+    dois = [{"title": "t", "link": "https://x.com/1"}, {"title": "u", "link": "https://x.com/2"}]
+    msg = research.avalia_pool(dois, [], 3, alerta_em=12)
+    assert "ALERTA" in msg and "não sai" in msg.replace("A edição não sai", "não sai")
+
+
+def test_main_le_o_pool_min_alerta_do_newsletter_yaml(tmp_path, monkeypatch, capsys):
+    """A ligação entre a config e a função, exercida pelo `main`.
+
+    `avalia_pool` tinha teste próprio e `main` tinha teste próprio, e mesmo assim tirar o
+    `pool_min_alerta` da chamada em `main` não derrubava nada: a chave podia estar no YAML,
+    documentada, e simplesmente não ser lida. Este teste roda `main` com um limiar alto o
+    bastante para disparar e exige o aviso no health e no relatório."""
+    cfg = _prepara(tmp_path, monkeypatch)
+    (cfg / "newsletter.yaml").write_text(
+        "research:\n  days_lookback: 3\n  max_per_source: 25\n  pool_min_alerta: 99\n",
+        encoding="utf-8")
+    cands = [{"title": f"t{i}", "content": "", "date": "", "link": f"https://x.com/{i}",
+              "source": "Glossy", "categories": ""} for i in range(5)]
+    _roda(monkeypatch, ["--edition", "2026-09-10"], cands)
+    health = json.loads((tmp_path / "content" / "2026-09-10.research.health.json")
+                        .read_text(encoding="utf-8"))
+    assert health["pool_alerta"] is True
+    assert "pool magro" in health["alerta"]
+    assert "pool magro" in (tmp_path / "content" / "2026-09-10.research.md").read_text(
+        encoding="utf-8")
+
+
+def test_main_sem_pool_min_alerta_no_yaml_nao_alerta(tmp_path, monkeypatch):
+    """O vizinho que continua passando: sem a chave, a mesma pauta não vira alerta. Sem ele,
+    um `avalia_pool` que alertasse sempre passaria pelo teste de cima."""
+    _prepara(tmp_path, monkeypatch)  # newsletter.yaml sem pool_min_alerta
+    cands = [{"title": f"t{i}", "content": "", "date": "", "link": f"https://x.com/{i}",
+              "source": "Glossy", "categories": ""} for i in range(5)]
+    _roda(monkeypatch, ["--edition", "2026-09-10"], cands)
+    health = json.loads((tmp_path / "content" / "2026-09-10.research.health.json")
+                        .read_text(encoding="utf-8"))
+    assert health["pool_alerta"] is False
+    assert health["alerta"] is None

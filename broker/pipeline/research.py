@@ -365,7 +365,7 @@ def parecidos_no_historico(candidates, doc, jac=0.45, seq=0.72):
     return achados
 
 
-def avalia_pool(candidates, barrados, minimo):
+def avalia_pool(candidates, barrados, minimo, alerta_em=None):
     """Texto do alerta, ou None. GRITA e devolve texto — não remove item, não afrouxa
     limiar e não se desliga sozinha. Quem falha no piso real é o generate (MIN_BLOCOS),
     onde o contrato de "não publicar edição capenga" já está escrito e testado; uma
@@ -386,6 +386,13 @@ def avalia_pool(candidates, barrados, minimo):
         return (f"ALERTA: {bloqueados} barrado(s) contra {aprovados} aprovado(s). A maior "
                 f"parte da pauta veio da memória: suspeite de janela grande demais ou de "
                 f"chave de URL colapsando matérias distintas antes de culpar as fontes.")
+    if alerta_em and aprovados < alerta_em:
+        # Avisar só ao encostar no piso é avisar quando já não há o que fazer. Aqui a edição
+        # ainda sai; o que o operador ganha é tempo de agir antes do dia em que não sair.
+        return (f"Atenção: pool magro, {aprovados} candidato(s) ({bloqueados} barrado(s) por "
+                f"já publicados). A edição sai, mas o Escritor escolhe as notas de um pool "
+                f"apertado. Confira as fontes em `sources list` e a janela em "
+                f"`curadoria status`.")
     return None
 
 
@@ -554,7 +561,8 @@ def main():
     publicados = load_publicados()
     candidates, barrados = separa_publicados(candidates, indice_publicados(publicados))
     parecidos = parecidos_no_historico(candidates, publicados)
-    alerta = avalia_pool(candidates, barrados, POOL_MINIMO)
+    alerta = avalia_pool(candidates, barrados, POOL_MINIMO,
+                         nl_cfg["research"].get("pool_min_alerta"))
 
     CONTENT.mkdir(exist_ok=True)
     json_path = CONTENT / f"{args.edition}.research.json"
