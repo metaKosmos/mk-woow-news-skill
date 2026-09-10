@@ -13,6 +13,7 @@ ausência significa é decidido em UM lugar (os acessores `_campanha_ativa`, `_f
 import json
 import pathlib
 import sys
+from datetime import datetime
 
 import pytest
 import yaml
@@ -525,3 +526,93 @@ def test_metrics_por_campanha_filtra_pela_fila(tmp_path, monkeypatch):
     assert [e["edition"] for e in so_beauty["editions"]] == ["woow-beauty--2026-09-09"]
     with pytest.raises(orchestrator.EntradaInvalida):
         orchestrator.get_metrics({"campanha": "nao-existe"})
+
+
+# ============================== o que o teste de mutação achou que a suíte não segurava
+def test_selecao_que_zera_ao_vivo_nao_cai_para_todas(tmp_path, monkeypatch):
+    """Decisão 12, no caminho de LEITURA e não no de gravação. A guarda de gravação recusa
+    seleção vazia, mas ela não alcança o caso em que TODAS as fontes selecionadas são
+    desativadas depois, no cadastro global. Se aí a seleção caísse para 'todas', a campanha
+    de beleza passaria a pesquisar em varejo, com 200 e sem log, e ninguém notaria até ler a
+    edição. O certo é sair com zero fonte: a pauta vem curta, o alerta dispara e o generate
+    recusa no piso de 3 blocos, que é o contrato que já existe."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    _campanha("woow-beauty")
+    orchestrator.set_curadoria({"op": "fontes", "campanha": "woow-beauty", "modo": "lista",
+                                "nomes": ["Glossy", "Modern Retail"]})
+    for nome in ("Glossy", "Modern Retail"):
+        orchestrator.set_sources({"op": "disable", "source": nome, "_email": "d@mk"})
+    assert orchestrator._effective_feeds(sm, "woow-beauty") == []
+    # o vizinho: quem não selecionou nada continua com todas as que sobraram ativas
+    assert len(orchestrator._effective_feeds(sm, CAMPANHA_PADRAO)) > 1
+
+
+def test_entrega_gravada_com_campo_vazio_le_como_ausente(tmp_path, monkeypatch):
+    """O acessor é o contrato, e ele vale para documento que outro escritor deixou: campo
+    vazio (ou só espaço) é ausência, e valor com espaço em volta é normalizado. Sem isto,
+    um `list_key: "  "` gravado à mão venceria a precedência e o envio iria para lugar
+    nenhum, com a tela dizendo que a campanha tem alvo próprio."""
+    sujo = {"list_key": "  ", "list_name": "", "from_email": "  p@mk  ", "from_name": None}
+    assert orchestrator._entrega_da_campanha({"entrega": sujo}) == {"from_email": "p@mk"}
+    assert orchestrator._entrega_da_campanha({"entrega": "não é dicionário"}) == {}
+    assert orchestrator._entrega_da_campanha({}) == {}
+
+
+def test_campanha_desativada_nao_entra_no_tick(tmp_path, monkeypatch):
+    """A tela do acessor não basta: o que importa é o TICK deixar de escolhê-la, e com o
+    motivo escrito. Campanha que parou de sair sem nenhuma linha em lugar nenhum é o pior
+    modo de falha desta rota."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    _campanha("woow-beauty")
+    for slug in (CAMPANHA_PADRAO, "woow-beauty"):
+        orchestrator.set_schedule({"campanha": slug, "send_time": "09:00",
+                                   "weekdays": [0, 1, 2, 3, 4, 5, 6], "enabled": True})
+    agora = datetime(2026, 9, 15, 9, 5, tzinfo=orchestrator.BRT)
+
+    aprovadas, ignoradas, erros = orchestrator._candidatas_do_tick(sm, agora, "2026-09-15")
+    assert {t[1] for t in aprovadas} == {CAMPANHA_PADRAO, "woow-beauty"}, "controle positivo"
+
+    orchestrator.set_curadoria({"op": "desativar", "campanha": "woow-beauty"})
+    aprovadas, ignoradas, erros = orchestrator._candidatas_do_tick(sm, agora, "2026-09-15")
+    assert {t[1] for t in aprovadas} == {CAMPANHA_PADRAO}
+    assert any(i["campanha"] == "woow-beauty" and "desativada" in i["reason"]
+               for i in ignoradas), ignoradas
+    assert erros == []
+
+
+def test_catalogo_de_formato_malformado_nao_derruba_o_pipeline(tmp_path, monkeypatch):
+    """Entrada que não é dicionário (`daily-drops: "texto"`) é o formato de YAML editado à
+    mão mais provável, e é a que um `.get` cru transforma em AttributeError no meio da
+    geração."""
+    _workdir_config(tmp_path, monkeypatch, newsletter={"formato": "torto"},
+                    formatos={"formatos": {"torto": "isto devia ser um dicionário"}})
+    assert generate_content.formato_cfg() == generate_content.FORMATO_DEFAULT
+    assert render_newsletter.template_do_formato() == render_newsletter.TEMPLATE_DEFAULT
+
+
+def test_render_woow_usa_o_template_do_formato(tmp_path, monkeypatch):
+    """O ponto de produção, não o vizinho: `template_do_formato()` estar certo não prova que
+    `render_woow` o CHAMA. Um teste só no resolvedor fica verde com o render lendo a
+    constante, e é assim que a campanha nova sai com o HTML da diária."""
+    pedidos = []
+
+    class _EnvFalso:
+        def get_template(self, nome):
+            pedidos.append(nome)
+            class _T:
+                def render(self, **kw):
+                    return "<html>ok</html>"
+            return _T()
+
+    cfg = _workdir_config(tmp_path, monkeypatch, newsletter={"formato": "so-manchete"},
+                          formatos=_CATALOGO)
+    conteudo = tmp_path / "content"
+    conteudo.mkdir()
+    (conteudo / "2026-09-15.json").write_text(json.dumps({"content": {"manchete": {}}}),
+                                              encoding="utf-8")
+    monkeypatch.setattr(render_newsletter, "CONTENT", conteudo)
+    monkeypatch.setattr(render_newsletter, "RENDERS", tmp_path / "renders")
+    monkeypatch.setattr(render_newsletter, "jinja_env", lambda: _EnvFalso())
+    render_newsletter.render_woow("2026-09-15")
+    assert pedidos == ["outro.html.j2"], pedidos
+    assert cfg.exists()
