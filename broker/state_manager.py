@@ -36,7 +36,7 @@ def campanha_da_edicao(st):
     bruto = st.get("campanha")
     if not bruto:
         return CAMPANHA_PADRAO
-    if not isinstance(bruto, str) or not _SLUG_RE.match(bruto):
+    if not isinstance(bruto, str) or not _SLUG_RE.fullmatch(bruto):
         print(f"[publicados] campanha inválida no state ({bruto!r}); lendo como "
               f"{CAMPANHA_PADRAO}")
         return CAMPANHA_PADRAO
@@ -46,7 +46,86 @@ def campanha_da_edicao(st):
 # Mesmo padrão que o orchestrator valida na porta HTTP. Duplicado de propósito: state_manager
 # é a camada de baixo e não importa o orchestrator, e um slug que chega aqui já passou por
 # fora da porta.
-_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+#
+# `fullmatch`, não `match`, e o padrão não termina mais em hífen. Os dois apertos existem
+# porque o slug vira NOME DE BLOB (`publicados/<slug>.json`, `schedules/<slug>.json`) e, a
+# partir da v1.8.0, PREFIXO DO ID da edição. Medido: `re.match(r"...$", "woow-beauty\n")`
+# casa — o `$` aceita a newline final — e produziria um segundo índice fantasma que nada
+# relaciona ao verdadeiro; e o antigo `[a-z0-9-]{0,39}` aceitava `woow-`, que compõe o id
+# ilegível `woow---2026-09-15`. Só a `daily-drops` existe, então o aperto não invalida nada
+# que esteja gravado.
+_SLUG_PAT = r"[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?"
+_SLUG_RE = re.compile(_SLUG_PAT)
+_DATA_PAT = r"\d{4}-\d{2}-\d{2}"
+_DATA_RE = re.compile(_DATA_PAT)
+
+# A identidade da edição: `<slug>--<data>` fora da campanha padrão, `<data>` nua nela.
+#
+# O separador é `--` porque não pode ser `/` (GcsStore.list_editions faz
+# `name.split("/")[-1]`, e a edição sumiria da fila com o state existindo no bucket) nem `.`
+# (chave de RTDB não aceita, e sync_to_firebase indexa as edições por id). O parse ancora na
+# DATA, e não em `split("--")`, porque o slug aceita hífen duplo interno: medido,
+# `"woow--beauty--2026-09-15".split("--")` devolve três pedaços, e a âncora devolve
+# ("woow--beauty", "2026-09-15").
+EDITION_RE = re.compile(rf"(?:(?P<campanha>{_SLUG_PAT})--)?(?P<data>{_DATA_PAT})")
+
+
+def split_edition_id(edition):
+    """(campanha|None, data|None) a partir do id. NUNCA levanta.
+
+    Id nu devolve `(None, data)`; id composto devolve os dois; `2026-wNN`, `webinar-*` e
+    qualquer outra coisa devolvem `(None, None)` — que é o que mantém o legado funcionando
+    como funciona hoje, sem migrar nada.
+
+    Isto resolve a DATA e diz o que o id CARREGA. Quem manda na campanha é o campo do state:
+    `campanha_da_edicao(st)` é a autoridade onde há state, e esta função serve para quando
+    ainda não há (criação) e para extrair a data. Divergência entre os dois é recusada na
+    criação, nunca resolvida em silêncio."""
+    if not isinstance(edition, str):
+        return None, None
+    m = EDITION_RE.fullmatch(edition)
+    if not m:
+        return None, None
+    return m.group("campanha"), m.group("data")
+
+
+def edition_id(campanha, data):
+    """Id da edição de `campanha` em `data`. A padrão fica com o id nu.
+
+    Retrocompat sem migrar nada: as 35+ edições existentes, os HTMLs já publicados e os
+    links já enviados continuam válidos, porque a campanha padrão não ganha prefixo.
+
+    Levanta ValueError em entrada malformada, e isso é backstop de programação, não caminho
+    de operador: quem valida o que o operador digitou é `_valida_slug`/`_valida_edition_id`
+    no orchestrator, que levantam EntradaInvalida e viram 400."""
+    if not _DATA_RE.fullmatch(data or ""):
+        raise ValueError(f"data de edição inválida: {data!r} (esperado YYYY-MM-DD)")
+    slug = (campanha or CAMPANHA_PADRAO).strip()
+    if slug == CAMPANHA_PADRAO:
+        return data
+    if not _SLUG_RE.fullmatch(slug):
+        raise ValueError(f"slug de campanha inválido: {slug!r}")
+    return f"{slug}--{data}"
+
+
+def data_da_edicao(edition, st=None):
+    """Data da edição para índice derivado: a do state, senão a do id, senão o id cru.
+
+    A ordem é deliberadamente ADITIVA sobre o `st.get("date") or ed` que estava aqui: onde o
+    state tem `date` — todo caso que existe hoje, porque `_resolve_edition_date` o grava a
+    partir da própria chave — o resultado é byte a byte o mesmo. O degrau novo é o do meio, e
+    ele só age onde o antigo caía no id cru.
+
+    É esse degrau que fecha o defeito: sem ele, `"date": st.get("date") or ed` gravava
+    `woow-beauty--2026-09-15` no campo data; o recorte de janela compara STRING e descarta o
+    que não casa `\\d{4}-\\d{2}-\\d{2}`, então a entrada sumia da memória sem erro nenhum, a
+    matéria voltava à pauta e nada acusava. O último degrau (o id cru) fica de propósito: é
+    ele que mantém `2026-wNN` e `webinar-*` aparecendo no histórico como aparecem hoje."""
+    do_state = ((st or {}).get("date") or "").strip()
+    if do_state:
+        return do_state
+    _campanha, data = split_edition_id(edition)
+    return data or edition
 
 
 def _publicados_vazio(campanha):
@@ -180,7 +259,10 @@ class StateManager:
                 "edition": ed,
                 "type": st.get("type", "news_auto"),  # campo, não estágio: edições legadas = news_auto
                 "campanha": campanha_da_edicao(st),
-                "date": st.get("date", ""),
+                # `date` SEMPRE preenchido quando o id o carrega: é o que um consumidor da
+                # fila precisa para não ter de parsear o id por conta. O "" continua sendo a
+                # resposta para chave legada sem data (`2026-wNN`, `webinar-*`).
+                "date": st.get("date") or (split_edition_id(ed)[1] or ""),
                 "stage": st.get("stage", "empty"),
                 "subject": st.get("subject", ""),
                 "image_ready": st.get("image_ready", False),
@@ -239,7 +321,7 @@ class StateManager:
                     # invalidar a memória inteira, que é justo o que não se pode reconstruir
                     # a partir de fora.
                     links.append({"link": link, "edition": ed,
-                                  "date": st.get("date") or ed,
+                                  "date": data_da_edicao(ed, st),
                                   "campo": item.get("campo", ""),
                                   "source": item.get("source", ""),
                                   "titulo": item.get("titulo_fonte", "")})

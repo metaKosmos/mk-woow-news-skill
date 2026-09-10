@@ -88,7 +88,7 @@ def create_list(name, emails, description=None):
     return _req("POST", "/lists/create", {"name": name, "emails": emails, "description": description})
 def set_active_list(list_key, list_name=None):
     return _req("POST", "/lists/set-active", {"list_key": list_key, "list_name": list_name})
-def get_schedule():                   return _req("GET", "/schedule")
+def get_schedule(campanha=None):      return _req("GET", "/schedule" + _qs(campanha=campanha))
 def set_schedule(cfg):                return _req("POST", "/schedule/set", cfg)
 def create_campaign(edition, type, extra=None):
     return _req("POST", "/campaigns/create", {"edition": edition, "type": type, **(extra or {})})

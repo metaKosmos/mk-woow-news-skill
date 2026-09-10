@@ -19,11 +19,21 @@ chamar rota autenticada, mas deixou de ser o único caminho.
 ## Login (uma vez)
 `bash scripts/setup.sh` instala deps + faz login Google mK (loopback). Depois, `python3 scripts/auth.py --status` mostra quem está logado.
 
-## Convenção da edição (diária)
-WooW! **Daily Drops** = uma edição por dia. O identificador da edição é a **data de
-publicação no formato `YYYY-MM-DD`** (ex.: `2026-06-17`). O broker já preenche o campo
-`date` a partir dessa chave. (Edições legadas com chave semanal `2026-wNN` ainda funcionam,
-mas use o formato de data para as novas.)
+## Convenção da edição
+WooW! **Daily Drops** = uma edição por dia, e o identificador dela é a **data de publicação
+no formato `YYYY-MM-DD`** (ex.: `2026-06-17`). Isso não muda.
+
+**Campanha que não é a padrão tem id próprio: `<slug>--<data>`** (ex.:
+`woow-beauty--2026-09-15`). É o que permite duas newsletters no mesmo dia sem uma escrever
+por cima da outra — antes da v1.8.0, `create-campaign --edition 2026-09-15 --campanha
+woow-beauty` reescrevia a edição do Daily Drops daquele dia, em silêncio.
+
+Na prática você não precisa montar o id: passe `--edition <data> --campanha <slug>` e o
+broker compõe. Passar o id composto pronto também funciona; o que ele **recusa** é o id de
+uma campanha com `--campanha` de outra.
+
+O broker preenche o campo `date` a partir do id nos dois formatos. (Edições legadas com chave
+semanal `2026-wNN` ainda funcionam, mas use o formato de data para as novas.)
 
 ## Comandos (sempre via scripts/woow.py)
 - `python3 scripts/woow.py status` — a gaveta: enviado, pronto, gerado, pesquisado, vazio + cobertura.
@@ -32,7 +42,7 @@ mas use o formato de data para as novas.)
 - `python3 scripts/woow.py add-pauta --edition 2026-06-17 --title "..." --content "..." --link "..."` — injeta pauta manual no próximo research.
 - `python3 scripts/woow.py queue` — fila detalhada (JSON).
 - `python3 scripts/woow.py metrics` — métricas ZMA (open/click/bounce) + custo das últimas edições.
-- `python3 scripts/woow.py sync` — força o espelho do estado pro Firebase (o painel mkaifirst.web.app/#newsletter lê de lá).
+- `python3 scripts/woow.py sync` — força o espelho do estado pro Firebase. (A aba `#newsletter` do painel mK **não existe mais**: o espelho segue sendo escrito, mas hoje não tem consumidor conhecido.)
 - `python3 scripts/woow.py versions` — versão instalada aqui, versão publicada, o que mudou nela e quem do time está atrasado.
 - `python3 scripts/woow.py release --notes "..."` — **admin**: grava a nota da versão publicada (é ela que aparece no aviso de quem está atrasado) e imprime o texto de anúncio pronto para colar no Slack, já com a lista de quem ainda não atualizou.
 - `python3 scripts/woow.py sources list [--campanha X]` — as fontes RSS da pesquisa (✓ = ativa), o último teste de cada uma e **quanto cada uma entregou de verdade**: quantas matérias publicou e quantas foram barradas por repetição. Fonte ativa com **0 publicadas** sai marcada, com uma ressalva que importa: a contagem sai da memória da curadoria, e a procedência que alimenta essa memória só existe desde 02/09/2026. Enquanto a memória alcançar menos de 20 edições, a tela escreve "0 nas N edições que a memória alcança" e **não** sugere desativar, porque ali o zero fala do tamanho da memória e não da fonte. Depois disso, 0 publicadas é achado de verdade: foi assim que descobrimos uma fonte cadastrada, ativa e que nunca tinha publicado nada.
@@ -171,11 +181,22 @@ Trocar o **remetente** e trocar o **HTML** de uma edição deixaram de ser taref
   o histórico de HTML da edição e o `preview_url` sempre aponta pro mais recente.
 
 ## Agendamento (automação de envio)
-A News pode rodar sozinha, todo dia no horário, sem sessão Claude logada. O agendamento
-vive em `schedule.json` no GCS (estado mutável, igual ao alvo de lista) e é editado pelos
-comandos `schedule` acima, sem redeploy. Um job de infra (Cloud Scheduler) bate de tempos
-em tempos no broker (`POST /cron/tick`); o broker lê o `schedule.json` e roda a edição de
-hoje quando dá o horário (dedup por dia, não dispara 2x).
+A News pode rodar sozinha, todo dia no horário, sem sessão Claude logada. **O agendamento é
+por campanha**: vive em `schedules/<campanha>.json` no GCS (estado mutável, igual ao alvo de
+lista) e é editado pelos comandos `schedule` acima, sem redeploy. Todos aceitam `--campanha`;
+omitido, gravam na padrão e a tela diz em qual gravaram.
+
+Um job de infra (Cloud Scheduler) bate de tempos em tempos no broker (`POST /cron/tick`), e o
+tick **roda UMA campanha por vez** — a vencida há mais tempo, com dedup por dia e por
+campanha, não dispara 2x. Uma, e não todas em série, porque cada pipeline tem timeout de 600s
+e N deles numa request estouram o attempt-deadline do Scheduler. Com o tick a cada 15 min, N
+campanhas no mesmo horário saem em N ticks; o retorno traz `pendentes` (as que ficaram para o
+próximo tick, o número que responde "quantas ainda saem hoje") e `ignoradas` (por que cada
+uma das outras não rodou).
+
+Campanha nova nasce **desligada e sem auto-send**: ela não manda e-mail sozinha até alguém
+ligar. O `schedule.json` antigo, sem campanha, continua sendo lido pela padrão enquanto ela
+não tiver arquivo próprio — não há migração a fazer.
 
 Dois modos:
 - **Revisão (default, `auto_send=false`):** o tick roda pesquisa + geração e **para em

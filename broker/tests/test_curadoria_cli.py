@@ -622,3 +622,52 @@ def test_ultima_pesquisa_respeita_a_campanha(broker):
     saida = _roda(woow.cmd_curadoria_status, campanha=None)
     assert "Última pesquisa: 2026-09-11 (researched)" in saida
     assert "2026-09-12" not in saida
+
+
+# ------------------------------------ o id que o broker COMPÕE tem de voltar para o CLI
+#
+# A v1.8.0 fez `create_campaign` compor `<slug>--<data>` a partir de `--edition <data>
+# --campanha <slug>`. O CLI guardava `edition = a.edition` e nunca relia a resposta: todo
+# passo seguinte batia na edição do Daily Drops daquele dia. No `manual_html` isso é perda
+# de dado — `run generate` cai no pipeline automático e o HTML do operador é ignorado.
+
+def _cria(broker, resposta, **args):
+    broker.respostas["/campaigns/create"] = resposta
+    base = {"edition": "2026-09-09", "type": "news_auto", "campanha": None,
+            "html": None, "subject": None, "preheader": None, "list_key": None}
+    return _roda(woow.cmd_create_campaign, **{**base, **args})
+
+
+def test_create_campaign_news_auto_usa_o_id_composto_que_o_broker_devolveu(broker):
+    saida = _cria(broker, {"edition": "woow-beauty--2026-09-09", "type": "news_auto",
+                           "stage": "empty", "campanha": "woow-beauty"},
+                  campanha="woow-beauty")
+    assert "woow-beauty--2026-09-09" in saida
+    assert "run --edition woow-beauty--2026-09-09" in saida
+    # o id que o operador digitou é a edição do Daily Drops daquele dia: mandá-lo rodar ali
+    # é o mesmo sequestro que a Parte 1 existe para eliminar, agora como instrução copiável
+    assert "run --edition 2026-09-09" not in saida
+
+
+def test_create_campaign_manual_html_gera_na_edicao_composta(broker, diz_nao):
+    """O caso com perda de dado: `run generate` na edição errada cai no pipeline automático
+    (ela é news_auto) e DESCARTA o html e o subject que o operador passou."""
+    broker.respostas["/run"] = {"preview_url": "https://pub/x.html", "stage": "ready"}
+    _cria(broker, {"edition": "woow-beauty--2026-09-09", "type": "manual_html",
+                   "stage": "empty", "campanha": "woow-beauty"},
+          type="manual_html", campanha="woow-beauty", html=__file__, subject="Beauty #1")
+    corridas = [c["payload"]["edition"] for c in broker.chamadas if c["path"] == "/run"]
+    assert corridas == ["woow-beauty--2026-09-09"]
+
+
+def test_create_campaign_sem_campanha_continua_usando_o_id_digitado(broker):
+    """O vizinho: sem composição, o id não muda, e nada na tela pode mudar."""
+    saida = _cria(broker, {"edition": "2026-09-09", "type": "news_auto",
+                           "stage": "empty", "campanha": "daily-drops"})
+    assert "run --edition 2026-09-09" in saida
+
+
+def test_create_campaign_sobrevive_a_resposta_sem_edition(broker):
+    """Broker antigo (ou resposta cortada) não pode virar TypeError na cara do operador."""
+    saida = _cria(broker, {"type": "news_auto", "stage": "empty"})
+    assert "run --edition 2026-09-09" in saida
