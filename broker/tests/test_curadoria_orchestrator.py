@@ -6,7 +6,7 @@ sys.path.insert(0, str(BROKER))
 sys.path.insert(0, str(BROKER / "pipeline"))
 import pytest
 import orchestrator
-from state_manager import StateManager, LocalStore
+from state_manager import StateManager, LocalStore, campanha_da_edicao
 
 
 def _local_sm(tmp_path, monkeypatch):
@@ -353,3 +353,29 @@ def test_titulo_modo_viaja_no_doc(tmp_path, monkeypatch):
     sm = _local_sm(tmp_path, monkeypatch)
     orchestrator.set_curadoria({"op": "titulo", "titulo_modo": "on"})
     assert orchestrator._memoria_publicados("2026-09-09", sm)["titulo_modo"] == "on"
+
+
+def test_nao_sequestra_a_edicao_do_dia_para_outra_campanha(tmp_path, monkeypatch):
+    """A chave da edição do Daily Drops é a DATA, então `create-campaign --edition <data>
+    --campanha outra` não cria uma segunda edição: reescreve a do dia. Sem guarda, o
+    sequestro é silencioso e a pauta passa a ser barrada pela memória da campanha errada.
+    Rodar duas campanhas no mesmo dia exige id próprio de edição, que não existe hoje."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    orchestrator.set_curadoria({"op": "criar", "campanha": "woow-beauty"})
+    sm.upsert_edition("2026-09-15", {"stage": "researched", "date": "2026-09-15"})
+    with pytest.raises(orchestrator.EntradaInvalida):
+        orchestrator.create_campaign({"edition": "2026-09-15", "campanha": "woow-beauty"})
+    assert campanha_da_edicao(sm.get_state("2026-09-15")) == "daily-drops"
+
+
+def test_edicao_vazia_ainda_pode_receber_campanha(tmp_path, monkeypatch):
+    """O vizinho que continua passando: a guarda vale para edição JÁ EM ANDAMENTO. Sem ele,
+    uma guarda que recusasse sempre tornaria `--campanha` inútil e pareceria funcionar."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    orchestrator.set_curadoria({"op": "criar", "campanha": "woow-beauty"})
+    r = orchestrator.create_campaign({"edition": "beauty-2026-09-15", "campanha": "woow-beauty"})
+    assert r["campanha"] == "woow-beauty"
+    # e reafirmar a MESMA campanha numa edição em andamento continua sendo no-op, não erro
+    sm.upsert_edition("beauty-2026-09-15", {"stage": "researched"})
+    assert orchestrator.create_campaign(
+        {"edition": "beauty-2026-09-15", "campanha": "woow-beauty"})["campanha"] == "woow-beauty"

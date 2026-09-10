@@ -408,6 +408,16 @@ def create_campaign(payload):
         if slug not in get_curadoria(sm)["campanhas"]:
             raise EntradaInvalida(
                 f"campanha não encontrada: {slug!r}. Crie antes: curadoria criar --campanha {slug}")
+        # A chave da edição do Daily Drops é a DATA, então `create-campaign --edition
+        # 2026-09-15 --campanha outra` não cria uma segunda edição: reescreve a campanha da
+        # edição daquele dia, que já é a do Daily Drops. Sem esta guarda o sequestro é
+        # silencioso, e a pauta do dia passa a ser barrada pela memória da campanha errada.
+        # Rodar duas campanhas no mesmo dia exige id próprio de edição, que não existe aqui.
+        if cur_stage != "empty" and campanha_da_edicao(st) != slug:
+            raise EntradaInvalida(
+                f"edição {edition} já é da campanha '{campanha_da_edicao(st)}' em stage "
+                f"'{cur_stage}'; trocar para '{slug}' reescreveria a edição existente. "
+                f"Use outra chave de edição, ou resete antes (admin: reset).")
         patch["campanha"] = slug
     sm.upsert_edition(edition, patch)  # sem stage:empty (no-op pela monotonia)
     return {"edition": edition, "type": etype, "stage": cur_stage,
