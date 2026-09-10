@@ -1076,10 +1076,18 @@ def get_sources_report(payload=None, sm=None):
         print(f"[sources] não calculei a contribuição por fonte: {exc}")
         return base
     por_fonte = contrib["por_fonte"]
-    feeds = [{**f, **(por_fonte.get(f.get("source")) or
-                      {"publicadas": 0, "materias": 0, "barradas": 0})}
+    # `entra`: a fonte está ATIVA no cadastro global E dentro da seleção desta campanha. Sem
+    # esta marca, a tela de fontes de uma campanha com seleção mostra dez fontes ativas e
+    # nenhuma pista de que só duas são pesquisadas, e a pergunta "por que a pauta veio curta"
+    # não tem resposta em lugar nenhum.
+    sel = _fontes_da_campanha(_regra(sm, contrib["campanha"])[1])
+    entram = {_norm_name(f.get("source")) for f in _effective_feeds(sm, contrib["campanha"])}
+    feeds = [{**f, "entra": _norm_name(f.get("source")) in entram,
+              **(por_fonte.get(f.get("source")) or
+                 {"publicadas": 0, "materias": 0, "barradas": 0})}
              for f in base["feeds"]]
     return {**base, "feeds": feeds, "campanha": contrib["campanha"],
+            "selecao": sel,
             "edicao_referencia": contrib["edicao_referencia"],
             "edicoes_na_memoria": contrib.get("edicoes_na_memoria")}
 

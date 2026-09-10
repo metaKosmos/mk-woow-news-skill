@@ -543,9 +543,20 @@ def cmd_sources_list(a):
     r = bc.get_sources(campanha=a.campanha)
     feeds = r.get("feeds", [])
     edicoes = r.get("edicoes_na_memoria")
-    print("WooW! Daily Drops — Fontes da pesquisa  (✓ = ativa)\n" + "━" * 51)
+    sel = r.get("selecao") or {}
+    recorte = sel.get("modo") == "lista"
+    legenda = ("(✓ = entra nesta campanha · ✗ = ativa mas fora da seleção · · = desativada)"
+               if recorte else "(✓ = ativa)")
+    print(f"WooW! Daily Drops — Fontes da pesquisa  {legenda}\n" + "━" * 51)
     for f in feeds:
-        mark = "✓" if f.get("enabled", True) else "·"
+        if not f.get("enabled", True):
+            mark = "·"
+        elif recorte and f.get("entra") is False:
+            # Ativa no cadastro global, fora da seleção desta campanha. Sem distinguir dos
+            # dois outros estados, o operador lê "ativa" e espera pauta que nunca vem.
+            mark = "✗"
+        else:
+            mark = "✓"
         print(f"{mark} {(f.get('source') or '')[:24]:24} {_fmt_last_test(f.get('last_test'))}")
         print(f"    {_fmt_contribuicao(f, edicoes)}")
         print(f"    {f.get('url')}")

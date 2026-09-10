@@ -50,8 +50,9 @@ semanal `2026-wNN` ainda funcionam, mas use o formato de data para as novas.)
 - `python3 scripts/woow.py sources add --name "Retail Dive" --url https://www.retaildive.com/feeds/news/` — testa a URL antes de cadastrar, mostra o resultado e pede confirmação.
 - `python3 scripts/woow.py sources set-url --name "Fast Company" --url https://www.fastcompany.com/latest/rss` — conserta URL que mudou de lugar.
 - `python3 scripts/woow.py sources enable | disable | remove --name "E-Commerce Brasil"` — `disable` tira da pesquisa e mantém cadastrada; `remove` apaga da lista.
-- `python3 scripts/woow.py curadoria list | status | historico | set | criar | remover | bloquear | liberar` — a regra do que não pode voltar à pauta, **por campanha**. Detalhe na seção "Por que uma matéria some da pauta".
+- `python3 scripts/woow.py campanha list | status | criar | set | fontes | entrega | formato | agenda | ativar | desativar | bloquear | liberar | remover` — a campanha e os seis eixos de config dela. `campanha status --campanha X` é o raio-X. Detalhe nas seções "Uma campanha, seis coisas próprias" e "Por que uma matéria some da pauta". O grupo `curadoria` continua funcionando com os mesmos subcomandos da v1.7.0 e avisa o nome novo.
 - `python3 scripts/woow.py curadoria rebuild` — **admin**: reconstrói a memória do que já foi publicado a partir dos states das edições enviadas (índice 100% derivado; nada se perde).
+- `python3 scripts/woow.py metrics [--campanha X]` — métricas ZMA e custo das últimas enviadas, de todas as campanhas ou de uma.
 - `python3 scripts/woow.py list-lists` — lista as listas de envio do ZMA (nome + listkey + contatos) e marca (→) qual é o alvo do envio diário.
 - `python3 scripts/woow.py create-list --name "Time mK Daily Drops" --emails-file team.txt` — cria uma lista de envio no ZMA com os contatos (CSV via `--emails` também serve). Confirma antes de criar e devolve o `listkey`.
 - `python3 scripts/woow.py set-list --list-key <KEY>` (ou `--name "..."`) — troca a lista-alvo do envio diário. Mostra o alvo atual + o novo (com nº de contatos) e pede confirmação antes de gravar.
@@ -85,13 +86,52 @@ Para auditar edições já publicadas (roda sem login, lê o bucket público):
 ## Por que uma matéria some da pauta (a trava de repetição)
 A pesquisa tira da pauta a matéria **que já saiu**. Cada campanha tem uma **janela** em
 dias: link que foi publicado dentro dela não volta. Existe porque a news repetia matéria em
-dias seguidos: medimos **39 links repetidos em 35 edições**, todos com **1 ou 2 dias** de
-intervalo. A comparação é por **URL**, não por texto.
+dias seguidos: medimos **40 links repetidos em 36 edições**, em 51 pares, quase todos com
+**1 ou 2 dias** de intervalo. A comparação é por **URL**, não por texto. O número é de
+10/09/2026 e sai de `broker/scripts/auditar-repeticao.sh --campanha daily-drops --todas`.
 
 **A regra é da CAMPANHA, e a edição herda.** Não existe ajuste por edição: `curadoria set`
 muda a janela de `daily-drops` (ou de outra campanha) e vale da próxima pesquisa em diante,
 para todas as edições dela. Para furar a trava num dia específico, use `add-pauta` — ele
 injeta a matéria **depois** da pesquisa e, por definição, não passa pela memória.
+
+## Uma campanha, seis coisas próprias
+
+Desde a **v1.8.0** a campanha é a unidade de operação: ela tem **regra de curadoria, fontes,
+formato, lista, remetente e agenda** próprios. O comando é `campanha` (o grupo `curadoria`
+continua funcionando e avisa o nome novo).
+
+| Eixo | Comando | O que é global e continua global |
+|---|---|---|
+| Curadoria | `campanha set --janela N --titulo ...` | — |
+| Fontes | `campanha fontes --usar "A,B"` ou `--todas` | o **cadastro** de fontes (`sources add`) |
+| Formato | `campanha formato --formato <nome>` | o catálogo (`config/formatos.yaml`, versionado) |
+| Entrega | `campanha entrega --list-key ... --from-email ...` | o `settings.json`, agora só fallback |
+| Agenda | `campanha agenda --time 09:00 --days util --on` | — |
+| Liga/desliga | `campanha ativar` / `campanha desativar` | — |
+
+**`campanha status --campanha X` é a tela que responde "por que esta edição saiu assim?"**:
+mostra os seis juntos, com a **origem** de cada campo de entrega, quais fontes de fato entram
+e qual formato está em vigor. Com seis eixos, essa tela é a diferença entre config operável e
+caça a seis documentos.
+
+Três coisas que valem saber antes de criar a segunda campanha:
+
+- **Campanha nova não manda e-mail sozinha.** Ela nasce com a agenda desligada e o auto-send
+  desligado. Ligar é `campanha agenda --on` e depois `schedule auto-send on`, nessa ordem.
+- **Uma campanha por tick.** O tick roda a campanha vencida há mais tempo e devolve as
+  outras em `pendentes`. Com o Scheduler a cada 15 min, três campanhas no mesmo horário saem
+  em três ticks. Escalone os horários se isso incomodar.
+- **A mesma matéria PODE sair em duas campanhas**, por desenho: a memória de repetição é
+  separada por campanha. Se duas campanhas compartilham fonte, o mesmo link pode aparecer nas
+  duas no mesmo dia. Isso não é defeito; é o que permite uma newsletter de beleza e uma de
+  varejo citarem a mesma notícia. Para vetar num lado só, use `campanha bloquear`.
+
+**Formato é código, não config de operador.** Um formato é o par prompt + template mais a
+lista de campos obrigatórios, e ele mora versionado em `broker/config/formatos.yaml`. Criar
+um formato novo é PR de dev, com CI e revisão, porque são 18 KB de instrução editorial e 324
+linhas de HTML com o nome e a assinatura de uma pessoa real dentro. O operador escolhe entre
+os que existem. Para trocar o HTML de **uma** edição, o comando continua sendo `set-html`.
 
 **`curadoria` e `create-campaign` são coisas diferentes com nomes parecidos, e é aqui que
 todo mundo se confunde:** `curadoria` governa a **regra** de uma campanha recorrente (a
@@ -109,9 +149,13 @@ Comandos, todos de operador menos o `rebuild`:
 - `curadoria bloquear --link URL [--motivo "..."]` — veto permanente daquele link naquela
   campanha. Não expira e vale mesmo com a janela em 0. `curadoria liberar --link URL` desfaz
   e ainda tira o link da memória, deixando a matéria voltar à pauta.
-- `curadoria criar --campanha <slug> [--nome "..."] [--copiar-de daily-drops]` — nova
-  newsletter recorrente com regra própria. `curadoria remover --campanha <slug>` apaga a
-  regra (a padrão não pode ser removida).
+- `campanha criar --campanha <slug> [--nome "..."] [--copiar-de daily-drops]` — nova
+  newsletter recorrente com regra própria.
+- `campanha desativar --campanha <slug>` — tira do tick e recusa edição nova, preservando
+  memória e histórico. É o caminho normal para "esta newsletter parou". `campanha remover`
+  ainda existe, mas só apaga campanha **sem nenhuma edição gravada**: com edição, apagar a
+  regra deixaria a memória e os states órfãos. A campanha padrão não se remove nem se
+  desativa (para pausá-la, `schedule off`).
 - `curadoria rebuild` — **admin**: reconstrói a memória a partir dos states enviados.
 
 `bloquear`, `liberar`, `remover` e `rebuild` pedem confirmação e mostram o estado atual

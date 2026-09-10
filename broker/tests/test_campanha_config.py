@@ -445,3 +445,83 @@ def test_validate_sem_campos_continua_exigindo_os_quatro_de_hoje():
         generate_content.validate({"manchete": {"corpo": "x"}, "secundaria_1": {"corpo": "y"},
                                    "sinal_1": {"corpo": "z"}})
     assert "cabecalho" in str(e.value)
+
+
+def test_sources_report_marca_quais_fontes_entram_na_campanha(tmp_path, monkeypatch):
+    """Sem a marca, a tela mostra dez fontes ativas e nenhuma pista de que só duas são
+    pesquisadas por esta campanha, e 'por que a pauta veio curta' fica sem resposta."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    _campanha("woow-beauty")
+    orchestrator.set_curadoria({"op": "fontes", "campanha": "woow-beauty", "modo": "lista",
+                                "nomes": ["Glossy", "Modern Retail"]})
+    r = orchestrator.get_sources_report({"campanha": "woow-beauty"}, sm)
+    assert r["selecao"]["modo"] == "lista"
+    entram = {f["source"] for f in r["feeds"] if f["entra"]}
+    fora = {f["source"] for f in r["feeds"] if not f["entra"]}
+    assert entram == {"Glossy", "Modern Retail"}
+    assert "VentureBeat" in fora
+
+
+def test_sources_report_da_campanha_sem_selecao_marca_todas_as_ativas(tmp_path, monkeypatch):
+    """O vizinho: sem seleção, `entra` acompanha `enabled` e a legenda não muda."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    orchestrator.set_sources({"op": "disable", "source": "Glossy", "_email": "d@mk"})
+    r = orchestrator.get_sources_report({}, sm)
+    assert r["selecao"]["modo"] == "todas"
+    for f in r["feeds"]:
+        assert f["entra"] is bool(f.get("enabled", True)), f["source"]
+
+
+def test_campanha_status_junta_os_cinco_eixos(tmp_path, monkeypatch):
+    sm = _local_sm(tmp_path, monkeypatch)
+    _campanha("woow-beauty", nome="WooW! Beauty")
+    orchestrator.set_curadoria({"op": "fontes", "campanha": "woow-beauty", "modo": "lista",
+                                "nomes": ["Glossy"]})
+    orchestrator.set_curadoria({"op": "entrega", "campanha": "woow-beauty",
+                                "list_key": "LK-BEAUTY"})
+    orchestrator.set_curadoria({"op": "formato", "campanha": "woow-beauty",
+                                "formato": "daily-drops"})
+    r = orchestrator.get_campanha_status({"campanha": "woow-beauty"}, sm)
+    assert r["campanha"] == "woow-beauty" and r["ativa"] is True and r["padrao"] is False
+    assert r["fontes"]["entram"] == ["Glossy"]
+    assert (r["entrega"]["list_key"], r["entrega"]["origem"]["list_key"]) == ("LK-BEAUTY", "campanha")
+    assert r["formato"]["nome"] == "daily-drops"
+    assert r["agenda"]["enabled"] is False        # campanha nova não manda e-mail sozinha
+    assert r["agenda"]["auto_send"] is False
+    assert r["edicao_referencia"].startswith("woow-beauty--")
+
+
+def test_campanha_status_avisa_fonte_selecionada_que_saiu_do_cadastro(tmp_path, monkeypatch):
+    sm = _local_sm(tmp_path, monkeypatch)
+    _campanha("woow-beauty")
+    orchestrator.set_curadoria({"op": "fontes", "campanha": "woow-beauty", "modo": "lista",
+                                "nomes": ["Glossy", "Modern Retail"]})
+    orchestrator.set_sources({"op": "disable", "source": "Glossy", "_email": "d@mk"})
+    r = orchestrator.get_campanha_status({"campanha": "woow-beauty"}, sm)
+    assert r["fontes"]["entram"] == ["Modern Retail"]
+    assert any("Glossy" in a for a in r["fontes"]["avisos"])
+
+
+def test_campanha_status_recusa_campanha_que_nao_existe(tmp_path, monkeypatch):
+    """Relatório é `estrito`: `?campanha=daily-drop` (typo de uma letra) devolvendo 200 com
+    tudo zerado não deixa o operador distinguir erro de digitação de campanha vazia."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    with pytest.raises(orchestrator.EntradaInvalida):
+        orchestrator.get_campanha_status({"campanha": "daily-drop"}, sm)
+
+
+def test_metrics_por_campanha_filtra_pela_fila(tmp_path, monkeypatch):
+    sm = _local_sm(tmp_path, monkeypatch)
+    _campanha("woow-beauty")
+    for ed, campanha in (("2026-09-08", None), ("woow-beauty--2026-09-09", "woow-beauty")):
+        patch = {"stage": "sent", "date": ed[-10:], "subject": ed}
+        if campanha:
+            patch["campanha"] = campanha
+        sm.upsert_edition(ed, patch)
+    monkeypatch.setattr(orchestrator.secrets_store, "get_zma_gemini_env", lambda: {})
+    todas = orchestrator.get_metrics()
+    assert {e["edition"] for e in todas["editions"]} == {"2026-09-08", "woow-beauty--2026-09-09"}
+    so_beauty = orchestrator.get_metrics({"campanha": "woow-beauty"})
+    assert [e["edition"] for e in so_beauty["editions"]] == ["woow-beauty--2026-09-09"]
+    with pytest.raises(orchestrator.EntradaInvalida):
+        orchestrator.get_metrics({"campanha": "nao-existe"})
