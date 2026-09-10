@@ -30,10 +30,10 @@ Uso:
   python scripts/woow.py curadoria liberar --link URL [--campanha X]
   python scripts/woow.py curadoria remover --campanha woow-beauty
   python scripts/woow.py curadoria rebuild
-  python scripts/woow.py schedule status
-  python scripts/woow.py schedule set --time 10:00 --days diario [--until 2026-07-07]
-  python scripts/woow.py schedule on | off
-  python scripts/woow.py schedule auto-send on | off
+  python scripts/woow.py schedule status [--campanha X]
+  python scripts/woow.py schedule set --time 10:00 --days diario [--until 2026-07-07] [--campanha X]
+  python scripts/woow.py schedule on | off [--campanha X]
+  python scripts/woow.py schedule auto-send on | off [--campanha X]
 """
 import argparse, re, sys
 from collections import Counter
@@ -280,7 +280,11 @@ def _fmt_days(weekdays):
 
 
 def _render_schedule(s):
-    print("WooW! Daily Drops — Agendamento\n" + "━" * 33)
+    # O cabeçalho nomeia a campanha porque a agenda deixou de ser uma só. Sem isto, um
+    # `schedule on` que caiu na padrão por engano é indistinguível na tela de um que ligou a
+    # campanha que o operador queria.
+    campanha = s.get("campanha") or CAMPANHA_PADRAO
+    print(f"Agendamento — campanha {campanha}\n" + "━" * 33)
     print(f"Estado   : {'LIGADO' if s.get('enabled') else 'desligado'}")
     print(f"Horário  : {s.get('send_time')} BRT")
     print(f"Dias     : {_fmt_days(s.get('weekdays'))}")
@@ -295,11 +299,22 @@ def _render_schedule(s):
     except Exception:  # noqa: BLE001 — alvo é informativo; não trava o status
         pass
     if not s.get("enabled"):
-        print("\nPara ligar: python scripts/woow.py schedule on")
+        sufixo = "" if campanha == CAMPANHA_PADRAO else f" --campanha {campanha}"
+        print(f"\nPara ligar: python scripts/woow.py schedule on{sufixo}")
 
 
-def cmd_schedule_status(_):
-    _render_schedule(bc.get_schedule())
+def cmd_schedule_status(a):
+    _render_schedule(bc.get_schedule(getattr(a, "campanha", None)))
+
+
+def _cfg_campanha(a, cfg=None):
+    """Toda escrita de agenda carrega a campanha-alvo. Omitida, o broker usa a padrão e
+    RESPONDE em qual gravou — enquanto só existir a padrão o efeito é o de sempre, e quem
+    tem mais de uma precisa ver o alvo antes de descobrir pela newsletter que não saiu."""
+    cfg = dict(cfg or {})
+    if getattr(a, "campanha", None):
+        cfg["campanha"] = a.campanha
+    return cfg
 
 
 def cmd_schedule_set(a):
@@ -312,17 +327,19 @@ def cmd_schedule_set(a):
         cfg["until"] = a.until or None
     if not cfg:
         sys.exit("Informe ao menos --time, --days ou --until.")
-    s = bc.set_schedule(cfg)
+    s = bc.set_schedule(_cfg_campanha(a, cfg))
     print("Agendamento atualizado.\n")
     _render_schedule(s)
 
 
-def cmd_schedule_on(_):
-    print("Agendamento LIGADO.\n"); _render_schedule(bc.set_schedule({"enabled": True}))
+def cmd_schedule_on(a):
+    print("Agendamento LIGADO.\n")
+    _render_schedule(bc.set_schedule(_cfg_campanha(a, {"enabled": True})))
 
 
-def cmd_schedule_off(_):
-    print("Agendamento desligado.\n"); _render_schedule(bc.set_schedule({"enabled": False}))
+def cmd_schedule_off(a):
+    print("Agendamento desligado.\n")
+    _render_schedule(bc.set_schedule(_cfg_campanha(a, {"enabled": False})))
 
 
 def cmd_schedule_autosend(a):
@@ -336,10 +353,11 @@ def cmd_schedule_autosend(a):
             pass
         if input("\nLigar auto-send? [s/N] ").strip().lower() != "s":
             print("Cancelado."); return
-        print("\nAUTO-SEND ligado.\n"); _render_schedule(bc.set_schedule({"auto_send": True}))
+        print("\nAUTO-SEND ligado.\n")
+        _render_schedule(bc.set_schedule(_cfg_campanha(a, {"auto_send": True})))
     else:
         print("AUTO-SEND desligado (volta ao modo revisão).\n")
-        _render_schedule(bc.set_schedule({"auto_send": False}))
+        _render_schedule(bc.set_schedule(_cfg_campanha(a, {"auto_send": False})))
 
 
 def cmd_create_campaign(a):
@@ -1028,18 +1046,28 @@ def monta_parser():
     crm.add_argument("--campanha", required=True)
     crm.set_defaults(fn=cmd_curadoria_remover)
     cursub.add_parser("rebuild").set_defaults(fn=cmd_curadoria_rebuild)
+    # A agenda passou a ser POR CAMPANHA (`schedules/<campanha>.json`). `--campanha` é
+    # opcional em todos, no padrão do grupo `sources`/`curadoria`: omitido, a padrão, e a
+    # tela diz em qual campanha gravou.
+    _AJUDA_CAMPANHA = "de qual campanha é a agenda (omitido: a padrão)"
     sch = sub.add_parser("schedule")
     ssub = sch.add_subparsers(dest="schedule_cmd", required=True)
-    ssub.add_parser("status").set_defaults(fn=cmd_schedule_status)
+    sst = ssub.add_parser("status")
+    sst.add_argument("--campanha", default=None, help=_AJUDA_CAMPANHA)
+    sst.set_defaults(fn=cmd_schedule_status)
     sset = ssub.add_parser("set")
     sset.add_argument("--time", default=None, help="HH:MM em BRT (ex.: 10:00)")
     sset.add_argument("--days", default=None, help="diario | util | seg,ter,qua,qui,sex,sab,dom")
     sset.add_argument("--until", default=None, help="YYYY-MM-DD (janela opcional; vazio limpa)")
+    sset.add_argument("--campanha", default=None, help=_AJUDA_CAMPANHA)
     sset.set_defaults(fn=cmd_schedule_set)
-    ssub.add_parser("on").set_defaults(fn=cmd_schedule_on)
-    ssub.add_parser("off").set_defaults(fn=cmd_schedule_off)
+    for _op, _fn in (("on", cmd_schedule_on), ("off", cmd_schedule_off)):
+        _p = ssub.add_parser(_op)
+        _p.add_argument("--campanha", default=None, help=_AJUDA_CAMPANHA)
+        _p.set_defaults(fn=_fn)
     sas = ssub.add_parser("auto-send")
     sas.add_argument("mode", choices=["on", "off"])
+    sas.add_argument("--campanha", default=None, help=_AJUDA_CAMPANHA)
     sas.set_defaults(fn=cmd_schedule_autosend)
     return p
 

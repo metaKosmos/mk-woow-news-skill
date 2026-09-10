@@ -50,6 +50,13 @@ SCHEDULE_DEFAULTS = {
     "last_run_date": None,
 }
 _SCHEDULE_SET_FIELDS = {"enabled", "send_time", "weekdays", "auto_send", "until"}
+# Um blob por campanha, e não um documento único, pelo mesmo motivo que fez `clients/` virar
+# um blob por pessoa: o `last_run_date` é um claim escrito no meio do tick, e documento único
+# faz dois ticks de campanhas diferentes se sobrescreverem. A constante existe porque a
+# string "schedule.json" estava literal em quatro pontos até a v1.7.0 — se um escapasse na
+# migração, o claim gravaria onde ninguém lê e o tick rodaria a cada 15 min o dia inteiro.
+SCHEDULE_PREFIX = "schedules/"
+SCHEDULE_KEY_LEGADO = "schedule.json"
 
 
 def _sm():
@@ -1082,6 +1089,20 @@ def _valida_slug(slug):
 _EDITION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
 
 
+def _valida_campanha_existente(sm, campanha):
+    """Slug de campanha que EXISTE no cadastro. Omitido, a padrão.
+
+    Fail-loud, não fail-open: agendar uma campanha que não existe é erro de digitação, e um
+    fail-open aqui criaria `schedules/<typo>.json` que nenhum tick jamais leria."""
+    if campanha is None or str(campanha).strip() == "":
+        return CAMPANHA_PADRAO
+    slug = _valida_slug(campanha)
+    if slug not in get_curadoria(sm)["campanhas"]:
+        raise EntradaInvalida(
+            f"campanha não encontrada: {slug!r}. Crie antes: curadoria criar --campanha {slug}")
+    return slug
+
+
 def _valida_edition_id(edition):
     """Recusa id que viraria caminho, glob ou travessia. Devolve o id como veio.
 
@@ -1591,12 +1612,27 @@ def get_clients_report(published, full=True, email=None, sm=None, roster=()):
 
 
 # --------------------------------------------------------------- agendamento
-def get_schedule(sm=None):
-    """Lê o agendamento de schedule.json (GCS); preenche os defaults se ausente."""
+def _schedule_key(campanha):
+    return f"{SCHEDULE_PREFIX}{campanha}.json"
+
+
+def get_schedule(sm=None, campanha=None):
+    """Agendamento da campanha. Preenche os defaults se ausente.
+
+    Migração sem passo de migração: enquanto `schedules/<padrão>.json` não existir, a
+    campanha PADRÃO cai no `schedule.json` legado INTEIRO, `last_run_date` incluso. Ler só
+    os campos de configuração e perder o claim faria o tick rodar de novo no dia da
+    migração — com `auto_send`, um segundo envio.
+
+    O legado é da padrão e de mais ninguém: herdá-lo numa campanha nova a faria nascer com
+    `enabled: True` e mandar e-mail sozinha no primeiro tick."""
     sm = sm or _sm()
-    raw = sm.store.read("schedule.json")
+    campanha = campanha or CAMPANHA_PADRAO
+    raw = sm.store.read(_schedule_key(campanha))
+    if raw is None and campanha == CAMPANHA_PADRAO:
+        raw = sm.store.read(SCHEDULE_KEY_LEGADO)
     s = json.loads(raw) if raw else {}
-    return {**SCHEDULE_DEFAULTS, **s}
+    return {**SCHEDULE_DEFAULTS, **s, "campanha": campanha}
 
 
 def _validate_schedule(s):
@@ -1618,12 +1654,15 @@ def _validate_schedule(s):
 
 
 def set_schedule(payload):
-    """Grava o agendamento em schedule.json (GCS). Operador edita sem redeploy. Só os
-    campos do agendamento são mexidos; last_run_date é preservado (dedup do tick)."""
+    """Grava o agendamento de UMA campanha. Operador edita sem redeploy. Só os campos do
+    agendamento são mexidos; last_run_date é preservado (dedup do tick).
+
+    Sem `campanha`, grava na padrão e DIZ em qual gravou: enquanto só existir a padrão o
+    efeito é idêntico ao de antes, e quem tem mais de uma campanha precisa ver o alvo."""
     payload = payload or {}
     sm = _sm()
-    cur = json.loads(sm.store.read("schedule.json") or "{}")
-    s = {**SCHEDULE_DEFAULTS, **cur}
+    campanha = _valida_campanha_existente(sm, payload.get("campanha"))
+    s = get_schedule(sm, campanha)
     for k in _SCHEDULE_SET_FIELDS:
         if k in payload:
             s[k] = payload[k]
@@ -1632,15 +1671,32 @@ def set_schedule(payload):
     _validate_schedule(s)
     s["set_by"] = payload.get("_email", "")
     s["set_at"] = datetime.now(BRT).isoformat(timespec="seconds")
-    sm.store.write("schedule.json", json.dumps(s, ensure_ascii=False, indent=2))
+    _grava_schedule(sm, campanha, s)
     return s
 
 
-def _mark_schedule_run(sm, date_str):
-    """Marca o dia como já rodado (claim) em schedule.json, preservando o resto."""
-    s = {**SCHEDULE_DEFAULTS, **json.loads(sm.store.read("schedule.json") or "{}")}
+def _grava_schedule(sm, campanha, s):
+    """Escreve SEMPRE no caminho novo, e sempre o documento resolvido inteiro.
+
+    Gravar só o campo que mudou faria a leitura seguinte encontrar o arquivo novo, parar de
+    cair no legado e voltar aos defaults — `enabled: False`, e a newsletter simplesmente
+    deixa de sair, sem erro nenhum. O `campanha` sai do documento porque ele é o NOME do
+    blob, não conteúdo: guardá-lo dentro cria duas fontes para a mesma coisa."""
+    doc = {k: v for k, v in s.items() if k != "campanha"}
+    sm.store.write(_schedule_key(campanha), json.dumps(doc, ensure_ascii=False, indent=2))
+
+
+def _mark_schedule_run(sm, date_str, campanha=None):
+    """Claim do dia PARA AQUELA CAMPANHA, preservando o resto do documento.
+
+    Por campanha, e não global: com um `last_run_date` só, a primeira campanha elegível do
+    dia claima o dia e todas as outras respondem `{"ran": false, "reason": "já rodou hoje"}`
+    — 200, nenhuma newsletter, nenhum erro em lugar nenhum, e o operador só descobre pela
+    edição que não saiu. É o mesmo motivo que fez `clients/` virar um blob por pessoa."""
+    campanha = campanha or CAMPANHA_PADRAO
+    s = get_schedule(sm, campanha)
     s["last_run_date"] = date_str
-    sm.store.write("schedule.json", json.dumps(s, ensure_ascii=False, indent=2))
+    _grava_schedule(sm, campanha, s)
 
 
 def _should_run_now(sched, now_brt, edition_stage):
@@ -1679,22 +1735,86 @@ def run_daily(edition, auto_send=False):
             "stage": sm.get_state(edition).get("stage")}
 
 
+def _candidatas_do_tick(sm, now, hoje):
+    """(aprovadas, ignoradas, erros) para este instante. Cada campanha no seu try.
+
+    `aprovadas` é a fila real: quem rodaria agora. `ignoradas` é o diagnóstico — desligada,
+    fora do horário, fora dos dias, já rodou hoje, edição já em 'ready'. As duas ficam
+    separadas de propósito: `pendentes`, no retorno do tick, é a fila de espera, e é ela que
+    torna o atraso visível. Somar campanha desligada a esse número o esvazia de sentido, e o
+    operador perde justamente a resposta de "quantas ainda saem hoje".
+
+    O try por campanha não é zelo: `get_schedule` faz `json.loads` cru e `_should_run_now`
+    faz `split(":")` no `send_time`. Um único blob corrompido levantaria antes do try do
+    pipeline, e a rota /cron/tick fica FORA do try/except do main.py — vira 500 a cada 15
+    minutos, para sempre, e leva junto as campanhas que viriam depois dela no laço. Com N
+    arquivos de agenda, essa superfície é N vezes maior do que era com um só."""
+    aprovadas, ignoradas, erros = [], [], []
+    for slug in sorted(get_curadoria(sm)["campanhas"]):
+        try:
+            sched = get_schedule(sm, slug)
+            edition = edition_id(slug, hoje)
+            # O stage é lido DENTRO do laço, por campanha. Hoistar este get_state para fora
+            # (é de onde ele veio) faria toda campanha herdar o stage da primeira, e o guard
+            # de `done` do _should_run_now passaria a bloquear todas ou nenhuma.
+            st = sm.get_state(edition)
+            stage = st.get("stage", "empty")
+            if st.get("type", "news_auto") != "news_auto":
+                # `run_daily` não conhece `type`: uma edição manual_html rodada pelo cron cai
+                # em `_generate_manual_html` sem payload e morre em 'manual_html exige html e
+                # subject'. Fica de fora com motivo, em vez de estourar todo dia às 10h.
+                ignoradas.append({"campanha": slug, "edition": edition,
+                                  "reason": f"edição é '{st.get('type')}', não news_auto"})
+                continue
+            ok, motivo = _should_run_now(sched, now, stage)
+            if ok:
+                aprovadas.append((sched.get("last_run_date") or "", slug, edition, sched))
+            else:
+                ignoradas.append({"campanha": slug, "edition": edition, "reason": motivo})
+        except Exception as e:  # noqa: BLE001 — 1 campanha não pode quebrar as outras
+            print(f"[tick] {slug} falhou antes de rodar: {e}")
+            erros.append({"campanha": slug, "error": str(e)[:500]})
+    # Vencida há mais tempo primeiro: `last_run_date` vazio (nunca rodou) ordena antes de
+    # qualquer data, que é exatamente a prioridade certa.
+    aprovadas.sort(key=lambda t: (t[0], t[1]))
+    return aprovadas, ignoradas, erros
+
+
 def cron_tick():
-    """Bate pelo Cloud Scheduler (cron-token). Lê o agendamento, decide se roda hoje e,
-    se sim, claima o dia ANTES (evita tick duplo / re-send) e roda o pipeline. Ao fim
-    espelha o estado pro Firebase para o painel refletir na hora."""
+    """Bate pelo Cloud Scheduler (cron-token). Roda UMA campanha por tick.
+
+    Uma, e não N em série: cada pipeline tem o timeout de 600s do `_run_script`, e N deles
+    numa request de Cloud Run soma N vezes esse teto e estoura o attempt-deadline de 900s do
+    Scheduler. Com o tick a cada 15 min, N campanhas no mesmo horário saem em N ticks, e o
+    `pendentes` do retorno torna o atraso visível em vez de misterioso.
+
+    A escolhida é a vencida há mais tempo. Claima ANTES de rodar (evita tick duplo/re-send) e
+    o claim é por campanha — ver `_mark_schedule_run`. Ao fim espelha o estado pro Firebase.
+    """
     sm = _sm()
-    sched = get_schedule(sm)
     now = datetime.now(BRT)
-    edition = _resolve_edition_date(None)  # hoje em BRT
-    stage = sm.get_state(edition).get("stage", "empty")
-    ok, reason = _should_run_now(sched, now, stage)
-    if not ok:
-        return {"ran": False, "reason": reason, "edition": edition, "stage": stage}
-    _mark_schedule_run(sm, now.strftime("%Y-%m-%d"))  # claim: não re-tenta no mesmo dia
+    hoje = now.strftime("%Y-%m-%d")
+    aprovadas, ignoradas, erros = _candidatas_do_tick(sm, now, hoje)
+
+    if not aprovadas:
+        return {"ran": False, "reason": "nenhuma campanha vencida agora",
+                "pendentes": [], "ignoradas": ignoradas, "erros": erros}
+
+    _lrd, slug, edition, sched = aprovadas[0]
+    # `pendentes` são só as APROVADAS que ficaram para o próximo tick: é a fila de espera, o
+    # número que responde "quantas ainda saem hoje". O diagnóstico do resto vai em
+    # `ignoradas`.
+    pendentes = [{"campanha": s, "edition": e} for _l, s, e, _sc in aprovadas[1:]]
+    _mark_schedule_run(sm, hoje, slug)  # claim: não re-tenta no mesmo dia, nesta campanha
+    # `run_daily` nunca gravou o campo `campanha`, e `create_campaign` é o único escritor
+    # dele. Sem esta linha, TODA edição nascida do cron — de qualquer campanha — cairia em
+    # `publicados/daily-drops.json` no rebuild, barrando a pauta da campanha errada.
+    if slug != CAMPANHA_PADRAO and campanha_da_edicao(sm.get_state(edition)) != slug:
+        sm.upsert_edition(edition, {"campanha": slug})
     try:
         result = run_daily(edition, sched.get("auto_send"))
     except Exception as e:  # noqa: BLE001 — dia já claimado; erro fica no health, sem 500/retry
         result = {"edition": edition, "error": str(e)[:500]}
     sm.sync_to_firebase()
-    return {"ran": True, **result}
+    return {"ran": True, "campanha": slug, "pendentes": pendentes, "ignoradas": ignoradas,
+            "erros": erros, **result}

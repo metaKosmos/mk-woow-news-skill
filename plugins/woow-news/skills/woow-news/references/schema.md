@@ -1,7 +1,24 @@
 # Schema dos arquivos de estado (woow-news)
 
-Daily Drops: `edition` = data de publicação `YYYY-MM-DD` (uma edição por dia). O campo
-`date` espelha essa data (o broker preenche em `run_stage`).
+**Id da edição (v1.8.0).** `<data>` na campanha padrão (`daily-drops`), `<slug>--<data>` nas
+demais — ex.: `2026-09-15` e `woow-beauty--2026-09-15`. O campo `date` espelha a data (o
+broker preenche em `run_stage`), e `queue.json` passa a trazê-lo sempre que o id o carrega,
+para nenhum consumidor precisar parsear o id.
+
+A campanha padrão fica com o id nu por retrocompat: as 35+ edições existentes, os HTMLs já
+publicados (`nl/<id>.html`) e os links já enviados continuam válidos, sem migração. O
+separador é `--` porque não pode ser `/` (o `GcsStore.list_editions` faz
+`name.split("/")[-1]`, e a edição sumiria da fila com o state existindo no bucket) nem `.`
+(chave de RTDB não aceita). O parse ancora na DATA, nunca em `split("--")`, porque slug
+aceita hífen duplo interno.
+
+**Quem manda na campanha é o CAMPO `campanha` do state, não o id.** O id só carrega. Onde há
+state, `campanha_da_edicao(st)` decide; `split_edition_id` serve para quando ainda não há
+(criação) e para extrair a data. Divergência entre os dois é recusada na criação, nunca
+resolvida em silêncio.
+
+Chave legada sem data (`2026-wNN`, `webinar-*`, `teste-remetente-*`) continua funcionando
+como funciona hoje: não carrega data, não carrega campanha, e é lida como a padrão.
 
 ## queue.json (no GCS, espelhado pro Firebase)
 ```json
@@ -114,7 +131,7 @@ o histórico guarda as versões anteriores para o painel listar. Cortado nas úl
 Lista-alvo do envio diário (`active_list_*`, editado por `set-list`) e remetente ativo global
 (`active_from_*`, editado por `set-sender`). Ambos têm precedência sobre `newsletter.yaml`.
 
-## schedule.json (no GCS) — agendamento do envio diário
+## schedules/<campanha>.json (no GCS) — agendamento, um por campanha
 ```json
 {
   "enabled": false,
@@ -132,8 +149,29 @@ Lista-alvo do envio diário (`active_list_*`, editado por `set-list`) e remetent
 - `until`: data limite opcional `YYYY-MM-DD` (janela; ex.: piloto de 7 dias). `null` = sem fim.
 - `last_run_date`: dedup — o tick "claima" o dia antes de rodar; não roda 2x no mesmo dia.
 
-O `POST /cron/tick` (Cloud Scheduler, a cada ~15 min) lê este arquivo e roda a edição de
-hoje quando dá o horário. Editado por `schedule set/on/off/auto-send`.
+Um blob POR CAMPANHA, e não um documento único, pelo mesmo motivo que fez `clients/` virar
+um blob por pessoa: `last_run_date` é um claim escrito no meio do tick, e documento único faz
+dois ticks de campanhas diferentes se sobrescreverem. `campanha` não fica DENTRO do
+documento: ela é o nome do blob.
+
+**Migração sem passo de migração.** Enquanto `schedules/daily-drops.json` não existir, a
+campanha padrão lê o `schedule.json` legado INTEIRO, `last_run_date` incluso — perder o claim
+faria o tick rodar de novo no dia da migração, e com `auto_send` isso é um segundo envio. O
+primeiro claim grava o documento resolvido inteiro no caminho novo. O legado é da padrão e de
+mais ninguém: herdá-lo numa campanha nova a faria nascer `enabled: true` e mandar e-mail
+sozinha no primeiro tick.
+
+Campanha nova nasce com os defaults: `enabled: false`, `auto_send: false`.
+
+O `POST /cron/tick` (Cloud Scheduler, a cada ~15 min) roda **uma campanha por tick** — a
+vencida há mais tempo (`last_run_date` vazio primeiro). Uma, e não N em série, porque cada
+pipeline tem timeout de 600s e N deles numa request estouram o attempt-deadline de 900s do
+Scheduler. O retorno traz `campanha` (a que rodou), `pendentes` (as aprovadas que ficaram
+para o próximo tick — é este número que torna o atraso visível), `ignoradas` (o diagnóstico:
+desligada, fora do horário, já rodou hoje) e `erros` (campanha cuja agenda não pôde ser lida;
+cada uma no seu try, para uma não derrubar as seguintes).
+
+Editado por `schedule set/on/off/auto-send [--campanha X]`. `GET /schedule?campanha=X`.
 
 ## sources.json (no GCS) — fontes RSS da pesquisa
 ```json

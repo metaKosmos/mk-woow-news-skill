@@ -8,8 +8,8 @@ Rotas:
   GET  /oauth-config  público — client_id/secret de Desktop (molde blog-mk)
   GET  /sync          operador OU token de cron — espelha estado -> Firebase
   POST /cron/tick     token de cron (OU operador) — roda o agendamento se for a hora
-  GET  /schedule      operador — devolve o agendamento (schedule.json)
-  POST /schedule/set  operador — grava o agendamento (horário/dias/auto-send/janela)
+  GET  /schedule      operador — agendamento da campanha (?campanha=<slug>, default a padrão)
+  POST /schedule/set  operador — grava o agendamento (horário/dias/auto-send/janela/campanha)
   GET  /queue         operador — devolve queue.json
   GET  /metrics       operador — métricas ZMA + custo das últimas edições
   POST /run           operador — orquestra estágio (research|generate|send)
@@ -223,7 +223,11 @@ def _handlers():
             if path == "/lists/set-active" and method == "POST":
                 return jj(orchestrator.set_active_list({**payload, "_email": email}))
             if path == "/schedule" and method == "GET":
-                return jj(orchestrator.get_schedule())
+                # `campanha` vem por query, como em /sources e /publicados: o despacho é por
+                # IGUALDADE de path, então `/schedules/<slug>` não seria alcançável e cairia
+                # no 404 genérico, que o CLI traduz como "broker fora do ar".
+                return jj(orchestrator.get_schedule(
+                    campanha=(request.args.to_dict() or {}).get("campanha")))
             if path == "/schedule/set" and method == "POST":
                 return jj(orchestrator.set_schedule({**payload, "_email": email}))
             if path == "/admin/reset" and method == "POST":
