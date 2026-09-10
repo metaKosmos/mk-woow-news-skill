@@ -21,9 +21,13 @@ Rotas:
   POST /lists/set-active operador — troca a lista-alvo do envio diário (settings.json)
   GET  /senders       operador — Senders do ZMA (best-effort) + remetente ativo
   POST /senders/set-active operador — troca o remetente ativo (settings.json, global)
-  GET  /sources       operador — fontes RSS da pesquisa (sources.json) + seed do feeds.yaml
+  GET  /sources       operador — fontes RSS + quanto cada uma publicou e teve barrado
   POST /sources/set   operador — edita as fontes (add|remove|enable|disable|set-url)
   POST /sources/test  operador — baixa os feeds de dentro do broker e devolve o status
+  GET  /curadoria     operador — regra de curadoria por campanha + tamanho da memória
+  POST /curadoria/set operador — edita a regra (criar|janela|titulo|bloquear|liberar|remover)
+  GET  /publicados    operador — o que já foi enviado numa campanha (a memória da trava)
+  POST /admin/publicados/rebuild admin — reconstrói a memória a partir dos states
   GET  /clients       operador — quem opera a skill e em que versão (tabela só p/ admin)
   POST /admin/release admin    — grava a nota da versão publicada (aparece no aviso)
   POST /admin/reset   admin    — limpa/recria estado de uma edição
@@ -35,7 +39,7 @@ qualquer comando, sem depender de alguém rodar a checagem de versão.
 import os
 import re
 
-ADMIN_ONLY = {"/admin/reset", "/admin/release"}
+ADMIN_ONLY = {"/admin/reset", "/admin/release", "/admin/publicados/rebuild"}
 
 
 def outdated(client_version, published_version):
@@ -199,11 +203,19 @@ def _handlers():
                 return jj(orchestrator.set_release(
                     {**payload, "version": SKILL_VERSION, "_email": email}))
             if path == "/sources" and method == "GET":
-                return jj(orchestrator.get_sources())
+                return jj(orchestrator.get_sources_report(request.args.to_dict()))
             if path == "/sources/set" and method == "POST":
                 return jj(orchestrator.set_sources({**payload, "_email": email}))
             if path == "/sources/test" and method == "POST":
                 return jj(orchestrator.test_sources({**payload, "_email": email}))
+            if path == "/curadoria" and method == "GET":
+                return jj(orchestrator.get_curadoria_report(request.args.to_dict()))
+            if path == "/curadoria/set" and method == "POST":
+                return jj(orchestrator.set_curadoria({**payload, "_email": email}))
+            if path == "/publicados" and method == "GET":
+                return jj(orchestrator.get_publicados_report(request.args.to_dict()))
+            if path == "/admin/publicados/rebuild" and method == "POST":
+                return jj(orchestrator.rebuild_publicados())
             if path == "/lists" and method == "GET":
                 return jj(orchestrator.list_lists())
             if path == "/lists/create" and method == "POST":

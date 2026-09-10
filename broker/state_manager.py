@@ -10,9 +10,26 @@ from datetime import datetime, timezone, timedelta
 BRT = timezone(timedelta(hours=-3))
 STAGE_RANK = {"empty": 0, "researched": 1, "generated": 2, "ready": 3, "sent": 4}
 
+CAMPANHA_PADRAO = "daily-drops"
+PUBLICADOS_PREFIX = "publicados/"
+PUBLICADOS_MAX_EDICOES = 120  # teto POR campanha
+
 
 def _now_brt():
     return datetime.now(BRT).isoformat(timespec="seconds")
+
+
+def campanha_da_edicao(st):
+    """Campanha de um state, com a retrocompat em UM lugar só.
+
+    Edição anterior à trava de repetição não tem o campo `campanha` (mesmo caso do `type`
+    ausente, que se lê como news_auto). Três chamadores decidindo isso por conta é onde uma
+    edição legada acaba contada numa campanha e procurada em outra."""
+    return st.get("campanha") or CAMPANHA_PADRAO
+
+
+def _publicados_vazio(campanha):
+    return {"campanha": campanha, "updated_at": _now_brt(), "edicoes": 0, "links": []}
 
 
 class LocalStore:
@@ -98,6 +115,12 @@ class StateManager:
         st["edition"] = edition
         self.store.write(f"editions/{edition}.state.json", json.dumps(st, ensure_ascii=False, indent=2))
         self._rebuild_queue()
+        # Só envio e provenance mexem no índice de publicados. A condição não é economia
+        # de zelo: _refresh_metrics faz um upsert por edição em laço, e _rebuild_queue já
+        # relê todos os states a cada chamada (O(N²) de leituras). Sem a guarda, todo sync
+        # de métricas ganharia um segundo termo quadrático.
+        if patch.get("stage") == "sent" or "provenance" in patch:
+            self._rebuild_publicados()
         return st
 
     # -- queue derivado --
@@ -108,6 +131,7 @@ class StateManager:
             rows.append({
                 "edition": ed,
                 "type": st.get("type", "news_auto"),  # campo, não estágio: edições legadas = news_auto
+                "campanha": campanha_da_edicao(st),
                 "date": st.get("date", ""),
                 "stage": st.get("stage", "empty"),
                 "subject": st.get("subject", ""),
@@ -122,6 +146,7 @@ class StateManager:
                 "motivos": sorted({d.get("motivo", "") for d in
                                    (((st.get("provenance") or {}).get("descartados")) or [])}),
                 "links_suspeitos": len(((st.get("link_check") or {}).get("suspeitos")) or []),
+                "barrados": (st.get("health") or {}).get("barrados"),
             })
         rows.sort(key=lambda r: r["edition"])
         queue = {"updated_at": _now_brt(), "editions": rows}
@@ -132,6 +157,85 @@ class StateManager:
         raw = self.store.read("queue.json")
         return json.loads(raw) if raw else self._rebuild_queue()
 
+    # -- publicados derivado (memória da curadoria) --
+    def _rebuild_publicados(self):
+        """Reconstrói o índice do que já saiu, um blob por campanha.
+
+        Derivado dos states como a queue: nada aqui é fonte, tudo se refaz. Só edição em
+        `sent` conta — o que ainda não foi enviado não gastou pauta. Devolve
+        {campanha: doc gravado}, que é o que a rota de admin mostra ao operador."""
+        por_campanha = {}
+        for ed in self.store.list_editions():
+            st = self.get_state(ed)
+            if st.get("stage") != "sent":
+                continue
+            por_campanha.setdefault(campanha_da_edicao(st), []).append((ed, st))
+
+        docs = {}
+        for campanha, edicoes in por_campanha.items():
+            edicoes.sort(key=lambda par: par[0], reverse=True)
+            edicoes = edicoes[:PUBLICADOS_MAX_EDICOES]
+            links = []
+            for ed, st in edicoes:
+                # Edição enviada antes da v1.6.0 não tem provenance: não contribui link
+                # nenhum e não é motivo para derrubar o índice das outras.
+                for item in ((st.get("provenance") or {}).get("itens") or []):
+                    link = (item.get("link") or "").strip()
+                    if not link:
+                        continue
+                    # Link CRU, não normalizado: a régua de comparação mora no research.py e
+                    # ainda vai mudar. Guardar já normalizado faria cada ajuste da régua
+                    # invalidar a memória inteira, que é justo o que não se pode reconstruir
+                    # a partir de fora.
+                    links.append({"link": link, "edition": ed,
+                                  "date": st.get("date") or ed,
+                                  "campo": item.get("campo", ""),
+                                  "source": item.get("source", ""),
+                                  "titulo": item.get("titulo_fonte", "")})
+            blob = {"campanha": campanha, "updated_at": _now_brt(),
+                    "edicoes": len(edicoes), "links": links}
+            self.store.write(f"{PUBLICADOS_PREFIX}{campanha}.json",
+                             json.dumps(blob, ensure_ascii=False, indent=2))
+            docs[campanha] = blob
+
+        # Campanha que existia e ficou sem nenhuma edição enviada (reset, expurgo) some do
+        # laço acima e o blob velho sobreviveria barrando pauta para sempre. Esvaziar, não
+        # deixar para trás: memória que não corresponde a nada tem que soltar, não travar.
+        for key in self.store.list_keys(PUBLICADOS_PREFIX):
+            if not key.endswith(".json"):
+                continue
+            campanha = key[len(PUBLICADOS_PREFIX):-len(".json")]
+            if campanha in docs:
+                continue
+            vazio = _publicados_vazio(campanha)
+            self.store.write(key, json.dumps(vazio, ensure_ascii=False, indent=2))
+            docs[campanha] = vazio
+        return docs
+
+    def rebuild_publicados(self):
+        """Rebuild manual do índice (rota de admin). Mesmo dict do interno."""
+        return self._rebuild_publicados()
+
+    def get_publicados(self, campanha=CAMPANHA_PADRAO):
+        """Memória de links já publicados na campanha.
+
+        Blob ausente reconstrói e relê (igual get_queue), então a memória nasce sozinha no
+        primeiro deploy, sem migração. Fail-open em todo o resto: blob ilegível devolve o
+        shape vazio e nunca levanta — uma trava que barra tudo quando quebra é
+        indistinguível de uma trava que funciona."""
+        key = f"{PUBLICADOS_PREFIX}{campanha}.json"
+        raw = self.store.read(key)
+        if raw is None:
+            self._rebuild_publicados()
+            raw = self.store.read(key)
+        try:
+            blob = json.loads(raw) if raw else None
+        except Exception:  # noqa: BLE001 — JSON podre não pode derrubar a pauta do dia
+            blob = None
+        if not isinstance(blob, dict) or not isinstance(blob.get("links"), list):
+            return _publicados_vazio(campanha)
+        return blob
+
     def coverage(self):
         cov = {k: 0 for k in STAGE_RANK}
         for e in self.get_queue()["editions"]:
@@ -140,9 +244,12 @@ class StateManager:
         return cov
 
     def reset_edition(self, edition):
-        """Zera o state da edição p/ 'empty' e reconstrói a queue."""
+        """Zera o state da edição p/ 'empty' e reconstrói a queue e os publicados."""
         self.store.write(f"editions/{edition}.state.json",
                          json.dumps({"edition": edition, "stage": "empty"}))
+        # Sem reconstruir aqui, os links de uma edição resetada seguiriam travando a pauta
+        # para sempre enquanto o state dela diz 'empty'.
+        self._rebuild_publicados()
         return self._rebuild_queue()
 
     # -- espelho Firebase (produção; devolve erro estruturado se firebase_admin ausente) --

@@ -18,7 +18,10 @@ def _local_sm(tmp_path, monkeypatch):
 def test_create_campaign_news_auto(tmp_path, monkeypatch):
     sm = _local_sm(tmp_path, monkeypatch)
     r = orchestrator.create_campaign({"edition": "2026-07-01", "type": "news_auto"})
-    assert r == {"edition": "2026-07-01", "type": "news_auto", "stage": "empty"}
+    # `campanha` entra no retorno desde a trava de repetição: edição sem campanha explícita
+    # herda a padrão, e é ela que decide a regra de curadoria da pesquisa.
+    assert r == {"edition": "2026-07-01", "type": "news_auto", "stage": "empty",
+                 "campanha": "daily-drops"}
     assert sm.get_state("2026-07-01")["type"] == "news_auto"
     assert sm.get_state("2026-07-01")["stage"] == "empty"
 
