@@ -286,7 +286,17 @@ def _generate_manual_html(sm, wd, edition, payload):
     return {"stage": "ready", "type": "manual_html", "preview_url": html_url, "subject": subject}
 
 
-_ENTREGA_PARES = (("list_key", "list_name"), ("from_email", "from_name"))
+# Só a LISTA é par. `list_key` e `list_name` identificam o MESMO objeto no ZMA, e resolvê-los
+# em níveis diferentes descreveria uma lista que não é a alvo.
+#
+# Remetente NÃO é par, e a diferença foi medida num ensaio antes de entregar: `from_name` é o
+# nome exibido e é independente do endereço. "WooW! Beauty <news@metakosmos.com.br>" é
+# exatamente o arranjo que a v1.8.0 recomenda enquanto o remetente verificado no ZMA for um
+# só (erro 6610). Se o nome herdasse o nível do endereço, a campanha que define só o
+# `from_name` — o caminho recomendado — teria a escolha ignorada em silêncio, e o e-mail
+# sairia assinado "WooW! Daily Drops".
+_ENTREGA_PARES = (("list_key", "list_name"),)
+_ENTREGA_SOZINHOS = ("from_email", "from_name")
 
 
 def resolve_entrega(sm, edition, st=None, campanha=None):
@@ -338,15 +348,23 @@ def resolve_entrega(sm, edition, st=None, campanha=None):
 
     out = {c: "" for c in _ENTREGA_CAMPOS}
     origem = {c: "ausente" for c in _ENTREGA_CAMPOS}
+    for campo in _ENTREGA_SOZINHOS:
+        for nivel, fonte in niveis:
+            if _val(fonte, campo):
+                out[campo], origem[campo] = _val(fonte, campo), nivel
+                break
     for principal, secundario in _ENTREGA_PARES:
-        for i, (nivel, fonte) in enumerate(niveis):
+        for nivel, fonte in niveis:
             if not _val(fonte, principal):
                 continue
             out[principal], origem[principal] = _val(fonte, principal), nivel
-            for nivel2, fonte2 in niveis[i:]:
-                if _val(fonte2, secundario):
-                    out[secundario], origem[secundario] = _val(fonte2, secundario), nivel2
-                    break
+            # O secundário vem do MESMO nível ou de lugar nenhum. Herdá-lo de um nível mais
+            # geral colava o nome de uma lista na chave de OUTRA: a campanha define
+            # `list_key`, o nome cai para o do container, e a tela passa a anunciar a lista
+            # errada ao lado da chave certa. Rótulo errado é pior que rótulo nenhum, e a tela
+            # imprime "—" quando não há.
+            if _val(fonte, secundario):
+                out[secundario], origem[secundario] = _val(fonte, secundario), nivel
             break
     nome = (regra or {}).get("nome") or campanha
     if campanha != CAMPANHA_PADRAO:
@@ -417,7 +435,7 @@ def run_stage(edition, stage, payload):
             # Fora do summary de propósito: ele é cortado em 4000 caracteres, e o dia com
             # muitos barrados é justamente o dia em que o corte comeria o que interessa.
             return {"stage": "researched", "summary": summary, "log": out.strip(),
-                    "campanha": campanha_da_edicao(sm.get_state(edition)),
+                    "campanha": campanha_da_edicao(sm.get_state(edition), edition),
                     "barrados": h.get("barrados"),
                     "barrados_itens": h.get("barrados_itens") or [],
                     "parecidos": h.get("parecidos"), "alerta": h.get("alerta")}
@@ -592,7 +610,7 @@ def create_campaign(payload):
         patch["campanha"] = slug
     sm.upsert_edition(edition, patch)  # sem stage:empty (no-op pela monotonia)
     return {"edition": edition, "type": etype, "stage": cur_stage,
-            "campanha": campanha_da_edicao(sm.get_state(edition))}
+            "campanha": campanha_da_edicao(sm.get_state(edition), edition)}
 
 
 # --------------------------------------------------------------- listas (ZMA)
@@ -1181,10 +1199,7 @@ def _campanha_da_edicao_id(edition, sm=None, st=None):
     estágio, então o último degrau é a padrão, que é o comportamento de antes da v1.8.0."""
     try:
         st = st if st is not None else (sm or _sm()).get_state(edition)
-        if st.get("campanha"):
-            return campanha_da_edicao(st)
-        do_id, _data = split_edition_id(edition)
-        return do_id or CAMPANHA_PADRAO
+        return campanha_da_edicao(st, edition)
     except Exception as exc:  # noqa: BLE001
         print(f"[campanha] não resolvi a campanha de {edition}: {exc}")
         return CAMPANHA_PADRAO
@@ -1862,7 +1877,7 @@ def _memoria_publicados(edition, sm=None):
     try:
         sm = sm or _sm()
         st = sm.get_state(edition)
-        slug = campanha_da_edicao(st)
+        slug = campanha_da_edicao(st, edition)
         slug, regra, _ = _regra(sm, slug)
         janela = int(regra.get("janela_dias", _janela_padrao()))
         # NÃO trocar por `data_da_edicao`: aqui o último degrau precisa ser hoje-BRT, e não o

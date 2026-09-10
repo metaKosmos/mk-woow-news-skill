@@ -527,3 +527,34 @@ def test_metricas_ordenam_por_data_dentro_da_campanha(tmp_path, monkeypatch):
     assert "webinar-ultima-chamada" not in edicoes, \
         f"a chave legada de junho despejou uma edição de setembro: {edicoes}"
     assert edicoes == ["2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15"]
+
+
+# ----------------------- o id fala quando o state está calado (achado em produção, 10/09)
+def test_state_vazio_de_id_composto_nao_vira_da_campanha_padrao(tmp_path):
+    """`admin/reset` deixa `{"edition": ..., "stage": "empty"}`, SEM o campo `campanha`.
+
+    Sem consultar o id nesse caso, a edição `woow-beauty--2026-09-15` passava a ser contada
+    como da diária. Foi medido em produção: o `campanha status daily-drops` listava uma
+    edição da Beauty entre as dele. O estrago passa da tela — o rebuild de publicados
+    indexaria os links dela na memória da campanha errada, barrando a pauta de quem nunca
+    publicou aquilo.
+
+    Isto não contradiz a decisão 3: contradição é o state dizer uma coisa e o id outra, e aí
+    o campo continua ganhando. O id só fala quando não há ninguém do outro lado falando."""
+    from state_manager import CAMPANHA_PADRAO, LocalStore, StateManager, campanha_da_edicao
+    vazio = {"edition": "woow-beauty--2026-09-15", "stage": "empty"}
+    assert campanha_da_edicao(vazio) == CAMPANHA_PADRAO          # sem o id, é o de antes
+    assert campanha_da_edicao(vazio, "woow-beauty--2026-09-15") == "woow-beauty"
+    # o campo continua sendo a autoridade quando ele existe e DIVERGE do id
+    assert campanha_da_edicao({"campanha": "outra"}, "woow-beauty--2026-09-15") == "outra"
+    # id nu e chave legada continuam na padrão
+    assert campanha_da_edicao({}, "2026-09-15") == CAMPANHA_PADRAO
+    assert campanha_da_edicao({}, "2026-w37") == CAMPANHA_PADRAO
+    assert campanha_da_edicao({}, "webinar-confirmacao") == CAMPANHA_PADRAO
+
+    sm = StateManager(LocalStore(tmp_path))
+    sm.store.write("editions/woow-beauty--2026-09-15.state.json",
+                   __import__("json").dumps(vazio))
+    linha = next(l for l in sm.get_queue()["editions"]
+                 if l["edition"] == "woow-beauty--2026-09-15")
+    assert linha["campanha"] == "woow-beauty"
