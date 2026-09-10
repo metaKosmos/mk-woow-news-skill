@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """broker_client.py — cliente fino do broker woow-news (Bearer ID token mK)."""
-import json, sys, urllib.error, urllib.request
+import json, sys, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from auth import get_id_token            # noqa: E402
@@ -64,6 +64,20 @@ def _req(method, path, payload=None):
         raise BrokerError(f"Não contatei o broker em {BROKER_URL}: {e}")
 
 
+def _qs(**pares):
+    """Query string só com o que veio preenchido.
+
+    Campo ausente e campo vazio não são a mesma coisa para o broker: sem `campanha` ele
+    resolve a campanha padrão sozinho, e `campanha=` seria um slug vazio a validar. Mesma
+    razão do `_sem_nulos` no lado do POST."""
+    itens = {k: str(v) for k, v in pares.items() if v is not None and v != ""}
+    return ("?" + urllib.parse.urlencode(itens)) if itens else ""
+
+
+def _sem_nulos(d):
+    return {k: v for k, v in d.items() if v is not None}
+
+
 def run(edition, stage, extra=None):  return _req("POST", "/run", {"edition": edition, "stage": stage, **(extra or {})})
 def add_pauta(edition, pauta):        return _req("POST", "/add-pauta", {"edition": edition, "pauta": pauta})
 def queue():                          return _req("GET", "/queue")
@@ -79,7 +93,12 @@ def set_schedule(cfg):                return _req("POST", "/schedule/set", cfg)
 def create_campaign(edition, type, extra=None):
     return _req("POST", "/campaigns/create", {"edition": edition, "type": type, **(extra or {})})
 def set_html(edition, html):          return _req("POST", "/campaigns/set-html", {"edition": edition, "html": html})
-def get_sources():                    return _req("GET", "/sources")
+def get_sources(campanha=None):       return _req("GET", "/sources" + _qs(campanha=campanha))
+def get_curadoria():                  return _req("GET", "/curadoria")
+def set_curadoria(op, **kw):          return _req("POST", "/curadoria/set", {"op": op, **_sem_nulos(kw)})
+def get_publicados(campanha=None, dias=None):
+    return _req("GET", "/publicados" + _qs(campanha=campanha, dias=dias))
+def rebuild_publicados():             return _req("POST", "/admin/publicados/rebuild")
 def set_sources(op, **kw):            return _req("POST", "/sources/set", {"op": op, **kw})
 def test_sources(**kw):               return _req("POST", "/sources/test", kw)
 def get_clients():                    return _req("GET", "/clients")

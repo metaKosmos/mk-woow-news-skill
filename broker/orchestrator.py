@@ -1150,7 +1150,10 @@ def contribuicao_por_fonte(sm=None, campanha=None):
     if ultima:
         health = (sm.get_state(ultima).get("health") or {})
         for item in (health.get("barrados_itens") or []):
-            fonte = item.get("source") or ""
+            # `fonte`, não `source`: é a chave que o `build_health` do research grava. Ler o
+            # nome errado aqui não dá erro nenhum — a coluna só volta 0 para sempre, e uma
+            # fonte que só produz repetição fica indistinguível de uma que nunca repete.
+            fonte = item.get("fonte") or ""
             if fonte:
                 barradas[fonte] = barradas.get(fonte, 0) + 1
     return {"campanha": slug, "edicao_referencia": ultima,

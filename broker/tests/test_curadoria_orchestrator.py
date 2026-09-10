@@ -253,3 +253,25 @@ def test_curadoria_report_traz_o_tamanho_da_memoria(tmp_path, monkeypatch):
     _enviada(sm, "2026-09-08", [("Glossy", "https://glossy.co/a", "A")])
     r = orchestrator.get_curadoria_report({}, sm)
     assert r["campanhas"]["daily-drops"]["memoria_links"] == 1
+
+
+# --------------------------------------------- integração research -> orchestrator
+def test_barradas_por_fonte_atravessa_o_health_de_verdade(tmp_path, monkeypatch):
+    """Contrato entre dois módulos, exercido pelo caminho de produção.
+
+    O `build_health` do research é quem GRAVA `barrados_itens`, e o `contribuicao_por_fonte`
+    é quem LÊ. Cada lado tinha teste próprio e os dois passavam com nomes de chave
+    divergentes (`fonte` contra `source`): a coluna de barradas voltava 0 para sempre, sem
+    erro nenhum, e uma fonte que só produz repetição ficava igual a uma que nunca repete.
+    Montar o dict do health na mão neste teste reproduziria o mesmo ponto cego, então ele
+    vem do produtor real."""
+    import research
+    sm = _local_sm(tmp_path, monkeypatch)
+    barrados = [{"title": "Matéria repetida", "source": "Glossy",
+                 "link": "https://glossy.co/a", "publicado_em": "2026-09-08",
+                 "publicado_date": "2026-09-08"}]
+    health = research.build_health(report=[], candidates=[], barrados=barrados)
+    sm.upsert_edition("2026-09-09", {"stage": "researched", "date": "2026-09-09",
+                                     "health": health})
+    por_fonte = orchestrator.contribuicao_por_fonte(sm)["por_fonte"]
+    assert por_fonte["Glossy"]["barradas"] == 1
