@@ -661,8 +661,17 @@ def do_sync():
 
 
 def reset_edition(edition):
-    _sm().reset_edition(edition)
-    return {"reset": edition}
+    _queue, indice_ok = _sm().reset_edition(edition)
+    out = {"reset": edition}
+    if not indice_ok:
+        # O reset aconteceu, o índice não acompanhou. Sem dizer isso, o operador recebe 200 e
+        # a memória segue barrando a pauta das edições SEGUINTES com links de uma edição que,
+        # segundo o estado, não existe mais.
+        out["aviso"] = ("a edição foi resetada, mas o índice de publicados não foi "
+                        "reconstruído (veja o log). Rode `curadoria rebuild` para "
+                        "sincronizar, senão a memória segue barrando pauta com os links "
+                        "dela.")
+    return out
 
 
 # --------------------------------------------------------------- fontes (feeds RSS)
@@ -711,6 +720,13 @@ def get_sources_report(payload=None, sm=None):
     base = get_sources(sm)
     try:
         contrib = contribuicao_por_fonte(sm, payload.get("campanha"))
+    except EntradaInvalida:
+        # Deixa passar: campanha inexistente é erro do operador e tem que virar 400. Engolir
+        # aqui devolvia 200 com contribuição zerada, e a tela então acusava TODA fonte ativa
+        # de "nunca publicou" e recomendava desativar. Um typo de uma letra virava conselho
+        # acionável para desligar fonte que funciona, e desligar fonte encolhe a pauta, que é
+        # o piso de 3 blocos do generate. Pior que o silêncio que a guarda queria evitar.
+        raise
     except Exception as exc:  # noqa: BLE001 — enfeite não pode derrubar a lista de fontes
         print(f"[sources] não calculei a contribuição por fonte: {exc}")
         return base
@@ -995,7 +1011,9 @@ def _regra(sm, campanha=None, estrito=False):
     recusa: lá o silêncio é pior, porque `?campanha=daily-drop` (typo de uma letra) devolveria
     200 com zero links e o operador não distinguiria erro de digitação de memória vazia."""
     doc = get_curadoria(sm)
-    slug = _valida_slug(campanha) if campanha else doc["default"]
+    # `if campanha` (e não `is not None`) mandava campo falsy para a campanha padrão em
+    # silêncio, o mesmo buraco do set_curadoria.
+    slug = _valida_slug(campanha) if campanha is not None else doc["default"]
     regra = doc["campanhas"].get(slug)
     if regra is None:
         if estrito:
@@ -1017,7 +1035,13 @@ def set_curadoria(payload):
     sm = _sm()
     doc = get_curadoria(sm)
     campanhas = {k: dict(v) for k, v in doc["campanhas"].items()}
-    slug = _valida_slug(payload.get("campanha") or doc["default"])
+    # `or` aqui era um buraco: campo PRESENTE e falsy (0, [], {}, False, "") passava por cima
+    # do guard de tipo e caía calado na campanha padrão. `{"op":"bloquear","campanha":0}`
+    # respondia 200 dizendo "daily-drops" e gravava o veto na newsletter de produção, com o
+    # operador convicto de ter vetado na campanha de teste. Ausente é herança; presente e
+    # errado é erro de digitação, e erro de digitação não escolhe alvo por omissão.
+    slug = _valida_slug(payload["campanha"]) if payload.get("campanha") is not None \
+        else doc["default"]
 
     if op == "criar":
         if slug in campanhas:
@@ -1038,15 +1062,29 @@ def set_curadoria(payload):
             raise EntradaInvalida(f"campanha não encontrada: {slug!r}. Rode: curadoria list")
         alvo = campanhas[slug]
         if op == "janela":
+            bruto = payload.get("janela_dias")
+            # Duas guardas, redundantes de propósito, e cada uma sozinha resolve o `inf`
+            # (medido): a de float dá a mensagem precisa e é a única que pega o fracionário;
+            # o `OverflowError` na tupla é o cinto, e está lá porque ele NÃO é subclasse de
+            # ValueError e `1e999` é número JSON válido que o parser devolve como inf. Sem
+            # nenhuma das duas, erro de digitação virava 502 "broker quebrado". E float
+            # fracionário era truncado calado (7.9 gravava 7), o que é pior que recusar: a
+            # regra em vigor passava a divergir do que o operador digitou, sem aviso.
+            if isinstance(bruto, float) and not bruto.is_integer():
+                raise EntradaInvalida(
+                    f"'janela_dias' tem que ser inteiro de dias, não {bruto!r}")
             try:
-                janela = int(payload.get("janela_dias"))
-            except (TypeError, ValueError):
+                janela = int(bruto)
+            except (TypeError, ValueError, OverflowError):
                 raise EntradaInvalida("campo 'janela_dias' obrigatório (inteiro de dias; 0 desliga)")
             if janela < 0 or janela > 3650:
                 raise EntradaInvalida(f"janela_dias fora de faixa: {janela} (use de 0 a 3650)")
             alvo["janela_dias"] = janela
         elif op == "titulo":
-            modo = (payload.get("titulo_modo") or "").strip().lower()
+            bruto = payload.get("titulo_modo")
+            if bruto is not None and not isinstance(bruto, str):
+                raise EntradaInvalida(f"'titulo_modo' inválido: {bruto!r} (esperava texto)")
+            modo = (bruto or "").strip().lower()
             if modo not in TITULO_MODOS:
                 raise EntradaInvalida(
                     f"titulo_modo inválido: {modo!r}. Use um de: {', '.join(TITULO_MODOS)}")
@@ -1130,6 +1168,15 @@ def _memoria_publicados(edition, sm=None):
             corte = (datetime.fromisoformat(ate) - timedelta(days=janela)).strftime("%Y-%m-%d")
             for e in (sm.get_publicados(slug).get("links") or []):
                 d = e.get("date") or e.get("edition") or ""
+                # A comparação abaixo é de STRING, então entrada cuja data não é data mente
+                # sobre a ordem. Edição legada de chave semanal grava `date: "2026-w25"`, e
+                # `"2026-w25"` fica acima de qualquer `"2026-0x-xx"`: o link ficava solto por
+                # todo o ano corrente e passava a BARRAR nos primeiros dias do ano seguinte,
+                # com a matéria muito fora da janela configurada. Barrar pauta legítima é o
+                # pior lado dos dois, porque a edição encolhe e o generate falha no piso de
+                # 3 blocos. Data que não é data simplesmente não entra na memória.
+                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
+                    continue
                 # `< ate` estrito: exclui a própria edição (rerodar research numa edição já
                 # enviada não pode barrar os links dela mesma) e as posteriores (rodar uma
                 # edição antiga hoje não pode ser barrado pelo que veio depois dela).
@@ -1165,12 +1212,19 @@ def _valida_dias(bruto):
     o que é erro de digitação do operador."""
     if bruto in (None, ""):
         return None
+    if isinstance(bruto, float) and not bruto.is_integer():
+        raise EntradaInvalida(f"'dias' tem que ser inteiro, não {bruto!r}")
     try:
         dias = int(bruto)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise EntradaInvalida(f"'dias' inválido: {bruto!r} (esperava um número de dias)")
-    if dias < 1 or dias > 3650:
-        raise EntradaInvalida(f"'dias' fora de faixa: {dias} (use de 1 a 3650)")
+    # 0 é "sem recorte", que é o que o CLI já quis dizer com `--dias 0` e o que ele imprime.
+    # Recusar aqui fazia o broker discordar do próprio cliente oficial e devolver 400 para um
+    # comando que o operador podia digitar.
+    if dias == 0:
+        return None
+    if dias < 0 or dias > 3650:
+        raise EntradaInvalida(f"'dias' fora de faixa: {dias} (use de 0 a 3650)")
     return dias
 
 
@@ -1210,7 +1264,9 @@ def contribuicao_por_fonte(sm=None, campanha=None):
     memória for curta, então "nunca publicou" aqui quer dizer "não publicou no que a memória
     alcança" — o `curadoria list` mostra quantas edições são."""
     sm = sm or _sm()
-    slug, _regra_, _doc = _regra(sm, campanha)
+    # `estrito`: isto alimenta RELATÓRIO (`sources list`), não a pesquisa. O fail-open que
+    # protege a pesquisa de ficar sem newsletter, aqui só produziria uma acusação falsa.
+    slug, _regra_, _doc = _regra(sm, campanha, estrito=True)
     publicadas, materias = {}, {}
     for e in (sm.get_publicados(slug).get("links") or []):
         fonte = e.get("source") or ""

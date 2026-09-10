@@ -299,10 +299,19 @@ def test_a_chave_da_edicao_manda_sobre_o_carimbo_do_pipeline():
 
 def test_dias_invalido_e_entrada_do_operador_nao_broker_quebrado(tmp_path, monkeypatch):
     sm = _local_sm(tmp_path, monkeypatch)
-    for ruim in ("abc", "7d", "-3", "0", "999999999", "1e9"):
+    for ruim in ("abc", "7d", "-3", "999999999", "1e9", 7.9, float("inf")):
         with pytest.raises(orchestrator.EntradaInvalida):
             orchestrator.get_publicados_report({"dias": ruim}, sm)
     orchestrator.get_publicados_report({"dias": "7"}, sm)  # o vizinho válido segue passando
+
+
+def test_dias_zero_e_sem_recorte_nao_erro(tmp_path, monkeypatch):
+    """`--dias 0` é o que o CLI já oferece e imprime como "sem recorte". Recusar aqui fazia o
+    broker discordar do próprio cliente oficial: 400 num comando que o operador podia digitar."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    _enviada(sm, "2026-09-08", [("Glossy", "https://glossy.co/a", "A")])
+    r = orchestrator.get_publicados_report({"dias": "0"}, sm)
+    assert [e["link"] for e in r["links"]] == ["https://glossy.co/a"]
 
 
 def test_campanha_inexistente_no_relatorio_recusa(tmp_path, monkeypatch):
@@ -379,3 +388,107 @@ def test_edicao_vazia_ainda_pode_receber_campanha(tmp_path, monkeypatch):
     sm.upsert_edition("beauty-2026-09-15", {"stage": "researched"})
     assert orchestrator.create_campaign(
         {"edition": "beauty-2026-09-15", "campanha": "woow-beauty"})["campanha"] == "woow-beauty"
+
+
+def test_campanha_presente_e_falsy_nao_escolhe_alvo_por_omissao(tmp_path, monkeypatch):
+    """O caso mais perigoso do lote, e o que passava com 200.
+
+    `payload.get("campanha") or default` deixava campo PRESENTE e falsy (0, [], {}, False,
+    "") passar por cima do guard de tipo e cair calado na campanha padrão. O operador mandava
+    `{"op":"bloquear","campanha":0}`, recebia 200 dizendo "daily-drops", e o veto ia para a
+    newsletter de produção com ele convicto de ter vetado na campanha de teste."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    for falsy in (0, [], {}, False, ""):
+        with pytest.raises(orchestrator.EntradaInvalida):
+            orchestrator.set_curadoria({"op": "bloquear", "campanha": falsy,
+                                        "link": "https://glossy.co/a"})
+    assert orchestrator.get_curadoria(sm)["campanhas"]["daily-drops"]["bloqueados"] == []
+    # o vizinho: campanha AUSENTE continua herdando a padrão, que é o caminho normal do CLI
+    r = orchestrator.set_curadoria({"op": "bloquear", "link": "https://glossy.co/a"})
+    assert r["campanha"] == "daily-drops"
+
+
+def test_janela_e_titulo_com_tipo_errado_sao_400(tmp_path, monkeypatch):
+    """`OverflowError` não é subclasse de `ValueError`, e `1e999` é número JSON válido que o
+    parser devolve como inf: sem ele na tupla, erro de digitação virava 502."""
+    _local_sm(tmp_path, monkeypatch)
+    for ruim in (float("inf"), float("-inf"), 7.9):
+        with pytest.raises(orchestrator.EntradaInvalida):
+            orchestrator.set_curadoria({"op": "janela", "janela_dias": ruim})
+    for ruim in (5, True, ["on"], {"m": "on"}):
+        with pytest.raises(orchestrator.EntradaInvalida):
+            orchestrator.set_curadoria({"op": "titulo", "titulo_modo": ruim})
+    # vizinhos válidos seguem passando, senão uma guarda que recusa tudo passaria igual
+    assert orchestrator.set_curadoria({"op": "janela", "janela_dias": 14.0})
+    assert orchestrator.set_curadoria({"op": "titulo", "titulo_modo": "on"})
+
+
+def test_sources_com_campanha_inexistente_recusa_em_vez_de_acusar_as_fontes(tmp_path, monkeypatch):
+    """O relatório de fontes reusava o fail-open da pesquisa, e o resultado era pior que o
+    silêncio: com um typo de uma letra a tela acusava TODA fonte ativa de "nunca publicou" e
+    recomendava desativar. Desativar fonte boa encolhe a pauta, que é o piso do generate.
+
+    A guarda tem duas metades, e a segunda é o `except Exception` largo do `get_sources_report`:
+    sem deixar a EntradaInvalida passar por ele, a rota voltava a 200 com a contribuição
+    zerada e o efeito era idêntico."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    _enviada(sm, "2026-09-08", [("Glossy", "https://glossy.co/a", "A")])
+    with pytest.raises(orchestrator.EntradaInvalida):
+        orchestrator.contribuicao_por_fonte(sm, "daily-drop")
+    with pytest.raises(orchestrator.EntradaInvalida):
+        orchestrator.get_sources_report({"campanha": "daily-drop"}, sm)
+    # o vizinho: slug certo continua trazendo a contribuição, e sem campanha usa a padrão
+    assert orchestrator.get_sources_report({"campanha": "daily-drops"}, sm)["feeds"]
+    assert orchestrator.get_sources_report({}, sm)["feeds"]
+
+
+def test_falha_de_calculo_ainda_nao_derruba_a_lista_de_fontes(tmp_path, monkeypatch):
+    """O vizinho da guarda acima: erro que NÃO é do operador continua sendo engolido, senão
+    um enfeite quebrado passaria a derrubar o comando que lista as fontes."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    monkeypatch.setattr(orchestrator, "contribuicao_por_fonte",
+                        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("gcs off")))
+    assert orchestrator.get_sources_report({}, sm)["feeds"]
+
+
+def test_data_que_nao_e_data_nunca_entra_na_memoria(tmp_path, monkeypatch):
+    """O recorte compara STRING, então entrada cuja data não é data mente sobre a ordem.
+
+    Edição legada de chave semanal grava `date: "2026-w25"`, que fica acima de qualquer
+    `"2026-0x-xx"`: o link ficava solto todo o ano corrente e passava a BARRAR nos primeiros
+    dias do ano seguinte, com a matéria muito fora da janela. Medido antes da guarda: memória
+    vazia em 2026-09-10 e a matéria semanal barrando em 2027-01-05. Barrar pauta legítima é o
+    pior dos dois lados, porque a edição encolhe e o generate falha no piso de 3 blocos."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    sm.upsert_edition("2026-w25", {"stage": "sent", "provenance": {"itens": [
+        {"campo": "manchete", "source": "X", "link": "https://x.com/semanal",
+         "titulo_fonte": "S"}]}})
+    for ed in ("2026-09-10", "2027-01-05"):
+        sm.upsert_edition(ed, {"date": ed})
+        assert orchestrator._memoria_publicados(ed, sm)["links"] == [], f"vazou em {ed}"
+    # o vizinho: entrada com data de verdade continua entrando, senão a guarda mataria a trava
+    _enviada(sm, "2027-01-04", [("Glossy", "https://glossy.co/ok", "O")])
+    sm.upsert_edition("2027-01-05", {"date": "2027-01-05"})
+    assert [e["link"] for e in orchestrator._memoria_publicados("2027-01-05", sm)["links"]] \
+        == ["https://glossy.co/ok"]
+
+
+def test_reset_avisa_quando_o_indice_nao_acompanhou(tmp_path, monkeypatch):
+    """A guarda que protege o envio é a razão errada no reset: nada foi enviado, então não há
+    assimetria a respeitar, e engolir a falha trocava um 502 honesto por um 200 que esconde
+    índice velho ainda barrando a pauta das edições seguintes."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    _enviada(sm, "2026-09-08", [("Glossy", "https://glossy.co/a", "A")])
+    monkeypatch.setattr(sm, "_rebuild_publicados",
+                        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("503")))
+    r = orchestrator.reset_edition("2026-09-08")
+    assert r["reset"] == "2026-09-08"
+    assert "aviso" in r and "curadoria rebuild" in r["aviso"]
+
+
+def test_reset_bem_sucedido_nao_avisa(tmp_path, monkeypatch):
+    """O vizinho: sem ele, um aviso emitido sempre passaria pelo teste de cima."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    _enviada(sm, "2026-09-08", [("Glossy", "https://glossy.co/a", "A")])
+    assert "aviso" not in orchestrator.reset_edition("2026-09-08")
+    assert sm.get_publicados("daily-drops")["links"] == []

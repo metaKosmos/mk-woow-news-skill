@@ -476,3 +476,107 @@ def test_edicoes_conta_so_quem_contribuiu_link(tmp_path):
     blob = sm.get_publicados(CAMPANHA_PADRAO)
     assert len(blob["links"]) == 1
     assert blob["edicoes"] == 1  # 3 enviadas, 1 coberta
+
+
+# ------------------------------------------- a guarda e o materializador têm que concordar
+class _StorePiscada(LocalStore):
+    """Store cujo `list_editions()` devolve vazio N vezes e depois volta ao normal.
+
+    Modela o caso do achado: prefixo trocado, paginação truncada, permissão perdida em
+    `editions/` com `publicados/` ainda gravável. Nada levanta, e é isso que faz o dano
+    passar por comportamento normal."""
+    def __init__(self, root, piscadas=1):
+        super().__init__(root)
+        self.piscadas = piscadas
+
+    def list_editions(self):
+        if self.piscadas > 0:
+            self.piscadas -= 1
+            return []
+        return super().list_editions()
+
+
+def test_piscada_na_listagem_nao_materializa_memoria_vazia(tmp_path):
+    """Uma piscada não pode matar a trava para sempre.
+
+    `_rebuild_publicados` desiste sem gravar quando a listagem vem vazia, mas `get_publicados`
+    gravava o shape vazio logo depois — e como só o blob AUSENTE reconstrói, o blob vazio
+    virava permanente. É a mesma falha que a guarda existe para impedir, pela outra porta."""
+    sm = StateManager(_StorePiscada(tmp_path, piscadas=1))
+    sm.store.write("editions/2026-09-09.state.json", json.dumps({
+        "edition": "2026-09-09", "stage": "sent", "date": "2026-09-09",
+        "provenance": {"itens": [{"campo": "manchete", "source": "Glossy",
+                                  "link": "https://glossy.co/a", "titulo_fonte": "A"}]}}))
+    # durante a piscada: devolve vazio, mas NÃO grava blob
+    assert sm.get_publicados("daily-drops")["links"] == []
+    assert sm.store.read("publicados/daily-drops.json") is None
+    # listagem voltou: a memória se reconstrói sozinha
+    assert [e["link"] for e in sm.get_publicados("daily-drops")["links"]] == ["https://glossy.co/a"]
+
+
+def test_campanha_realmente_sem_envio_ainda_materializa(tmp_path):
+    """O vizinho que continua passando. Sem ele, um `return` incondicional antes da gravação
+    passaria pelo teste de cima e traria de volta o rebuild que nunca converge."""
+    sm = StateManager(LocalStore(tmp_path))
+    sm.store.write("editions/2026-09-09.state.json", json.dumps({
+        "edition": "2026-09-09", "stage": "sent", "date": "2026-09-09",
+        "provenance": {"itens": [{"campo": "manchete", "source": "Glossy",
+                                  "link": "https://glossy.co/a", "titulo_fonte": "A"}]}}))
+    assert sm.get_publicados("woow-beauty")["links"] == []
+    assert sm.store.read("publicados/woow-beauty.json") is not None  # materializou, converge
+
+
+def test_listagem_que_levanta_tambem_nao_materializa(tmp_path):
+    class _Explode(LocalStore):
+        def list_editions(self):
+            raise RuntimeError("503 listando editions/")
+    sm = StateManager(_Explode(tmp_path))
+    assert sm.get_publicados("daily-drops")["links"] == []
+    assert sm.store.read("publicados/daily-drops.json") is None
+
+
+# ------------------------------------------------- slug do state vira nome de blob
+def test_campanha_invalida_no_state_nao_vira_caminho_de_arquivo(tmp_path, capsys):
+    """O valor de `campanha` no state vira `publicados/<campanha>.json`. Nenhuma rota grava
+    sem validar hoje, e o GcsStore não tem travessia, mas no LocalStore a escrita sairia da
+    raiz, e a guarda existe para o próximo escritor do campo que esqueça de validar."""
+    sm = StateManager(LocalStore(tmp_path))
+    for ruim in ("../segredo", "a/b", "COM-MAIUSCULA", "com espaço", "x" * 41, 7, True, []):
+        assert campanha_da_edicao({"campanha": ruim}) == CAMPANHA_PADRAO, ruim
+    assert "campanha inválida no state" in capsys.readouterr().out
+    # o vizinho: slug legítimo continua sendo respeitado, senão a guarda mataria a feature
+    assert campanha_da_edicao({"campanha": "woow-beauty"}) == "woow-beauty"
+    sm.upsert_edition("2026-09-09", {"stage": "sent", "campanha": "../fuga",
+                                     "provenance": {"itens": [{"campo": "manchete",
+                                                               "source": "X",
+                                                               "link": "https://x.com/a",
+                                                               "titulo_fonte": "T"}]}})
+    escritos = [k for k in sm.store.list_keys(PUBLICADOS_PREFIX)]
+    assert escritos == ["publicados/daily-drops.json"], escritos
+
+
+def test_queue_que_levanta_tambem_nao_derruba_o_envio(tmp_path, capsys):
+    """A metade que estava descoberta. `_rebuild_queue` roda no MESMO upsert pós-envio e
+    ANTES do rebuild de publicados, então toda falha compartilhada pelos dois (a listagem de
+    edições e a leitura de cada state) estourava aqui, antes de a outra guarda existir."""
+    class _QueueQuebrada(LocalStore):
+        def write(self, key, data):
+            if key == "queue.json":
+                raise RuntimeError("503 gravando queue.json")
+            return super().write(key, data)
+    sm = StateManager(_QueueQuebrada(tmp_path))
+    st = sm.upsert_edition("2026-09-09", {"stage": "sent", "date": "2026-09-09",
+                                          "campaign_key": "k1"})
+    assert st["stage"] == "sent"
+    assert json.loads(sm.store.read("editions/2026-09-09.state.json"))["stage"] == "sent"
+    assert "[queue] rebuild falhou" in capsys.readouterr().out
+
+
+def test_state_ilegivel_de_outra_edicao_nao_derruba_o_envio(tmp_path):
+    """O gatilho barato e determinístico: `get_state` faz json.loads sem guarda, então um
+    único state corrompido subia até virar 502 num envio que já tinha saído, e cada retry do
+    operador disparava o send de novo."""
+    sm = StateManager(LocalStore(tmp_path))
+    sm.store.write("editions/2026-09-01.state.json", "{{{ nao e json")
+    st = sm.upsert_edition("2026-09-09", {"stage": "sent", "date": "2026-09-09"})
+    assert st["stage"] == "sent"

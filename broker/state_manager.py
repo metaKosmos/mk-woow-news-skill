@@ -5,6 +5,7 @@ queue.json é derivado dos states por edição; o painel lê o espelho no Fireba
 """
 import json
 import os
+import re
 from datetime import datetime, timezone, timedelta
 
 BRT = timezone(timedelta(hours=-3))
@@ -24,8 +25,28 @@ def campanha_da_edicao(st):
 
     Edição anterior à trava de repetição não tem o campo `campanha` (mesmo caso do `type`
     ausente, que se lê como news_auto). Três chamadores decidindo isso por conta é onde uma
-    edição legada acaba contada numa campanha e procurada em outra."""
-    return st.get("campanha") or CAMPANHA_PADRAO
+    edição legada acaba contada numa campanha e procurada em outra.
+
+    O valor devolvido vira NOME DE BLOB (`publicados/<campanha>.json`), então ele é validado
+    aqui, no ponto de uso, e não só na porta HTTP. Hoje nenhuma rota grava `campanha` sem
+    validar e o GcsStore tem nome de objeto plano, sem travessia; a guarda existe para o
+    LocalStore (testes e dev, onde a escrita sairia da raiz e sobrescreveria state de outra
+    edição) e para o próximo escritor do campo que esqueça de validar. Slug fora do padrão
+    cai na campanha padrão e denuncia no log, em vez de virar caminho de arquivo."""
+    bruto = st.get("campanha")
+    if not bruto:
+        return CAMPANHA_PADRAO
+    if not isinstance(bruto, str) or not _SLUG_RE.match(bruto):
+        print(f"[publicados] campanha inválida no state ({bruto!r}); lendo como "
+              f"{CAMPANHA_PADRAO}")
+        return CAMPANHA_PADRAO
+    return bruto
+
+
+# Mesmo padrão que o orchestrator valida na porta HTTP. Duplicado de propósito: state_manager
+# é a camada de baixo e não importa o orchestrator, e um slug que chega aqui já passou por
+# fora da porta.
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 
 
 def _publicados_vazio(campanha):
@@ -114,7 +135,17 @@ class StateManager:
             st.setdefault("timestamps", {})[f"{new_stage}_at"] = _now_brt()
         st["edition"] = edition
         self.store.write(f"editions/{edition}.state.json", json.dumps(st, ensure_ascii=False, indent=2))
-        self._rebuild_queue()
+        # Protegido pelo MESMO motivo do rebuild de publicados abaixo, e a ordem importava:
+        # este roda primeiro, então toda falha compartilhada pelos dois (a listagem de
+        # edições e a leitura de cada state, que é a maior parte das operações) estourava
+        # aqui, antes de a outra guarda existir. Metade da superfície ficava descoberta, e
+        # era a metade que cresce com o número de edições. Um único state ilegível bastava:
+        # `get_state` faz json.loads sem guarda, e o JSONDecodeError subia até virar 502 num
+        # envio que já tinha saído, de forma determinística e permanente.
+        try:
+            self._rebuild_queue()
+        except Exception as e:  # noqa: BLE001 — queue é derivada; o envio já saiu
+            print(f"[queue] rebuild falhou (upsert {edition}): {e}")
         # Só envio, provenance e troca de campanha mexem no índice de publicados. A condição
         # não é economia de zelo: _refresh_metrics faz um upsert por edição em laço, e
         # _rebuild_queue já relê todos os states a cada chamada (O(N²) de leituras). Sem a
@@ -175,7 +206,7 @@ class StateManager:
         return json.loads(raw) if raw else self._rebuild_queue()
 
     # -- publicados derivado (memória da curadoria) --
-    def _rebuild_publicados(self):
+    def _rebuild_publicados_com_status(self):
         """Reconstrói o índice do que já saiu, um blob por campanha.
 
         Derivado dos states como a queue: nada aqui é fonte, tudo se refaz. Só edição em
@@ -232,7 +263,7 @@ class StateManager:
         # get_publicados só reconstrói no blob ausente, nunca no vazio. Sem edição nenhuma
         # não há o que indexar: não se apaga nada.
         if not todas:
-            return docs
+            return docs, False
 
         # Campanha que existia e ficou sem nenhuma edição enviada (reset, expurgo) some do
         # laço acima e o blob velho sobreviveria barrando pauta para sempre. Esvaziar, não
@@ -246,7 +277,11 @@ class StateManager:
             vazio = _publicados_vazio(campanha)
             self.store.write(key, json.dumps(vazio, ensure_ascii=False, indent=2))
             docs[campanha] = vazio
-        return docs
+        return docs, True
+
+    def _rebuild_publicados(self):
+        """Só os índices, para quem não decide nada com base na confiança da listagem."""
+        return self._rebuild_publicados_com_status()[0]
 
     def rebuild_publicados(self):
         """Rebuild manual do índice (rota de admin). Mesmo dict do interno."""
@@ -265,7 +300,7 @@ class StateManager:
         try:
             raw = self.store.read(key)
             if raw is None:
-                self._rebuild_publicados()
+                _docs, listagem_confiavel = self._rebuild_publicados_com_status()
                 raw = self.store.read(key)
                 if raw is None:
                     # Campanha sem nenhuma edição enviada não ganha blob no rebuild, e a
@@ -274,6 +309,23 @@ class StateManager:
                     # leitura por edição), para sempre. Como o workdir é montado em todo
                     # estágio, uma campanha nova pagaria isso a cada estágio do pipeline até
                     # o primeiro envio dela.
+                    #
+                    # MAS só materializa se a listagem de edições for confiável. O rebuild
+                    # desiste sem gravar quando `list_editions()` vem vazia (ver a guarda
+                    # dele), e as duas coisas precisam concordar: gravar o vazio aqui depois
+                    # daquela desistência é a MESMA falha que a guarda existe para impedir,
+                    # entrando pela outra porta. O blob passaria a existir vazio, e como só o
+                    # blob AUSENTE reconstrói, a trava morreria em silêncio e para sempre:
+                    # uma única piscada na listagem devolveria à pauta tudo que já saiu.
+                    # Medido pelas funções reais: com a piscada, matéria publicada na véspera
+                    # volta à pauta; sem ela, é barrada.
+                    #
+                    # O status vem da MESMA leitura que o rebuild usou, não de uma listagem
+                    # nova. Uma segunda listagem pode discordar da primeira, e aí a decisão
+                    # de gravar sai de uma leitura enquanto a de desistir saiu de outra: o
+                    # blob vazio volta a nascer, e o conserto teria um furo do mesmo tamanho.
+                    if not listagem_confiavel:
+                        return _publicados_vazio(campanha)
                     vazio = _publicados_vazio(campanha)
                     self.store.write(key, json.dumps(vazio, ensure_ascii=False, indent=2))
                     return vazio
@@ -292,13 +344,24 @@ class StateManager:
         return cov
 
     def reset_edition(self, edition):
-        """Zera o state da edição p/ 'empty' e reconstrói a queue e os publicados."""
+        """Zera o state da edição p/ 'empty' e reconstrói a queue e os publicados.
+
+        Devolve (queue, indice_reconstruido). O booleano existe porque a guarda que protege o
+        envio é a razão errada aqui: no reset nada foi enviado, então não há assimetria a
+        respeitar, e engolir a falha em silêncio trocava um 502 honesto por um 200 que esconde
+        índice velho ainda barrando a pauta das edições seguintes. A guarda fica (o reset em si
+        aconteceu e o operador precisa saber disso), mas o sinal sobe com ela."""
         self.store.write(f"editions/{edition}.state.json",
                          json.dumps({"edition": edition, "stage": "empty"}))
         # Sem reconstruir aqui, os links de uma edição resetada seguiriam travando a pauta
         # para sempre enquanto o state dela diz 'empty'.
-        self._rebuild_publicados_protegido(f"reset {edition}")
-        return self._rebuild_queue()
+        indice = self._rebuild_publicados_protegido(f"reset {edition}")
+        try:
+            queue = self._rebuild_queue()
+        except Exception as e:  # noqa: BLE001 — o reset já aconteceu no disco
+            print(f"[queue] rebuild falhou (reset {edition}): {e}")
+            queue = None
+        return queue, indice is not None
 
     # -- espelho Firebase (produção; devolve erro estruturado se firebase_admin ausente) --
     def sync_to_firebase(self):

@@ -161,20 +161,29 @@ if [ "$todas" -eq 1 ]; then
   done < <(grep -o '"name": *"nl/[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\.html"' "$LISTAGEM" \
             | sed -E 's#.*"nl/([0-9]{4}-[0-9]{2}-[0-9]{2})\.html"#\1#' \
             | sort -u)
+  achadas_no_bucket=${#edicoes[@]}
   if [ -n "$desde" ]; then
     filtradas=()
-    # "${edicoes[@]}" sozinho já é seguro aqui porque $edicoes vem do grep+sort da listagem
-    # (nunca fica com zero elementos sem cair no exit 1 abaixo antes de chegar aqui na
-    # primeira passada) — mas filtradas pode MESMO zerar quando --desde corta tudo, e no
-    # bash 3.2 (o /bin/bash desta estação) "${arr[@]}" de um array declarado com zero
-    # elementos é "unbound variable" sob set -u, não uma lista vazia. O idioma
-    # ${arr[@]+"${arr[@]}"} testa se o array está setado antes de expandir e evita o erro;
-    # sem ele, "--desde" no futuro (nenhuma edição sobra) morria aqui em vez de cair na
-    # mensagem "nenhuma edição encontrada" três linhas abaixo.
+    for ed in ${edicoes[@]+"${edicoes[@]}"}; do
+      [[ "$ed" < "$desde" ]] && continue
+      filtradas+=("$ed")
+    done
+    # filtradas pode MESMO zerar quando --desde corta tudo, e no bash 3.2 (o /bin/bash desta
+    # estação) "${arr[@]}" de um array declarado com zero elementos é "unbound variable" sob
+    # set -u, não uma lista vazia. O idioma ${arr[@]+"${arr[@]}"} testa se o array está
+    # setado antes de expandir. O laço acima já foi apagado uma vez ao acrescentar essa
+    # guarda, e o resultado foi --desde zerar as 35 edições em silêncio: a mensagem culpava
+    # o bucket, e a rodada incremental do cabeçalho nunca auditava nada.
     edicoes=(${filtradas[@]+"${filtradas[@]}"})
   fi
   if [ ${#edicoes[@]} -eq 0 ]; then
-    echo "nenhuma edição encontrada no bucket ${BUCKET} (prefix nl/, --desde ${desde:-<nenhum>})" >&2
+    # Distinguir as duas causas não é capricho: dizer "bucket vazio" quando o bucket tem 35
+    # edições manda o operador depurar credencial e prefixo, e o problema era a data.
+    if [ "$achadas_no_bucket" -gt 0 ]; then
+      echo "--desde ${desde} cortou todas as ${achadas_no_bucket} edição(ões) do bucket ${BUCKET}" >&2
+    else
+      echo "nenhuma edição encontrada no bucket ${BUCKET} (prefix nl/)" >&2
+    fi
     exit 1
   fi
 else
@@ -190,10 +199,21 @@ falhas_lista=()
 processadas=0
 : > "$ACUM"
 
-# Mesmo idioma da normalização de --desde acima: argumento em branco (ex.: "" sozinho) some
-# no filtro `[ -z "$ed" ] && continue` da montagem de $edicoes e deixa o array com zero
-# elementos, e no bash 3.2 "${edicoes[@]}" de um array assim é "unbound variable" sob
-# set -u — o script morria aqui em vez de já ter caído no bloco de uso (linha 82).
+# Zero edição para auditar é ERRO, nunca sucesso. O caminho existe: argumento composto só
+# de espaço ou de quebra de linha (`"$(printf '\n')"`) some no filtro `[ -z "$ed" ]` acima e
+# deixa o array vazio. Sem esta guarda o script saía 0 anunciando "0 edições processadas, 0
+# repetições", que é atestado de saúde falso e é literalmente o que o cabeçalho deste
+# arquivo existe para não fazer: silêncio por instrumento quebrado é indistinguível de trava
+# funcionando. A guarda de array vazio que veio antes trocou um crash barulhento por esse
+# silêncio, o que é a pior metade da troca.
+if [ ${#edicoes[@]} -eq 0 ]; then
+  echo "nenhuma edição para auditar (argumento em branco?). Nada foi verificado." >&2
+  exit 2
+fi
+
+# No bash 3.2 (o /bin/bash desta estação) "${arr[@]}" de um array com zero elementos é
+# "unbound variable" sob set -u. O idioma abaixo testa se o array está setado antes de
+# expandir; com a guarda acima ele nunca está vazio aqui, e fica como cinto de segurança.
 for ed in ${edicoes[@]+"${edicoes[@]}"}; do
   url="https://storage.googleapis.com/${BUCKET}/nl/${ed}.html"
   # Falha de download NÃO pode virar "0 repetições": ver cabeçalho.
