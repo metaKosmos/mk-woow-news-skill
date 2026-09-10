@@ -8,8 +8,9 @@ Daily Drops: `edition` = data de publicação `YYYY-MM-DD` (uma edição por dia
 {
   "updated_at": "2026-06-17T08:00:00-03:00",
   "editions": [
-    {"edition": "2026-06-17", "type": "news_auto", "date": "2026-06-17", "stage": "sent",
-     "subject": "Assunto", "image_ready": true, "open_rate": 0.31, "html_versions": 2}
+    {"edition": "2026-06-17", "type": "news_auto", "campanha": "daily-drops",
+     "date": "2026-06-17", "stage": "sent", "subject": "Assunto", "image_ready": true,
+     "open_rate": 0.31, "html_versions": 2, "barrados": 3}
   ]
 }
 ```
@@ -17,11 +18,19 @@ Daily Drops: `edition` = data de publicação `YYYY-MM-DD` (uma edição por dia
 `stage` ∈ `empty | researched | generated | ready | sent` (progresso da gaveta).
 `type` ∈ `news_auto | manual_html` (tipo da campanha; campo, não estágio). Edições legadas
 sem `type` são lidas como `news_auto` (retrocompat).
+`campanha` = de qual newsletter recorrente a edição é, e portanto de qual regra de curadoria
+ela herda. Edição sem `campanha` é lida como `daily-drops`, **do mesmo jeito** que `type`
+ausente é lido como `news_auto`.
+`barrados` = quantos itens a trava de repetição tirou da pauta na última pesquisa daquela
+edição (cópia de `health.barrados`; `null` em edição pesquisada antes da trava existir).
+Fica na queue porque é ela que o `woow status` e o painel leem — no estado da edição ninguém
+olha por conta.
 
 ## editions/<ed>.state.json (no GCS)
 ```json
 {
-  "edition": "2026-06-17", "type": "news_auto", "date": "2026-06-17", "stage": "sent",
+  "edition": "2026-06-17", "type": "news_auto", "campanha": "daily-drops",
+  "date": "2026-06-17", "stage": "sent",
   "subject": "Assunto", "image_ready": true, "campaign_key": "...", "preview_url": "...",
   "preheader": "", "list_key": "3z...",
   "timestamps": {"researched_at": "...", "generated_at": "...", "ready_at": "...", "sent_at": "..."},
@@ -37,6 +46,46 @@ quando o relatório do ZMA as fornece; o painel usa `clicked` para o total de cl
 
 Campos por campanha (usados em `manual_html`): `type`, `preheader` (preview text) e `list_key`
 (lista ZMA por campanha, override do alvo global no `send`).
+
+`campanha` é o slug da newsletter recorrente à qual a edição pertence (`campanhas.json`).
+**Ausente = `daily-drops`**, mesma retrocompat de `type`. É gravado por
+`create-campaign --campanha <slug>`; não existe comando para mudar a curadoria de uma edição
+isolada, porque a regra é da campanha e a edição só herda. `campanha` e `type` são
+ortogonais: duas campanhas podem ser as duas `news_auto` e ter janelas diferentes.
+
+**`health`** — o resumo da última pesquisa daquela edição, escrito pelo `research.py`:
+```json
+  "health": {
+    "candidates": 41, "feeds_total": 7, "feed_errors": [{"source": "...", "error": "403"}],
+    "researched_at": "2026-06-17T08:00:00-03:00",
+    "barrados": 3,
+    "barrados_itens": [
+      {"titulo": "Título no feed", "fonte": "Glossy", "link": "https://...",
+       "publicado_em": "2026-06-15", "publicado_date": "2026-06-15"}
+    ],
+    "parecidos": 2,
+    "pool_alerta": true,
+    "alerta": "pauta curta depois da trava"
+  }
+```
+- `barrados` = quantos candidatos a trava tirou da pauta por já terem sido publicados na
+  janela daquela campanha. É a contagem que a queue copia.
+- `barrados_itens` = os itens em questão, com o dia em que cada um saiu, **cortados em 20**
+  (o state é lido inteiro a cada consulta de edição). Existe para o operador conseguir
+  responder "por que essa matéria não apareceu" **sem** abrir o log do Cloud Run, e por isso
+  viaja na resposta do `run --stage research`, fora do `summary`: o summary é cortado em
+  4000 caracteres, e o dia de muitos barrados é justamente o dia em que o corte comeria o
+  que interessa. As chaves são `titulo` e `fonte`, e só elas. Os dois nomes chegaram a circular, e o
+  consumidor no broker lia `source`: a coluna de barradas por fonte do `sources list`
+  voltava 0 para sempre, sem erro nenhum, e uma fonte que só produz repetição ficava
+  indistinguível de uma que nunca repete. Quem escrever outro consumidor lê `fonte`.
+- `parecidos` = quantos títulos ficaram parecidos com algo já publicado. **Só relatório**
+  enquanto `titulo_modo` for `relatorio`: contar não é barrar.
+- `pool_alerta` = a pauta ficou curta depois da trava (é a condição); `alerta` = o texto que
+  o CLI mostra no Checkpoint 1. Um é o sinal, o outro é a frase, e ficam separados para o
+  painel poder alertar sem depender de parsear texto.
+- `last_error` continua sendo escrito por um estágio que falhou, e não apaga o resto do
+  `health` (merge raso).
 
 **Histórico de HTML** (`html_history`): cada publicação de HTML (news_auto, manual_html ou
 `set-html`) grava um snapshot **imutável** em `nl/hist/<ed>/<stamp>.html` no bucket público e
@@ -131,6 +180,99 @@ lista**. Guardar o resultado dentro do `sources.json` fazia o primeiro teste con
 
 `found` = itens no feed, `kept` = itens dentro da janela de recência, `error` = o erro real
 (403/404/timeout), medido de dentro do broker.
+
+## campanhas.json (no GCS) — a regra de curadoria, por campanha
+```json
+{
+  "default": "daily-drops",
+  "campanhas": {
+    "daily-drops": {
+      "nome": "WooW! Daily Drops",
+      "janela_dias": 14,
+      "titulo_modo": "relatorio",
+      "bloqueados": [{"link": "https://...", "por": "patrick@metakosmos.com.br",
+                      "em": "2026-09-08T10:00:00-03:00", "motivo": "matéria paga"}],
+      "liberados": [{"link": "https://...", "por": "patrick@metakosmos.com.br",
+                     "em": "2026-09-08T10:00:00-03:00"}],
+      "set_by": "patrick@metakosmos.com.br", "set_at": "2026-09-08T10:00:00-03:00"
+    }
+  }
+}
+```
+Editado por `curadoria criar|set|bloquear|liberar|remover`, sem redeploy — mesmo padrão do
+`sources.json`. É a metade **editada** da curadoria; a metade **derivada** é o
+`publicados/<campanha>.json` abaixo. Ficam separadas pelo mesmo motivo que `sources.json` e
+`sources-tests.json` ficam: gravar derivado junto de editado congela a fonte na primeira
+escrita.
+
+- `janela_dias`: quantos dias uma matéria já enviada fica fora da pauta. **`0` desliga a
+  trava** daquela campanha (aceita repetição). A campanha nasce com o
+  `research.published_memory_days` do `newsletter.yaml` (14 dias quando a chave não está
+  lá). Faixa aceita: 0 a 3650.
+- `titulo_modo` ∈ `relatorio | on | off`: a camada de similaridade de **título**.
+  `relatorio` (default) mede e reporta sem barrar; `on` barra; `off` nem mede. Nasce em
+  `relatorio` porque, nas 35 edições publicadas, todo par de headline parecida tinha a mesma
+  URL por trás — ou seja, o ganho sobre a trava de URL foi zero, e promover filtro sem caso
+  medido é como a pauta encolhe sem ninguém saber por quê.
+- `bloqueados`: veto manual e permanente. **Vale mesmo com `janela_dias: 0`** — é decisão do
+  operador, não memória. `liberados`: o inverso, tira o link da memória.
+- O mesmo link nunca fica nas duas listas: entrar numa remove da outra, senão o resultado
+  dependeria da ordem de aplicação.
+- A campanha padrão nasce sozinha na primeira leitura (não existe estado "sem regra" para o
+  resto do código adivinhar) e **não pode ser removida**.
+
+## publicados/<campanha>.json (no GCS) — a memória do que já saiu
+```json
+{
+  "campanha": "daily-drops",
+  "updated_at": "2026-09-08T10:00:00-03:00",
+  "edicoes": 35,
+  "links": [
+    {"link": "https://...", "edition": "2026-09-08", "date": "2026-09-08",
+     "campo": "manchete", "source": "Glossy", "titulo": "Título no feed"}
+  ]
+}
+```
+Um blob **por campanha**, 100% **derivado** dos states: só edição em `sent` conta (o que não
+foi enviado não gastou pauta), e a fonte de cada link é o `provenance` da edição. Como a
+queue, nada aqui é fonte — `curadoria rebuild` (admin) refaz tudo do zero sem perda.
+
+- O link é guardado **cru, não normalizado**: a régua de comparação mora no `research.py` e
+  ainda vai mudar. Guardar já normalizado faria cada ajuste da régua invalidar a memória
+  inteira, que é justamente o que não se reconstrói de fora.
+- Cortado nas **120 edições** mais recentes, por campanha.
+- Edição enviada antes da provenance existir não contribui link nenhum, e isso não derruba o
+  índice das outras.
+- O recorte pela janela é feito na leitura, não aqui: a edição sendo pesquisada compara com
+  `corte <= date < data_da_edicao`. O `<` estrito é o que impede rerodar o research de uma
+  edição já enviada barrar os links dela mesma.
+
+### config/publicados.json (no workdir da edição) — o que o research recebe
+O broker recorta a memória e injeta este arquivo no workdir, do mesmo jeito que já injeta o
+`config/feeds.yaml`. O `research.py` **não fala com o GCS e não sabe o que é campanha**.
+```json
+{
+  "campanha": "daily-drops", "janela_dias": 14, "titulo_modo": "relatorio",
+  "aviso_ready": 0,
+  "links": [{"link": "https://...", "edition": "2026-09-08", "date": "2026-09-08",
+             "campo": "manchete", "source": "Glossy", "titulo": "Título no feed"}],
+  "liberados": ["https://glossy.co/materia-x"]
+}
+```
+- `links` já vem recortado pela janela, e já inclui os **bloqueios manuais** da campanha,
+  como entradas com `edition: "bloqueado"`. Bloqueio é veto explícito, não memória: ele vale
+  mesmo com `janela_dias: 0`.
+- `liberados` vem **cru e sem filtrar**, e quem aplica é o research. Não é distração: quem
+  guarda pode guardar link cru, mas quem COMPARA tem que normalizar. Filtrar por igualdade
+  de string do lado do broker fazia o operador que digita a URL como vê no site não liberar
+  nada, porque a memória guarda o link publicado, com `www.`, barra final e `utm_source`, e
+  nada avisava que o comando não teve efeito.
+- `titulo_modo` decide a camada de similaridade de título: `off` não calcula, `relatorio`
+  calcula e reporta sem barrar, `on` barra. Modo desconhecido cai em `relatorio`: barrar por
+  heurística tem que ser escolha explícita.
+- `aviso_ready` conta edições da mesma campanha que estão em `ready` dentro da janela, ou
+  seja, geradas e ainda não enviadas. Elas **não** estão na memória (só `sent` conta), e o
+  número existe para o relatório dizer isso em vez de o operador descobrir sozinho.
 
 ## release.json (no GCS) — nota da versão publicada
 ```json

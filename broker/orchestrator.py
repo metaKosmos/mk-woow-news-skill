@@ -11,12 +11,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import yaml
 
-from state_manager import StateManager, GcsStore, BRT
+from state_manager import StateManager, GcsStore, BRT, CAMPANHA_PADRAO, campanha_da_edicao
 from cost_tracker import compute_cost
 import zma_metrics
 import secrets_store
@@ -51,11 +51,20 @@ def _sm():
     return StateManager(GcsStore())
 
 
-def _resolve_edition_date(edition):
+def _resolve_edition_date(edition, carimbo=None):
     """Data da edição (YYYY-MM-DD). Daily Drops: a chave já é a data; se não casar
-    (legado wNN), cai para hoje em BRT. Conserta o bug de `date` em branco na gaveta."""
+    (legado wNN), usa o carimbo do pipeline e, sem ele, hoje em BRT.
+
+    A CHAVE tem precedência sobre o carimbo, e isso não é preferência de estilo. O
+    `edition_date` vem do `generate_content`, calculado no relógio do container, que roda em
+    UTC: edição gerada depois das 21h BRT carimba o dia seguinte. A trava de repetição
+    recorta a memória por esta data, então um dia a mais aqui faz a janela pular a véspera e
+    devolve inteira a repetição de 1 dia, que é a esmagadora maioria dos casos medidos.
+    Preferir a chave torna a classe toda de erro de fuso inalcançável para edição diária."""
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", edition or ""):
         return edition
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", (carimbo or "").strip()):
+        return carimbo.strip()
     return datetime.now(BRT).strftime("%Y-%m-%d")
 
 
@@ -90,6 +99,9 @@ def _popula_workdir(d, edition):
     # Fontes: o estado mutável (sources.json no GCS) manda sobre o feeds.yaml do container.
     # Sem nada gravado, _effective_feeds devolve o próprio seed — nada muda.
     _write_feeds_yaml(d / "config" / "feeds.yaml", _effective_feeds())
+    # Memória do que já saiu, recortada pela campanha e pela janela DESTA edição. Mesmo
+    # padrão do feeds.yaml acima: o research lê arquivo, nunca o GCS, e continua puro.
+    _write_publicados_json(d / "config" / "publicados.json", _memoria_publicados(edition))
     for f in (BROKER_DIR / "templates").glob("*.j2"):
         (d / "templates" / f.name).write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
     env = secrets_store.get_zma_gemini_env()
@@ -280,7 +292,14 @@ def run_stage(edition, stage, payload):
                 patch["health"] = health  # pesquisa OK -> health nova, sem last_error
             sm.upsert_edition(edition, patch)
             summary = (wd / "content" / f"{edition}.research.md").read_text(encoding="utf-8")[:4000]
-            return {"stage": "researched", "summary": summary, "log": out.strip()}
+            h = health or {}
+            # Fora do summary de propósito: ele é cortado em 4000 caracteres, e o dia com
+            # muitos barrados é justamente o dia em que o corte comeria o que interessa.
+            return {"stage": "researched", "summary": summary, "log": out.strip(),
+                    "campanha": campanha_da_edicao(sm.get_state(edition)),
+                    "barrados": h.get("barrados"),
+                    "barrados_itens": h.get("barrados_itens") or [],
+                    "parecidos": h.get("parecidos"), "alerta": h.get("alerta")}
 
         if stage == "generate":
             etype = sm.get_state(edition).get("type", "news_auto")
@@ -314,7 +333,8 @@ def run_stage(edition, stage, payload):
                                         "preview_url": html_url,
                                         "provenance": prov,
                                         "link_check": gerado.get("link_check"),
-                                        "date": meta.get("edition_date") or _resolve_edition_date(edition)})
+                                        "date": _resolve_edition_date(edition,
+                                                                     meta.get("edition_date"))})
             _clear_stage_error(sm, edition)
             return {"stage": "ready", "preview_url": html_url, "image_url": img_url,
                     "subject": meta.get("subject", ""), "cost_brl": round(cost["total_brl"], 4),
@@ -378,8 +398,30 @@ def create_campaign(payload):
         raise EntradaInvalida(
             f"edição {edition} já existe como '{cur_type}' em stage '{cur_stage}'; "
             f"resete antes de recriar como '{etype}' (admin: reset).")
-    sm.upsert_edition(edition, {"type": etype})  # sem stage:empty (no-op pela monotonia)
-    return {"edition": edition, "type": etype, "stage": cur_stage}
+    # `campanha` (qual newsletter recorrente) e `type` (qual pipeline roda) são ortogonais:
+    # o Daily Drops e uma campanha nova podem ser os dois `news_auto` e ter regra de
+    # curadoria diferente. Omitida, a edição herda a campanha padrão.
+    patch = {"type": etype}
+    campanha = payload.get("campanha")
+    if campanha:
+        slug = _valida_slug(campanha)
+        if slug not in get_curadoria(sm)["campanhas"]:
+            raise EntradaInvalida(
+                f"campanha não encontrada: {slug!r}. Crie antes: curadoria criar --campanha {slug}")
+        # A chave da edição do Daily Drops é a DATA, então `create-campaign --edition
+        # 2026-09-15 --campanha outra` não cria uma segunda edição: reescreve a campanha da
+        # edição daquele dia, que já é a do Daily Drops. Sem esta guarda o sequestro é
+        # silencioso, e a pauta do dia passa a ser barrada pela memória da campanha errada.
+        # Rodar duas campanhas no mesmo dia exige id próprio de edição, que não existe aqui.
+        if cur_stage != "empty" and campanha_da_edicao(st) != slug:
+            raise EntradaInvalida(
+                f"edição {edition} já é da campanha '{campanha_da_edicao(st)}' em stage "
+                f"'{cur_stage}'; trocar para '{slug}' reescreveria a edição existente. "
+                f"Use outra chave de edição, ou resete antes (admin: reset).")
+        patch["campanha"] = slug
+    sm.upsert_edition(edition, patch)  # sem stage:empty (no-op pela monotonia)
+    return {"edition": edition, "type": etype, "stage": cur_stage,
+            "campanha": campanha_da_edicao(sm.get_state(edition))}
 
 
 # --------------------------------------------------------------- listas (ZMA)
@@ -619,8 +661,17 @@ def do_sync():
 
 
 def reset_edition(edition):
-    _sm().reset_edition(edition)
-    return {"reset": edition}
+    _queue, indice_ok = _sm().reset_edition(edition)
+    out = {"reset": edition}
+    if not indice_ok:
+        # O reset aconteceu, o índice não acompanhou. Sem dizer isso, o operador recebe 200 e
+        # a memória segue barrando a pauta das edições SEGUINTES com links de uma edição que,
+        # segundo o estado, não existe mais.
+        out["aviso"] = ("a edição foi resetada, mas o índice de publicados não foi "
+                        "reconstruído (veja o log). Rode `curadoria rebuild` para "
+                        "sincronizar, senão a memória segue barrando pauta com os links "
+                        "dela.")
+    return out
 
 
 # --------------------------------------------------------------- fontes (feeds RSS)
@@ -658,6 +709,34 @@ def _seed_feeds():
              "enabled": bool(f.get("enabled", True)), "added_by": "", "added_at": "",
              "note": f.get("note", "") or "", "last_test": None}
             for f in (raw.get("feeds") or [])]
+
+
+def get_sources_report(payload=None, sm=None):
+    """O que o `sources list` mostra: as fontes mais o quanto cada uma entregou de verdade.
+    Fica separado de `get_sources` porque aquele roda em TODO workdir (via `_effective_feeds`)
+    e não pode pagar a leitura do índice de publicados a cada estágio do pipeline."""
+    payload = payload or {}
+    sm = sm or _sm()
+    base = get_sources(sm)
+    try:
+        contrib = contribuicao_por_fonte(sm, payload.get("campanha"))
+    except EntradaInvalida:
+        # Deixa passar: campanha inexistente é erro do operador e tem que virar 400. Engolir
+        # aqui devolvia 200 com contribuição zerada, e a tela então acusava TODA fonte ativa
+        # de "nunca publicou" e recomendava desativar. Um typo de uma letra virava conselho
+        # acionável para desligar fonte que funciona, e desligar fonte encolhe a pauta, que é
+        # o piso de 3 blocos do generate. Pior que o silêncio que a guarda queria evitar.
+        raise
+    except Exception as exc:  # noqa: BLE001 — enfeite não pode derrubar a lista de fontes
+        print(f"[sources] não calculei a contribuição por fonte: {exc}")
+        return base
+    por_fonte = contrib["por_fonte"]
+    feeds = [{**f, **(por_fonte.get(f.get("source")) or
+                      {"publicadas": 0, "materias": 0, "barradas": 0})}
+             for f in base["feeds"]]
+    return {**base, "feeds": feeds, "campanha": contrib["campanha"],
+            "edicao_referencia": contrib["edicao_referencia"],
+            "edicoes_na_memoria": contrib.get("edicoes_na_memoria")}
 
 
 def get_sources(sm=None):
@@ -867,6 +946,378 @@ def test_sources(payload=None):
         {"por_fonte": por_fonte, "tested_by": payload.get("_email", ""), "tested_at": at},
         ensure_ascii=False, indent=2))
     return {"report": report, "persisted": True, "at": at}
+
+
+# ------------------------------------------------------- curadoria (regra por campanha)
+# A regra do que NÃO pode voltar à pauta é da campanha, não da edição: a edição herda.
+# `campanhas.json` é EDITADO pelo operador; `publicados/<campanha>.json` é DERIVADO dos
+# states enviados. Ficam separados pelo mesmo motivo que sources.json e sources-tests.json
+# ficam: gravar derivado dentro do arquivo de edição congela a fonte na primeira escrita.
+CAMPANHAS_KEY = "campanhas.json"
+_CURADORIA_OPS = ("criar", "janela", "titulo", "bloquear", "liberar", "remover")
+TITULO_MODOS = ("relatorio", "on", "off")
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+
+
+def _research_cfg():
+    """Seção research do newsletter.yaml. `.get` com default em tudo: o `_probe_feeds`
+    copia este YAML e um deploy parcial não pode virar KeyError no meio da pesquisa."""
+    raw = yaml.safe_load((CONFIG / "newsletter.yaml").read_text(encoding="utf-8")) or {}
+    return raw.get("research") or {}
+
+
+def _janela_padrao():
+    return int(_research_cfg().get("published_memory_days", 14))
+
+
+def _campanha_nova(nome="", email="", janela=None):
+    return {"nome": nome or "", "janela_dias": _janela_padrao() if janela is None else janela,
+            "titulo_modo": "relatorio", "bloqueados": [], "liberados": [],
+            "set_by": email, "set_at": datetime.now(BRT).isoformat(timespec="seconds")}
+
+
+def _valida_slug(slug):
+    if slug is not None and not isinstance(slug, str):
+        # payload de operador vem de JSON: número ou lista aqui viraria AttributeError cru,
+        # e o handler devolveria 502 "broker quebrado" para um erro de digitação.
+        raise EntradaInvalida(f"slug de campanha inválido: {slug!r} (esperava texto)")
+    s = (slug or "").strip().lower()
+    if not _SLUG_RE.match(s):
+        raise EntradaInvalida(
+            f"slug de campanha inválido: {slug!r} (use minúsculas, números e hífen, até 40)")
+    return s
+
+
+def get_curadoria(sm=None):
+    """Regra de curadoria por campanha. A campanha padrão nasce sozinha na primeira leitura,
+    para não existir estado 'sem regra' que o resto do código tenha de adivinhar."""
+    sm = sm or _sm()
+    doc = _read_state_json(sm, CAMPANHAS_KEY, {})
+    if not isinstance(doc, dict):
+        doc = {}
+    campanhas = doc.get("campanhas")
+    if not isinstance(campanhas, dict):
+        campanhas = {}
+    default = doc.get("default") or CAMPANHA_PADRAO
+    if default not in campanhas:
+        campanhas[default] = _campanha_nova(nome="WooW! Daily Drops" if default == CAMPANHA_PADRAO else default)
+    return {"default": default, "campanhas": campanhas}
+
+
+def _regra(sm, campanha=None, estrito=False):
+    """Regra em vigor para uma campanha.
+
+    No caminho da PESQUISA, campanha desconhecida cai na regra da padrão em vez de levantar:
+    não conhecer a campanha não pode virar edição sem newsletter. Nos RELATÓRIOS, `estrito`
+    recusa: lá o silêncio é pior, porque `?campanha=daily-drop` (typo de uma letra) devolveria
+    200 com zero links e o operador não distinguiria erro de digitação de memória vazia."""
+    doc = get_curadoria(sm)
+    # `if campanha` (e não `is not None`) mandava campo falsy para a campanha padrão em
+    # silêncio, o mesmo buraco do set_curadoria.
+    slug = _valida_slug(campanha) if campanha is not None else doc["default"]
+    regra = doc["campanhas"].get(slug)
+    if regra is None:
+        if estrito:
+            raise EntradaInvalida(
+                f"campanha não encontrada: {slug!r}. Rode: curadoria list")
+        regra = doc["campanhas"][doc["default"]]
+    return slug, regra, doc
+
+
+def set_curadoria(payload):
+    """Edita campanhas.json. Ação de operador, sem redeploy — mesmo padrão de set_sources.
+    op: criar | janela | titulo | bloquear | liberar | remover."""
+    payload = payload or {}
+    op = (payload.get("op") or "").strip().lower()
+    if op not in _CURADORIA_OPS:
+        raise EntradaInvalida(f"op inválida: {op!r}. Use uma de: {', '.join(_CURADORIA_OPS)}")
+    email = payload.get("_email", "")
+    now = datetime.now(BRT).isoformat(timespec="seconds")
+    sm = _sm()
+    doc = get_curadoria(sm)
+    campanhas = {k: dict(v) for k, v in doc["campanhas"].items()}
+    # `or` aqui era um buraco: campo PRESENTE e falsy (0, [], {}, False, "") passava por cima
+    # do guard de tipo e caía calado na campanha padrão. `{"op":"bloquear","campanha":0}`
+    # respondia 200 dizendo "daily-drops" e gravava o veto na newsletter de produção, com o
+    # operador convicto de ter vetado na campanha de teste. Ausente é herança; presente e
+    # errado é erro de digitação, e erro de digitação não escolhe alvo por omissão.
+    slug = _valida_slug(payload["campanha"]) if payload.get("campanha") is not None \
+        else doc["default"]
+
+    if op == "criar":
+        if slug in campanhas:
+            raise EntradaInvalida(f"campanha {slug!r} já existe. Rode: curadoria list")
+        base = payload.get("copiar_de")
+        if base:
+            base = _valida_slug(base)
+            if base not in campanhas:
+                raise EntradaInvalida(f"campanha de origem não encontrada: {base!r}")
+            nova = {**campanhas[base], "bloqueados": [], "liberados": []}
+            nova["nome"] = payload.get("nome") or slug
+        else:
+            nova = _campanha_nova(payload.get("nome") or slug, email)
+        nova["set_by"], nova["set_at"] = email, now
+        campanhas[slug] = nova
+    else:
+        if slug not in campanhas:
+            raise EntradaInvalida(f"campanha não encontrada: {slug!r}. Rode: curadoria list")
+        alvo = campanhas[slug]
+        if op == "janela":
+            bruto = payload.get("janela_dias")
+            # Duas guardas, redundantes de propósito, e cada uma sozinha resolve o `inf`
+            # (medido): a de float dá a mensagem precisa e é a única que pega o fracionário;
+            # o `OverflowError` na tupla é o cinto, e está lá porque ele NÃO é subclasse de
+            # ValueError e `1e999` é número JSON válido que o parser devolve como inf. Sem
+            # nenhuma das duas, erro de digitação virava 502 "broker quebrado". E float
+            # fracionário era truncado calado (7.9 gravava 7), o que é pior que recusar: a
+            # regra em vigor passava a divergir do que o operador digitou, sem aviso.
+            if isinstance(bruto, float) and not bruto.is_integer():
+                raise EntradaInvalida(
+                    f"'janela_dias' tem que ser inteiro de dias, não {bruto!r}")
+            try:
+                janela = int(bruto)
+            except (TypeError, ValueError, OverflowError):
+                raise EntradaInvalida("campo 'janela_dias' obrigatório (inteiro de dias; 0 desliga)")
+            if janela < 0 or janela > 3650:
+                raise EntradaInvalida(f"janela_dias fora de faixa: {janela} (use de 0 a 3650)")
+            alvo["janela_dias"] = janela
+        elif op == "titulo":
+            bruto = payload.get("titulo_modo")
+            if bruto is not None and not isinstance(bruto, str):
+                raise EntradaInvalida(f"'titulo_modo' inválido: {bruto!r} (esperava texto)")
+            modo = (bruto or "").strip().lower()
+            if modo not in TITULO_MODOS:
+                raise EntradaInvalida(
+                    f"titulo_modo inválido: {modo!r}. Use um de: {', '.join(TITULO_MODOS)}")
+            alvo["titulo_modo"] = modo
+        elif op in ("bloquear", "liberar"):
+            link = _validate_url(payload.get("link"))
+            lista = "bloqueados" if op == "bloquear" else "liberados"
+            outra = "liberados" if op == "bloquear" else "bloqueados"
+            atual = [e for e in (alvo.get(lista) or []) if e.get("link") != link]
+            entrada = {"link": link, "por": email, "em": now}
+            if op == "bloquear":
+                entrada["motivo"] = payload.get("motivo", "") or ""
+            alvo[lista] = atual + [entrada]
+            # sair de uma lista ao entrar na outra: guardar o mesmo link nas duas deixaria o
+            # resultado dependendo da ordem de aplicação, que é onde o operador se perde.
+            alvo[outra] = [e for e in (alvo.get(outra) or []) if e.get("link") != link]
+        elif op == "remover":
+            if slug == doc["default"]:
+                raise EntradaInvalida(
+                    f"{slug!r} é a campanha padrão e não pode ser removida; troque a padrão antes")
+            campanhas.pop(slug)
+        alvo["set_by"], alvo["set_at"] = email, now
+
+    novo = {"default": doc["default"], "campanhas": campanhas}
+    sm.store.write(CAMPANHAS_KEY, json.dumps(novo, ensure_ascii=False, indent=2))
+    # Relê antes de responder. `campanhas.json` é read-modify-write sem trava: dois
+    # operadores bloqueando links diferentes no mesmo instante perdem um dos bloqueios, e
+    # respondendo pelo dicionário LOCAL os dois recebiam 200 com o próprio veto listado.
+    # A corrida continua existindo (ver a issue de estado concorrente); o que não pode
+    # continuar existindo é confirmação escrita de um veto que não ficou gravado.
+    gravado = get_curadoria(sm)
+    aviso = None
+    if op in ("bloquear", "liberar"):
+        lista = "bloqueados" if op == "bloquear" else "liberados"
+        vigente = (gravado["campanhas"].get(slug) or {}).get(lista) or []
+        if not any(e.get("link") == payload.get("link") for e in vigente):
+            aviso = ("ATENÇÃO: a gravação não ficou. Outra escrita concorrente em "
+                     f"{slug!r} sobrescreveu esta. Rode o comando de novo e confira em "
+                     "`curadoria status`.")
+    out = {"op": op, "campanha": slug, "default": gravado["default"],
+           "campanhas": gravado["campanhas"], "set_by": email, "set_at": now}
+    if aviso:
+        out["aviso_gravacao"] = aviso
+    return out
+
+
+def get_curadoria_report(payload=None, sm=None):
+    """O que o `curadoria list` mostra: a regra de cada campanha e o tamanho da memória."""
+    sm = sm or _sm()
+    doc = get_curadoria(sm)
+    out = {}
+    for slug, regra in doc["campanhas"].items():
+        mem = sm.get_publicados(slug)
+        out[slug] = {**regra,
+                     "memoria_links": len(mem.get("links") or []),
+                     "memoria_edicoes": mem.get("edicoes", 0)}
+    return {"default": doc["default"], "campanhas": out}
+
+
+# ------------------------------------------------------- memória do que já foi publicado
+def _write_publicados_json(path, doc):
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _memoria_publicados(edition, sm=None):
+    """Memória a injetar no workdir da edição: já recortada pela campanha e pela janela.
+
+    NUNCA levanta. `_workdir` roda em TODO estágio, `send` incluído, e um índice podre não
+    pode derrubar um envio de newsletter — mesmo raciocínio do fallback de sources.json."""
+    vazio = {"campanha": CAMPANHA_PADRAO, "janela_dias": 0, "links": [], "liberados": [],
+             "titulo_modo": "relatorio", "aviso_ready": 0}
+    try:
+        sm = sm or _sm()
+        st = sm.get_state(edition)
+        slug = campanha_da_edicao(st)
+        slug, regra, _ = _regra(sm, slug)
+        janela = int(regra.get("janela_dias", _janela_padrao()))
+        ate = st.get("date") or _resolve_edition_date(edition)
+        links = []
+        if janela > 0:
+            corte = (datetime.fromisoformat(ate) - timedelta(days=janela)).strftime("%Y-%m-%d")
+            for e in (sm.get_publicados(slug).get("links") or []):
+                d = e.get("date") or e.get("edition") or ""
+                # A comparação abaixo é de STRING, então entrada cuja data não é data mente
+                # sobre a ordem. Edição legada de chave semanal grava `date: "2026-w25"`, e
+                # `"2026-w25"` fica acima de qualquer `"2026-0x-xx"`: o link ficava solto por
+                # todo o ano corrente e passava a BARRAR nos primeiros dias do ano seguinte,
+                # com a matéria muito fora da janela configurada. Barrar pauta legítima é o
+                # pior lado dos dois, porque a edição encolhe e o generate falha no piso de
+                # 3 blocos. Data que não é data simplesmente não entra na memória.
+                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
+                    continue
+                # `< ate` estrito: exclui a própria edição (rerodar research numa edição já
+                # enviada não pode barrar os links dela mesma) e as posteriores (rodar uma
+                # edição antiga hoje não pode ser barrado pelo que veio depois dela).
+                if corte <= d < ate:
+                    links.append(e)
+        bloqueados = {b.get("link") for b in (regra.get("bloqueados") or []) if b.get("link")}
+        # Bloqueio é veto explícito do operador, não memória: vale mesmo com a janela em 0.
+        links += [{"link": b, "edition": "bloqueado", "date": "", "campo": "",
+                   "source": "bloqueio manual", "titulo": ""} for b in bloqueados]
+        # `liberados` NÃO é filtrado aqui. Quem guarda pode guardar link cru; quem COMPARA
+        # tem que normalizar, e a régua (`canonical_url`) mora no research. Filtrar por
+        # igualdade de string neste ponto fazia o operador que digita a URL como vê no site
+        # não liberar nada: a memória guarda o link publicado, com `www.`, barra final e
+        # `utm_source`, e nada avisava que o comando não teve efeito.
+        liberados = [l.get("link") for l in (regra.get("liberados") or []) if l.get("link")]
+        ready = 0
+        for linha in (sm.get_queue().get("editions") or []):
+            if (linha.get("stage") == "ready" and linha.get("campanha", CAMPANHA_PADRAO) == slug
+                    and (linha.get("date") or "") < ate):
+                ready += 1
+        return {"campanha": slug, "janela_dias": janela, "links": links,
+                "liberados": liberados,
+                "titulo_modo": regra.get("titulo_modo") or "relatorio",
+                "aviso_ready": ready}
+    except Exception as exc:  # noqa: BLE001
+        print(f"[publicados] não montei a memória de {edition}: {exc}")
+        return vazio
+
+
+def _valida_dias(bruto):
+    """`dias` vem da query string, então chega sempre como texto e pode ser qualquer coisa.
+    Sem guarda, `int("abc")` e `timedelta(days=999999999)` viram 502 "broker quebrado" para
+    o que é erro de digitação do operador."""
+    if bruto in (None, ""):
+        return None
+    if isinstance(bruto, float) and not bruto.is_integer():
+        raise EntradaInvalida(f"'dias' tem que ser inteiro, não {bruto!r}")
+    try:
+        dias = int(bruto)
+    except (TypeError, ValueError, OverflowError):
+        raise EntradaInvalida(f"'dias' inválido: {bruto!r} (esperava um número de dias)")
+    # 0 é "sem recorte", que é o que o CLI já quis dizer com `--dias 0` e o que ele imprime.
+    # Recusar aqui fazia o broker discordar do próprio cliente oficial e devolver 400 para um
+    # comando que o operador podia digitar.
+    if dias == 0:
+        return None
+    if dias < 0 or dias > 3650:
+        raise EntradaInvalida(f"'dias' fora de faixa: {dias} (use de 0 a 3650)")
+    return dias
+
+
+def get_publicados_report(payload=None, sm=None):
+    """O histórico legível: o que já saiu naquela campanha, mais novo primeiro."""
+    payload = payload or {}
+    sm = sm or _sm()
+    slug, regra, doc = _regra(sm, payload.get("campanha"), estrito=True)
+    mem = sm.get_publicados(slug)
+    links = list(mem.get("links") or [])
+    dias = _valida_dias(payload.get("dias"))
+    if dias:
+        corte = (datetime.now(BRT) - timedelta(days=dias)).strftime("%Y-%m-%d")
+        links = [e for e in links if (e.get("date") or e.get("edition") or "") >= corte]
+    links.sort(key=lambda e: (e.get("date") or e.get("edition") or ""), reverse=True)
+    return {"campanha": slug, "janela_dias": regra.get("janela_dias"),
+            "titulo_modo": regra.get("titulo_modo"), "edicoes": mem.get("edicoes", 0),
+            "links": links, "bloqueados": regra.get("bloqueados") or [],
+            "liberados": regra.get("liberados") or []}
+
+
+def rebuild_publicados():
+    """Reconstrói os índices do zero a partir dos states. Admin: é operação de manutenção,
+    e o índice é 100% derivado — nada se perde, só se recalcula."""
+    sm = _sm()
+    doc = sm.rebuild_publicados()
+    return {"campanhas": {k: len(v.get("links") or []) for k, v in doc.items()}}
+
+
+def contribuicao_por_fonte(sm=None, campanha=None):
+    """Quantas matérias cada fonte publicou, e quantas foram barradas na última pesquisa.
+    É o número que falta ao `sources list` para virar decisão: hoje ele diz se o feed
+    responde, não se ele entrega.
+
+    Conta o que está NA MEMÓRIA, e a memória só enxerga edição com procedência, que passou a
+    ser gravada em 02/09/2026. Fonte de publicação esparsa pode aparecer com zero enquanto a
+    memória for curta, então "nunca publicou" aqui quer dizer "não publicou no que a memória
+    alcança" — o `curadoria list` mostra quantas edições são."""
+    sm = sm or _sm()
+    # `estrito`: isto alimenta RELATÓRIO (`sources list`), não a pesquisa. O fail-open que
+    # protege a pesquisa de ficar sem newsletter, aqui só produziria uma acusação falsa.
+    slug, _regra_, _doc = _regra(sm, campanha, estrito=True)
+    doc_pub = sm.get_publicados(slug)
+    publicadas, materias = {}, {}
+    for e in (doc_pub.get("links") or []):
+        fonte = e.get("source") or ""
+        if not fonte:
+            continue
+        publicadas[fonte] = publicadas.get(fonte, 0) + 1
+        materias.setdefault(fonte, set()).add(e.get("link"))
+    barradas = {}
+    # A referência é a edição mais recente POR DATA, não a última linha da queue. A queue
+    # ordena por CHAVE (`rows.sort(key=lambda r: r["edition"])`), e o bucket de produção tem
+    # 9 chaves que não são data (`webinar-*`, `2026-wNN`, `teste-remetente-*`), nenhuma com
+    # campo `campanha`, logo todas lidas como a padrão. Como 'w' > '2' em ASCII,
+    # `webinar-ultima-chamada` era o máximo para sempre: a coluna `barradas` ficava 0
+    # permanentemente e o `curadoria status` anunciava "sem registro de barrados" no dia em
+    # que a trava barrou. Chave que não resolve em data fica FORA em vez de cair no hoje do
+    # `_resolve_edition_date`: aquele fallback empataria toda edição de webinar em primeiro
+    # lugar, que é o mesmo defeito por outro caminho.
+    candidatas = []
+    for linha in (sm.get_queue().get("editions") or []):
+        if linha.get("campanha", CAMPANHA_PADRAO) != slug or linha.get("stage") == "empty":
+            continue
+        ed = linha.get("edition") or ""
+        chave_e_data = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", ed))
+        data = ed if chave_e_data else (linha.get("date") or "").strip()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", data):
+            continue
+        # Empate de data: ganha a edição cuja CHAVE é a data. Sem isto uma campanha de
+        # webinar carimbada no mesmo dia disputaria a vaga com a edição diária.
+        candidatas.append((data, chave_e_data, ed))
+    ultima = max(candidatas)[2] if candidatas else None
+    if ultima:
+        health = (sm.get_state(ultima).get("health") or {})
+        for item in (health.get("barrados_itens") or []):
+            # `fonte`, não `source`: é a chave que o `build_health` do research grava. Ler o
+            # nome errado aqui não dá erro nenhum — a coluna só volta 0 para sempre, e uma
+            # fonte que só produz repetição fica indistinguível de uma que nunca repete.
+            fonte = item.get("fonte") or ""
+            if fonte:
+                barradas[fonte] = barradas.get(fonte, 0) + 1
+    return {"campanha": slug, "edicao_referencia": ultima,
+            # Quantas edições a memória alcança. Sem este número o CLI não consegue separar
+            # "fonte que não entrega" de "memória curta demais para ter visto essa fonte":
+            # procedência só existe desde 02/09, então no dia 1 toda fonte de publicação
+            # esparsa aparece com zero, e a tela recomendava desativar fonte saudável.
+            "edicoes_na_memoria": doc_pub.get("edicoes"),
+            "por_fonte": {f: {"publicadas": publicadas.get(f, 0),
+                              "materias": len(materias.get(f, ())),
+                              "barradas": barradas.get(f, 0)}
+                          for f in set(publicadas) | set(barradas)}}
 
 
 # --------------------------------------------------------- versao: release e clientes

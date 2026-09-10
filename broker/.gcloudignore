@@ -1,0 +1,36 @@
+# O deploy é `gcloud functions deploy --source=.` de dentro desta pasta, e SEM este arquivo
+# o `--source=.` sobe TODO arquivo do diretório, sem filtro nenhum. Duas consequências que
+# não dão erro: a suíte e os caches viajam para dentro do container, e qualquer credencial
+# que alguém deixe aqui por um minuto vai junto para a imagem.
+#
+# ATENÇÃO: a existência deste arquivo DESLIGA os padrões que o gcloud aplicaria sozinho.
+# Tudo o que precisa ficar fora tem que estar escrito aqui, inclusive `.git`.
+
+# Controle de versão
+.git
+.gitignore
+.gcloudignore
+
+# Cache de bytecode e de teste: nada disso roda em produção, e `.pyc` restaurado por cima de
+# fonte mudada já produziu teste passando sobre código antigo neste repo.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# A suíte não é executada no Cloud Run. Fora do deploy ela é 22 dos 52 arquivos.
+tests/
+requirements-dev.txt
+
+# Credencial. Nenhum destes existe hoje; estão listados porque o modo de falha é alguém
+# deixar um aqui entre dois deploys, e aí não há aviso nenhum.
+.envmk
+*.local
+*-sa.json
+.woow-news-auth.json
+service-account*.json
+
+# Resíduo de edição em duplicata que o Finder e o iCloud criam ("main 2.py").
+* 2.*
+__probe.sh

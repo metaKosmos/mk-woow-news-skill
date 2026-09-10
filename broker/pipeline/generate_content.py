@@ -27,7 +27,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:
@@ -39,6 +39,13 @@ BASE = Path(__file__).resolve().parent
 CONFIG = BASE / "config"
 PROMPTS = CONFIG / "prompts"
 CONTENT = BASE / "content"
+
+# Redefinido aqui, sem importar de state_manager/research, porque este script roda isolado
+# (uso no topo do arquivo). O container (Dockerfile/provision.sh) não fixa TZ e roda em UTC;
+# datetime.now() sem fuso, chamado à noite em BRT, já cai no dia seguinte. É essa data que
+# vira edition_date e a trava de repetição usa para recortar a janela de memória, então o
+# erro de fuso aqui derruba a trava, não só o texto exibido.
+BRT = timezone(timedelta(hours=-3))
 
 # Acumulador de uso de tokens por etapa (lido pelo orchestrator/cost_tracker).
 # Aditivo: não altera a lógica de curadoria/redação.
@@ -93,6 +100,14 @@ def load_yaml(name):
 
 def load_prompt(name):
     return (PROMPTS / name).read_text(encoding="utf-8")
+
+
+def _agora_brt() -> datetime:
+    """Ponto único de leitura do relógio neste arquivo. Os quatro usos (edition_date do
+    prompt, edition_date gravado, checked_at e generated_at) chamam esta função em vez de
+    `datetime.now(BRT)` solto, para que um teste (test_edition_date_brt.py) baste congelar
+    aqui e cubra os quatro de uma vez, sem depender de ninguém repetir o argumento BRT."""
+    return datetime.now(BRT)
 
 
 def ptbr_date(dt: datetime) -> str:
@@ -418,7 +433,10 @@ def check_links(itens, timeout=8):
     legítimo, e o broker já tem esse caso com Business of Fashion. Um veto por HTTP
     derrubaria item honesto justamente nos dias de pool curto. Suspeita é raiz de domínio
     (link sem caminho de matéria) e 4xx que não seja 403."""
-    rel = {"checked_at": datetime.now().isoformat(timespec="seconds"),
+    # BRT (via _agora_brt): checked_at é persistido no mesmo JSON que meta["edition_date"]
+    # (ver main()). UTC aqui, ao lado de uma data em BRT, faria o horário do check parecer
+    # do dia seguinte.
+    rel = {"checked_at": _agora_brt().isoformat(timespec="seconds"),
            "itens": [], "sem_path": [], "suspeitos": []}
     for it in itens:
         campo, link = it.get("campo", ""), (it.get("link") or "")
@@ -551,7 +569,10 @@ def main():
     for i, c in enumerate(candidates):
         c["id"] = i  # id estável para o LLM referenciar sem reecoar o item inteiro
 
-    edition_date = args.date or ptbr_date(datetime.now())
+    # BRT (via _agora_brt): este texto vai direto para o prompt do Escritor
+    # ("DATA DA EDIÇÃO: ..."). Em UTC, geração às 22h30 BRT já escreveria no corpo da
+    # edição a data do dia seguinte.
+    edition_date = args.date or ptbr_date(_agora_brt())
 
     print(f"Candidatos: {len(candidates)}")
     if args.no_classify:
@@ -583,7 +604,11 @@ def main():
     meta = {
         "subject": content["titulo_edicao"],
         "edition_label": f"Edição {args.edition}",
-        "edition_date": datetime.now().strftime("%Y-%m-%d"),
+        # BRT (via _agora_brt), não UTC: é este valor que o orchestrator lê como carimbo da
+        # edição, e a trava de repetição recorta a janela de memória por ele
+        # (_resolve_edition_date). Em UTC, geração entre 21h e 23h59 BRT carimba o dia
+        # seguinte, a véspera cai fora da janela e a repetição de 1 dia volta inteira.
+        "edition_date": _agora_brt().strftime("%Y-%m-%d"),
         "list_name": deliv["list_name"],
         "from_email": deliv["from_email"],
         "from_name": deliv["from_name"],
@@ -593,8 +618,10 @@ def main():
     CONTENT.mkdir(exist_ok=True)
     json_path = CONTENT / f"{args.edition}.json"
     md_path = CONTENT / f"{args.edition}.md"
+    # generated_at fica no mesmo objeto que meta["edition_date"]: BRT (via _agora_brt) nos
+    # dois evita um registro com metade das datas num fuso e metade no outro.
     json_path.write_text(json.dumps(
-        {"edition": args.edition, "generated_at": datetime.now().isoformat(),
+        {"edition": args.edition, "generated_at": _agora_brt().isoformat(),
          "meta": meta, "content": content, "provenance": provenance,
          "link_check": {k: links[k] for k in ("checked_at", "sem_path", "suspeitos")}
          if links else None}, ensure_ascii=False, indent=2), encoding="utf-8")
