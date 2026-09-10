@@ -37,6 +37,36 @@ DEFAULT_IMAGE = "https://images.unsplash.com/photo-1556761175-5973dc0f32e7?w=120
 UNSUBSCRIBE_TAG = "$[UNSUBSCRIBE]$"
 
 
+TEMPLATE_DEFAULT = "woow-daily-drops.html.j2"
+
+
+# O resolvedor abaixo está DUPLICADO em generate_content.py e render_newsletter.py, de
+# propósito. `_run_script` copia UM arquivo para o workdir e roda com BASE = workdir: um
+# módulo compartilhado em pipeline/ simplesmente não chegaria lá. Os dois já duplicam BRT,
+# load_env e o carregamento de YAML pela mesma razão.
+def template_do_formato():
+    """Template do formato desta edição, resolvido pelos arquivos do workdir.
+
+    NUNCA levanta: sem `formato` no newsletter.yaml, sem formatos.yaml ou com entrada
+    malformada, devolve o template de hoje. O render é o último passo antes do HTML ficar
+    pronto, e falhar aqui joga fora a edição inteira que já custou as chamadas de LLM."""
+    try:
+        nome = ((yaml.safe_load((CONFIG / "newsletter.yaml").read_text(encoding="utf-8"))
+                 or {}).get("formato") or "").strip()
+        if not nome:
+            return TEMPLATE_DEFAULT
+        catalogo = (yaml.safe_load((CONFIG / "formatos.yaml").read_text(encoding="utf-8"))
+                    or {}).get("formatos") or {}
+        cfg = catalogo.get(nome)
+        if not isinstance(cfg, dict) or not cfg.get("template"):
+            print(f"[formato] {nome!r} sem template no formatos.yaml; usando o de hoje")
+            return TEMPLATE_DEFAULT
+        return cfg["template"]
+    except Exception as exc:  # noqa: BLE001
+        print(f"[formato] não resolvi o template ({exc}); usando o de hoje")
+        return TEMPLATE_DEFAULT
+
+
 def jinja_env():
     """Autoescape OFF: os campos `corpo` já vêm como HTML válido do Escritor."""
     return Environment(
@@ -112,7 +142,7 @@ def render_woow(edition: str, image_url=None, embed_image=False):
     data = json.loads(json_path.read_text(encoding="utf-8"))
     content = data.get("content", data)
 
-    template = jinja_env().get_template("woow-daily-drops.html.j2")
+    template = jinja_env().get_template(template_do_formato())
     html = template.render(
         content=content,
         imagem_manchete_url=resolve_image(edition, image_url, embed_image),

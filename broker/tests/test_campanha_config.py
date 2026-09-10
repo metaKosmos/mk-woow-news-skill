@@ -371,3 +371,77 @@ def test_perfil_ilegivel_nao_derruba_o_workdir(tmp_path, monkeypatch):
     destino.write_text(original, encoding="utf-8")
     orchestrator._write_newsletter_yaml(destino, "woow-beauty", sm)
     assert destino.read_text(encoding="utf-8") == original
+
+
+# ================================ Parte 5 no pipeline: o formato resolvido no workdir
+# Os dois scripts rodam ISOLADOS (o `_run_script` copia um arquivo só para o workdir e roda
+# com BASE = workdir), então cada um resolve o formato lendo os YAMLs que o orchestrator
+# injeta. Estes testes batem no resolvedor de cada um, e o eixo que importa é o mesmo dos
+# outros fallbacks do repo: buraco na config não pode jogar fora a edição.
+import generate_content  # noqa: E402
+import render_newsletter  # noqa: E402
+
+
+def _workdir_config(tmp_path, monkeypatch, newsletter=None, formatos=None):
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    if newsletter is not None:
+        (cfg / "newsletter.yaml").write_text(yaml.safe_dump(newsletter), encoding="utf-8")
+    if formatos is not None:
+        (cfg / "formatos.yaml").write_text(yaml.safe_dump(formatos), encoding="utf-8")
+    monkeypatch.setattr(generate_content, "CONFIG", cfg)
+    monkeypatch.setattr(render_newsletter, "CONFIG", cfg)
+    return cfg
+
+
+_CATALOGO = {"formatos": {"daily-drops": {"prompt_write": "write.md",
+                                          "template": "woow-daily-drops.html.j2",
+                                          "campos_obrigatorios": ["cabecalho", "titulo_edicao",
+                                                                  "sumario", "manchete"]},
+                          "so-manchete": {"prompt_write": "outro.md",
+                                          "template": "outro.html.j2",
+                                          "campos_obrigatorios": ["manchete"]}}}
+
+
+def test_sem_formato_escolhido_roda_com_o_de_hoje(tmp_path, monkeypatch):
+    _workdir_config(tmp_path, monkeypatch, newsletter={"research": {}}, formatos=_CATALOGO)
+    assert generate_content.formato_cfg() == generate_content.FORMATO_DEFAULT
+    assert render_newsletter.template_do_formato() == render_newsletter.TEMPLATE_DEFAULT
+
+
+def test_formato_escolhido_troca_prompt_template_e_campos(tmp_path, monkeypatch):
+    """O vizinho do teste acima: quando o formato existe, ele MANDA. Sem este, um resolvedor
+    que devolvesse o default para tudo passaria em todos os testes de fallback."""
+    _workdir_config(tmp_path, monkeypatch, newsletter={"formato": "so-manchete"},
+                    formatos=_CATALOGO)
+    fmt = generate_content.formato_cfg()
+    assert (fmt["prompt_write"], fmt["template"]) == ("outro.md", "outro.html.j2")
+    assert fmt["campos_obrigatorios"] == ["manchete"]
+    assert render_newsletter.template_do_formato() == "outro.html.j2"
+
+
+def test_formatos_yaml_ausente_roda_com_o_de_hoje(tmp_path, monkeypatch):
+    _workdir_config(tmp_path, monkeypatch, newsletter={"formato": "so-manchete"})
+    assert generate_content.formato_cfg() == generate_content.FORMATO_DEFAULT
+    assert render_newsletter.template_do_formato() == render_newsletter.TEMPLATE_DEFAULT
+
+
+def test_formatos_yaml_ilegivel_roda_com_o_de_hoje(tmp_path, monkeypatch):
+    cfg = _workdir_config(tmp_path, monkeypatch, newsletter={"formato": "so-manchete"})
+    (cfg / "formatos.yaml").write_text("{isto: nao é: yaml", encoding="utf-8")
+    assert generate_content.formato_cfg() == generate_content.FORMATO_DEFAULT
+    assert render_newsletter.template_do_formato() == render_newsletter.TEMPLATE_DEFAULT
+
+
+def test_formato_desconhecido_no_catalogo_roda_com_o_de_hoje(tmp_path, monkeypatch):
+    _workdir_config(tmp_path, monkeypatch, newsletter={"formato": "sumiu"}, formatos=_CATALOGO)
+    assert generate_content.formato_cfg() == generate_content.FORMATO_DEFAULT
+    assert render_newsletter.template_do_formato() == render_newsletter.TEMPLATE_DEFAULT
+
+
+def test_validate_sem_campos_continua_exigindo_os_quatro_de_hoje():
+    """A assinatura de antes (`validate(content)`) é o gabarito e não pode ter mudado."""
+    with pytest.raises(SystemExit) as e:
+        generate_content.validate({"manchete": {"corpo": "x"}, "secundaria_1": {"corpo": "y"},
+                                   "sinal_1": {"corpo": "z"}})
+    assert "cabecalho" in str(e.value)
