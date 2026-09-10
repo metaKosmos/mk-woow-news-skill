@@ -14,10 +14,23 @@
 #   bash broker/scripts/auditar-repeticao.sh 2026-09-07 2026-09-08 2026-09-09
 #   bash broker/scripts/auditar-repeticao.sh --todas
 #   bash broker/scripts/auditar-repeticao.sh --todas --desde 2026-08-01
+#   bash broker/scripts/auditar-repeticao.sh --campanha woow-beauty --todas
 #
-# --todas descobre as edições listando o bucket (API JSON pública do GCS) e filtrando só
-# nl/YYYY-MM-DD.html — o bucket também guarda nl/hist/... (rascunhos internos) e
+# --todas descobre as edições listando o bucket (API JSON pública do GCS) e filtrando pelo
+# nome do arquivo — o bucket também guarda nl/hist/... (rascunhos internos) e
 # nl/YYYY-wNN.html (semanais), que não são edição diária e ficam de fora.
+#
+# UMA CAMPANHA POR RODADA (--campanha, default daily-drops). Desde a v1.8.0 a edição tem id
+# próprio: `<data>` na campanha padrão, `<slug>--<data>` nas demais. Cruzar campanhas mediria
+# a coisa errada — a memória de já-publicados é POR CAMPANHA por desenho, então a mesma
+# matéria em duas newsletters não é falha da trava, e contá-la como repetição faria o rodapé
+# acusar defeito que não existe.
+#
+# O modo de falha que o filtro evita, porém, é o OUTRO, e é o pior: antes dele a descoberta
+# casava só `nl/[0-9]{4}-...`, e id composto NÃO ENTRAVA. O script ficava cego para toda
+# campanha não-padrão, imprimia "0 par(es) de repetição" e saía 0 — silêncio por instrumento
+# quebrado, indistinguível de trava funcionando, que é justamente o que o parágrafo do
+# `set -uo pipefail` diz que este arquivo existe para não fazer.
 #
 # NORMALIZAÇÃO: usa a MESMA régua de identidade de matéria que o pipeline usa em
 # broker/pipeline/research.py (função canonical_url) — descarta esquema, "www.", porta
@@ -52,17 +65,44 @@ UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, l
 # Links fixos do template (CTA, descadastro, redes, site): não são fonte de matéria.
 IGNORAR='wa\.me|UNSUBSCRIBE|mailto:|metakosmos\.com\.br|linkedin\.com|instagram\.com|facebook\.com|youtube\.com'
 
+CAMPANHA_PADRAO="daily-drops"
+
 uso() {
-  echo "uso: $0 <edição> [edição...]        (ex: 2026-09-07 2026-09-08)" >&2
-  echo "     $0 --todas [--desde YYYY-MM-DD]" >&2
+  echo "uso: $0 [--campanha <slug>] <edição> [edição...]  (ex: 2026-09-07 2026-09-08)" >&2
+  echo "     $0 [--campanha <slug>] --todas [--desde YYYY-MM-DD]" >&2
+  echo "     --campanha default: ${CAMPANHA_PADRAO} (a campanha padrão, de id nu)" >&2
+}
+
+# A régua do id da edição, espelhando `state_manager.EDITION_RE`. Em `case`, e não em regex,
+# porque isto roda no bash 3.2 do macOS. O `##*--` é guloso de propósito: slug aceita hífen
+# duplo interno, então `woow--beauty--2026-09-15` tem de resolver em `woow--beauty` mais
+# `2026-09-15`, e não em três pedaços.
+_data_da_edicao() {
+  case "$1" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) printf '%s' "$1" ;;
+    *--[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) printf '%s' "${1##*--}" ;;
+    *) printf '' ;;
+  esac
+}
+
+_campanha_da_edicao() {
+  case "$1" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) printf '%s' "$CAMPANHA_PADRAO" ;;
+    *--[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) printf '%s' "${1%--*}" ;;
+    *) printf '' ;;
+  esac
 }
 
 todas=0
 desde=""
+campanha="$CAMPANHA_PADRAO"
 edicoes_arg=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --todas) todas=1; shift ;;
+    --campanha)
+      [ $# -ge 2 ] || { echo "--campanha precisa de um slug" >&2; exit 2; }
+      campanha="$2"; shift 2 ;;
     --desde)
       [ $# -ge 2 ] || { echo "--desde precisa de uma data (YYYY-MM-DD)" >&2; exit 2; }
       desde="$2"; shift 2 ;;
@@ -79,6 +119,10 @@ done
 
 if [ -n "$desde" ] && ! [[ "$desde" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
   echo "--desde precisa estar em YYYY-MM-DD, veio: $desde" >&2; exit 2
+fi
+if ! [[ "$campanha" =~ ^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$ ]]; then
+  echo "--campanha inválida: ${campanha} (minúsculas, números e hífen, até 40, sem hífen final)" >&2
+  exit 2
 fi
 if [ "$todas" -eq 1 ] && [ ${#edicoes_arg[@]} -gt 0 ]; then
   echo "--todas não combina com lista explícita de edições" >&2; exit 2
@@ -154,18 +198,30 @@ if [ "$todas" -eq 1 ]; then
     token="$(printf '%s' "$resp" | grep -o '"nextPageToken": *"[^"]*"' | sed -E 's/.*"([^"]*)"$/\1/')"
     [ -n "$token" ] || break
   done
+  # A descoberta é ancorada na campanha pedida: a padrão casa `nl/<data>.html`, as demais
+  # casam `nl/<slug>--<data>.html`. Sem o segundo ramo o script fica cego para elas (era o
+  # comportamento até a v1.8.0); sem o primeiro ancorado, a padrão passaria a engolir as
+  # outras, porque `nl/woow-beauty--2026-09-15.html` também termina em data.
+  if [ "$campanha" = "$CAMPANHA_PADRAO" ]; then
+    padrao_nome='"name": *"nl/[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\.html"'
+    padrao_sed='s#.*"nl/([0-9]{4}-[0-9]{2}-[0-9]{2})\.html"#\1#'
+  else
+    padrao_nome="\"name\": *\"nl/${campanha}--[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\.html\""
+    padrao_sed="s#.*\"nl/(${campanha}--[0-9]{4}-[0-9]{2}-[0-9]{2})\.html\"#\1#"
+  fi
   edicoes=()
   while IFS= read -r ed; do
     [ -z "$ed" ] && continue
     edicoes+=("$ed")
-  done < <(grep -o '"name": *"nl/[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\.html"' "$LISTAGEM" \
-            | sed -E 's#.*"nl/([0-9]{4}-[0-9]{2}-[0-9]{2})\.html"#\1#' \
-            | sort -u)
+  done < <(grep -o "$padrao_nome" "$LISTAGEM" | sed -E "$padrao_sed" | sort -u)
   achadas_no_bucket=${#edicoes[@]}
   if [ -n "$desde" ]; then
     filtradas=()
     for ed in ${edicoes[@]+"${edicoes[@]}"}; do
-      [[ "$ed" < "$desde" ]] && continue
+      # Compara a DATA do id, não o id. `[[ "woow-beauty--2026-09-15" < "2026-08-01" ]]` é
+      # falso porque 'w' > '2' em ASCII, então o --desde nunca cortava nada de campanha
+      # não-padrão e a rodada incremental auditava o bucket inteiro sem avisar.
+      [[ "$(_data_da_edicao "$ed")" < "$desde" ]] && continue
       filtradas+=("$ed")
     done
     # filtradas pode MESMO zerar quando --desde corta tudo, e no bash 3.2 (o /bin/bash desta
@@ -180,9 +236,9 @@ if [ "$todas" -eq 1 ]; then
     # Distinguir as duas causas não é capricho: dizer "bucket vazio" quando o bucket tem 35
     # edições manda o operador depurar credencial e prefixo, e o problema era a data.
     if [ "$achadas_no_bucket" -gt 0 ]; then
-      echo "--desde ${desde} cortou todas as ${achadas_no_bucket} edição(ões) do bucket ${BUCKET}" >&2
+      echo "--desde ${desde} cortou todas as ${achadas_no_bucket} edição(ões) da campanha ${campanha} no bucket ${BUCKET}" >&2
     else
-      echo "nenhuma edição encontrada no bucket ${BUCKET} (prefix nl/)" >&2
+      echo "nenhuma edição da campanha ${campanha} no bucket ${BUCKET} (prefix nl/)" >&2
     fi
     exit 1
   fi
@@ -192,6 +248,26 @@ else
     [ -z "$ed" ] && continue
     edicoes+=("$ed")
   done < <(printf '%s\n' "${edicoes_arg[@]}" | sort -u)
+  # Aqui é onde a mistura de campanhas era possível de verdade: a lista explícita aceitava
+  # qualquer token, e o `--todas` já filtrava por acidente. Recusa BARULHENTA, antes de
+  # baixar qualquer coisa — descartar em silêncio faria o rodapé dizer "N processadas" sem
+  # dizer que o operador pediu N+M, e um zero desses não vale nada.
+  intrusas=()
+  for ed in ${edicoes[@]+"${edicoes[@]}"}; do
+    dela="$(_campanha_da_edicao "$ed")"
+    # Chave legada sem data (`2026-wNN`, `webinar-*`) resolve em campanha vazia: ela não
+    # declara campanha nenhuma, sempre pertenceu à padrão, e continua aceita lá.
+    if [ -z "$dela" ]; then
+      [ "$campanha" = "$CAMPANHA_PADRAO" ] || intrusas+=("$ed")
+    elif [ "$dela" != "$campanha" ]; then
+      intrusas+=("$ed")
+    fi
+  done
+  if [ ${#intrusas[@]} -gt 0 ]; then
+    echo "edição de outra campanha na lista (--campanha ${campanha}): ${intrusas[*]}" >&2
+    echo "repetição entre campanhas é permitida por desenho: rode uma campanha por vez." >&2
+    exit 2
+  fi
 fi
 
 falhas=0
@@ -233,9 +309,14 @@ for ed in ${edicoes[@]+"${edicoes[@]}"}; do
   # segundos residuais diferentes, e a diferença de epoch deixa de ser múltiplo exato de
   # 86400 — intervalo de "1 dia" sai como 1.00001. Fixar 00:00:00 explícito e -u (UTC,
   # sem DST) elimina isso: toda edição vira meia-noite exata do seu dia.
-  epoch="$(date -j -u -f "%Y-%m-%d %H:%M:%S" "${ed} 00:00:00" "+%s" 2>/dev/null)"
+  #
+  # A data vem do ID, via `_data_da_edicao`, e não do id inteiro: `date -j -f "%Y-%m-%d ..."`
+  # com `woow-beauty--2026-09-15` devolve rc=1 e "illegal time format", `$epoch` fica vazio e
+  # a edição caía aqui como não auditada — depois de já ter pago o download e a extração de
+  # links. Trocar cegueira por falha em massa não é conserto.
+  epoch="$(date -j -u -f "%Y-%m-%d %H:%M:%S" "$(_data_da_edicao "$ed") 00:00:00" "+%s" 2>/dev/null)"
   if [ -z "$epoch" ]; then
-    echo "=== $ed === data de edição não reconhecida (esperado YYYY-MM-DD), pulando" >&2
+    echo "=== $ed === data de edição não reconhecida (esperado YYYY-MM-DD ou <slug>--YYYY-MM-DD), pulando" >&2
     falhas=$((falhas + 1)); falhas_lista+=("$ed"); continue
   fi
   canon="$(printf '%s\n' "$links_unicos" | python3 "$PYNORM" | sort -u)"
