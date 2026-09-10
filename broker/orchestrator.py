@@ -4,6 +4,7 @@ Materializa um workdir temporário (config/prompts/templates + content da ediç�
 do GCS), injeta os segredos como .envmk equivalente, roda os scripts portados via
 subprocess, e persiste state + custo + publica HTML/imagem no bucket público.
 """
+import copy
 import json
 import os
 import re
@@ -116,9 +117,15 @@ def _popula_workdir(d, edition):
         (d / "config" / f.name).write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
     for f in (CONFIG / "prompts").glob("*.md"):
         (d / "config" / "prompts" / f.name).write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
-    # Fontes: o estado mutável (sources.json no GCS) manda sobre o feeds.yaml do container.
-    # Sem nada gravado, _effective_feeds devolve o próprio seed — nada muda.
-    _write_feeds_yaml(d / "config" / "feeds.yaml", _effective_feeds())
+    # Campanha da edição, resolvida UMA vez: fontes, perfil editorial e memória saem dela.
+    campanha = _campanha_da_edicao_id(edition)
+    # Fontes: o estado mutável (sources.json no GCS) manda sobre o feeds.yaml do container, e
+    # a seleção da campanha recorta o que sobra. Sem nada gravado dos dois lados,
+    # _effective_feeds devolve o próprio seed — nada muda.
+    _write_feeds_yaml(d / "config" / "feeds.yaml", _effective_feeds(campanha=campanha))
+    # Perfil editorial da campanha, mesclado por chave contra uma lista fechada. Sem perfil,
+    # o YAML do container fica byte a byte como está.
+    _write_newsletter_yaml(d / "config" / "newsletter.yaml", campanha)
     # Memória do que já saiu, recortada pela campanha e pela janela DESTA edição. Mesmo
     # padrão do feeds.yaml acima: o research lê arquivo, nunca o GCS, e continua puro.
     _write_publicados_json(d / "config" / "publicados.json", _memoria_publicados(edition))
@@ -279,22 +286,105 @@ def _generate_manual_html(sm, wd, edition, payload):
     return {"stage": "ready", "type": "manual_html", "preview_url": html_url, "subject": subject}
 
 
-def _build_send_args(edition, st, deliv, sender, active_list):
-    """Monta os args do send_zma.py (função pura, testável). Lista: list_key por campanha
-    (estado) tem precedência sobre a lista-alvo ativa (settings > config). Remetente:
-    sender resolvido por get_active_sender (settings > config). manual_html ganha um
-    --campaign-name distinto do Daily Drops; news_auto mantém o default do send_zma."""
+_ENTREGA_PARES = (("list_key", "list_name"), ("from_email", "from_name"))
+
+
+def resolve_entrega(sm, edition, st=None, campanha=None):
+    """Alvo do envio na precedência da decisão 6, com a ORIGEM de cada campo.
+
+    edição (`st.list_key`) > campanha > `settings.json` global > `newsletter.yaml` do
+    container. O global vira fallback herdado: ninguém mais escreve nele.
+
+    A origem vai junto e não é enfeite: com quatro níveis, "para qual lista isso foi?" deixa
+    de ter resposta óbvia, e o operador que trocou a lista da campanha e viu o envio ir para
+    outra não teria como distinguir defeito de herança.
+
+    Chave e nome de lista são resolvidos como PAR, não campo a campo. Resolvidos em separado,
+    a campanha podia definir `list_name` e o `settings` continuar mandando o `list_key` — e o
+    `list_key` é quem manda no envio. O operador leria "lista: WooW Beauty" e a newsletter
+    sairia para o time mK. O secundário pode vir de um nível MAIS GERAL que o principal
+    (é o que preserva o comportamento de hoje, onde `active_list_name` vazio cai no nome do
+    config), nunca de um mais específico."""
+    st = st if st is not None else {}
+    if campanha is None:
+        campanha = _campanha_da_edicao_id(edition, sm, st)
+    try:
+        _slug, regra, _doc = _regra(sm, campanha)
+    except Exception as exc:  # noqa: BLE001 — roda no send; não pode derrubar o envio
+        print(f"[entrega] não li a campanha {campanha!r} ({exc}); herdando o global")
+        regra = {}
+    try:
+        settings = json.loads(sm.store.read("settings.json") or "{}")
+    except (ValueError, TypeError) as exc:
+        print(f"[entrega] settings.json ilegível ({exc}); herdando o config")
+        settings = {}
+    if not isinstance(settings, dict):
+        settings = {}
+    deliv = _delivery()
+    niveis = (
+        ("edicao", {"list_key": st.get("list_key")}),
+        ("campanha", _entrega_da_campanha(regra)),
+        ("settings", {"list_key": settings.get("active_list_key"),
+                      "list_name": settings.get("active_list_name"),
+                      "from_email": settings.get("active_from_email"),
+                      "from_name": settings.get("active_from_name")}),
+        ("config", {"list_key": deliv.get("list_key"), "list_name": deliv.get("list_name"),
+                    "from_email": deliv.get("from_email"), "from_name": deliv.get("from_name")}),
+    )
+
+    def _val(fonte, campo):
+        v = (fonte or {}).get(campo)
+        return v.strip() if isinstance(v, str) and v.strip() else ""
+
+    out = {c: "" for c in _ENTREGA_CAMPOS}
+    origem = {c: "ausente" for c in _ENTREGA_CAMPOS}
+    for principal, secundario in _ENTREGA_PARES:
+        for i, (nivel, fonte) in enumerate(niveis):
+            if not _val(fonte, principal):
+                continue
+            out[principal], origem[principal] = _val(fonte, principal), nivel
+            for nivel2, fonte2 in niveis[i:]:
+                if _val(fonte2, secundario):
+                    out[secundario], origem[secundario] = _val(fonte2, secundario), nivel2
+                    break
+            break
+    nome = (regra or {}).get("nome") or campanha
+    if campanha != CAMPANHA_PADRAO:
+        # Campanha não-default ganha nome próprio no painel do ZMA. O nome não é chave (as
+        # métricas vão por `campaign_key`), mas é o que uma pessoa lê para saber qual das
+        # newsletters ela está olhando.
+        out["campaign_name"] = f"{nome} {data_da_edicao(edition, st)}"
+    return {**out, "campanha": campanha, "origem": origem}
+
+
+def _build_send_args(edition, st, deliv, sender, active_list, entrega=None):
+    """Monta os args do send_zma.py (função pura, testável).
+
+    `entrega` é o resultado de `resolve_entrega` (v1.8.0) e, quando vem, manda em lista e
+    remetente: ele já aplicou a precedência inteira, a edição inclusive. Parâmetro NOVO com
+    default no fim, e não posicional no meio, porque os sete testes de `test_send_args.py`
+    chamam esta função com cinco posicionais e são o gabarito do comportamento de antes —
+    mesma disciplina que a v1.7.0 aplicou ao `build_health`.
+
+    O `--campaign-name` tem três caminhos e nenhum deles é acidental: `manual_html` mantém o
+    dela, campanha não-default ganha o próprio, e o Daily Drops NÃO manda o arg — quem monta
+    o nome dele é o `send_zma` (`mK Newsletter <stem>`), e mandá-lo aqui renomearia o
+    histórico de quem lê o painel do ZMA."""
+    entrega = entrega or {}
     args = [f"content/{edition}.md", "--content-url", st.get("preview_url"), "--send",
-            "--from-email", sender["from_email"], "--from-name", sender["from_name"],
+            "--from-email", entrega.get("from_email") or sender["from_email"],
+            "--from-name", entrega.get("from_name") or sender["from_name"],
             "--topic-id", str(deliv["topic_id"])]
     if st.get("type") == "manual_html":
         args += ["--campaign-name", st.get("campaign_name") or f"mK Campanha {edition}"]
-    if st.get("list_key"):
-        args += ["--list-key", st["list_key"]]
-    elif active_list.get("list_key"):
-        args += ["--list-key", active_list["list_key"]]
-    elif active_list.get("list_name"):
-        args += ["--list-name", active_list["list_name"]]
+    elif entrega.get("campaign_name"):
+        args += ["--campaign-name", entrega["campaign_name"]]
+    list_key = st.get("list_key") or entrega.get("list_key") or (active_list or {}).get("list_key")
+    list_name = entrega.get("list_name") or (active_list or {}).get("list_name")
+    if list_key:
+        args += ["--list-key", list_key]
+    elif list_name:
+        args += ["--list-name", list_name]
     return args
 
 
@@ -375,13 +465,21 @@ def run_stage(edition, stage, payload):
 
         if stage == "send":
             st = sm.get_state(edition)
+            entrega = resolve_entrega(sm, edition, st)
             send_args = _build_send_args(edition, st, _delivery(),
-                                         get_active_sender(sm), get_active_list(sm))
+                                         get_active_sender(sm), get_active_list(sm), entrega)
             out = _run_script(wd, "send_zma.py", send_args)
             key = next((l.split(":")[-1].strip() for l in out.splitlines() if "campaignKey" in l), "")
             sm.upsert_edition(edition, {"stage": "sent", "campaign_key": key})
             _clear_stage_error(sm, edition)
-            return {"stage": "sent", "campaign_key": key, "log": out.strip()}
+            # `alvo` no retorno: com quatro níveis de precedência, o operador precisa poder
+            # ler PARA ONDE foi e DE ONDE veio o alvo, sem abrir o painel do ZMA.
+            return {"stage": "sent", "campaign_key": key, "log": out.strip(),
+                    "alvo": {"campanha": entrega.get("campanha"),
+                             "list_key": entrega.get("list_key"),
+                             "list_name": entrega.get("list_name"),
+                             "from_email": entrega.get("from_email"),
+                             "origem": entrega.get("origem")}}
 
         raise EntradaInvalida(f"stage inválido: {stage}")
     except Exception as e:  # noqa: BLE001 — registra a falha do estágio antes de propagar
@@ -442,9 +540,17 @@ def create_campaign(payload):
         campanha = prefixo
     if campanha is not None:
         slug = _valida_slug(campanha)
-        if slug not in get_curadoria(sm)["campanhas"]:
+        cadastro = get_curadoria(sm)["campanhas"]
+        if slug not in cadastro:
             raise EntradaInvalida(
                 f"campanha não encontrada: {slug!r}. Crie antes: curadoria criar --campanha {slug}")
+        if not _campanha_ativa(cadastro[slug]):
+            # Decisão 11: campanha desativada preserva memória e histórico, mas não aceita
+            # edição nova. Fail-loud, como toda a porta de criação: criar edição numa
+            # campanha desligada é erro de operação, não caminho de pesquisa.
+            raise EntradaInvalida(
+                f"campanha {slug!r} está desativada e não aceita edição nova. "
+                f"Rode: campanha ativar --campanha {slug}")
         if prefixo is not None and prefixo != slug:
             # Divergência entre o id e a campanha é recusada, nunca resolvida em silêncio:
             # os dois são declaração do operador e um deles está errado.
@@ -524,21 +630,28 @@ def get_active_list(sm=None):
 
 
 def set_active_list(payload):
-    """Grava a lista-alvo do envio diário em settings.json (GCS). Operador pode trocar
-    sem redeploy. Redireciona QUEM recebe a news — o CLI confirma antes de chamar."""
+    """Grava a lista-alvo NA CAMPANHA (campanhas.json). Sem `campanha`, na padrão.
+
+    Até a v1.7.0 isto escrevia `settings.json`, que é global. O global continua sendo LIDO
+    como fallback (decisão 6) e deixa de ser ESCRITO: com duas campanhas, um alvo global é o
+    alvo errado para pelo menos uma delas. Enquanto só existir a padrão o efeito prático é
+    idêntico ao de antes, e um teste prende essa equivalência.
+
+    Redireciona QUEM recebe a news — o CLI confirma antes de chamar."""
     payload = payload or {}
     list_key = payload.get("list_key")
-    if not list_key:
+    if not isinstance(list_key, str) or not list_key.strip():
         raise EntradaInvalida("campo 'list_key' obrigatório")
-    sm = _sm()
-    s = json.loads(sm.store.read("settings.json") or "{}")
-    s["active_list_key"] = list_key
-    s["active_list_name"] = payload.get("list_name") or ""
-    s["set_by"] = payload.get("_email", "")
-    s["set_at"] = datetime.now(BRT).isoformat(timespec="seconds")
-    sm.store.write("settings.json", json.dumps(s, ensure_ascii=False, indent=2))
-    return {"active_list_key": s["active_list_key"], "active_list_name": s["active_list_name"],
-            "set_by": s["set_by"], "set_at": s["set_at"]}
+    r = set_curadoria({"op": "entrega", "campanha": payload.get("campanha"),
+                       "list_key": list_key.strip(),
+                       # nome vazio LIMPA: chave nova com o nome da lista antiga colado seria
+                       # uma tela dizendo o nome de uma lista que não é mais a alvo.
+                       "list_name": payload.get("list_name") or "",
+                       "_email": payload.get("_email", "")})
+    e = _entrega_da_campanha(r["campanhas"].get(r["campanha"]) or {})
+    return {"campanha": r["campanha"], "active_list_key": e.get("list_key", ""),
+            "active_list_name": e.get("list_name", ""),
+            "set_by": r["set_by"], "set_at": r["set_at"]}
 
 
 # --------------------------------------------------------------- remetente (sender)
@@ -582,25 +695,31 @@ def get_active_sender(sm=None):
 
 
 def set_sender(payload):
-    """Grava o remetente ativo (from_email/from_name) em settings.json (GCS), preservando
-    a lista-alvo (active_list_key). Vale para TODOS os envios (news diária + manuais). NÃO
-    bloqueia sender não verificado: grava e avisa (o ZMA barra no envio com 6610). O CLI
-    confirma antes quando verified=False."""
+    """Grava o remetente NA CAMPANHA (campanhas.json). Sem `campanha`, na padrão.
+
+    Mesma mudança de escopo do `set_active_list`, e pela mesma razão. NÃO bloqueia sender
+    não verificado: grava e avisa (o ZMA barra no envio com 6610). O CLI confirma antes
+    quando verified=False.
+
+    A checagem ao vivo no ZMA fica AQUI, e não na op `entrega` do set_curadoria: esta é a
+    porta dedicada a remetente, e é a única que vale pagar uma chamada de rede."""
     payload = payload or {}
     from_email = (payload.get("from_email") or "").strip()
     if not from_email or "@" not in from_email:
         raise EntradaInvalida("campo 'from_email' obrigatório (email válido)")
-    sm = _sm()
-    s = json.loads(sm.store.read("settings.json") or "{}")
-    s["active_from_email"] = from_email
-    s["active_from_name"] = payload.get("from_name") or s.get("active_from_name") or ""
-    s["sender_set_by"] = payload.get("_email", "")
-    s["sender_set_at"] = datetime.now(BRT).isoformat(timespec="seconds")
-    sm.store.write("settings.json", json.dumps(s, ensure_ascii=False, indent=2))
+    campos = {"from_email": from_email}
+    if payload.get("from_name") is not None:
+        # ausente PRESERVA o nome gravado, como fazia o `or s.get("active_from_name")` de
+        # antes: trocar só o endereço não pode apagar o nome que aparece na caixa de entrada.
+        campos["from_name"] = payload["from_name"]
+    r = set_curadoria({"op": "entrega", "campanha": payload.get("campanha"), **campos,
+                       "_email": payload.get("_email", "")})
+    e = _entrega_da_campanha(r["campanhas"].get(r["campanha"]) or {})
     verified, source = _check_sender_verified(from_email)
-    out = {"active_from_email": s["active_from_email"], "active_from_name": s["active_from_name"],
+    out = {"campanha": r["campanha"], "active_from_email": e.get("from_email", ""),
+           "active_from_name": e.get("from_name", ""),
            "verified": verified, "verified_source": source,
-           "set_by": s["sender_set_by"], "set_at": s["sender_set_at"]}
+           "set_by": r["set_by"], "set_at": r["set_at"]}
     if verified is not True:
         out["warning"] = (f"'{from_email}' não consta como Sender verificado no ZMA; se o "
                           f"envio falhar com erro 6610, verifique o remetente no painel ZMA.")
@@ -815,6 +934,95 @@ def _validate_url(url):
     return u
 
 
+FORMATO_PADRAO = "daily-drops"
+# As únicas chaves do newsletter.yaml que um perfil de campanha pode tocar. Fechada de
+# propósito: o que está FORA dela é segredo (`gemini.api_key_env`, `gemini.endpoint`), custo
+# (os modelos) e alvo de entrega (`delivery`), e nada disso passa por config de operador sem
+# revisão. A entrega já é resolvida por args no send, pela precedência da decisão 6.
+_PERFIL_CHAVES = ("formato", "research.days_lookback", "research.max_per_source",
+                  "gemini.pool_to_writer")
+
+
+def _formatos():
+    """Formatos editoriais do `config/formatos.yaml`. NUNCA levanta.
+
+    Arquivo ausente ou ilegível devolve só o formato de hoje, que é exatamente o
+    comportamento de antes da v1.8.0: `write.md` mais `woow-daily-drops.html.j2`. O default
+    É o comportamento atual, e é ele que a suíte antiga prende."""
+    padrao = {FORMATO_PADRAO: {"prompt_write": "write.md",
+                               "template": "woow-daily-drops.html.j2",
+                               "campos_obrigatorios": ["cabecalho", "titulo_edicao",
+                                                       "sumario", "manchete"],
+                               "descricao": "WooW! Daily Drops"}}
+    try:
+        raw = yaml.safe_load((CONFIG / "formatos.yaml").read_text(encoding="utf-8")) or {}
+        achados = raw.get("formatos")
+        if not isinstance(achados, dict) or not achados:
+            return padrao
+        out = {}
+        for nome, cfg in achados.items():
+            if isinstance(nome, str) and isinstance(cfg, dict) and cfg.get("prompt_write"):
+                out[nome] = cfg
+        return out or padrao
+    except Exception as exc:  # noqa: BLE001
+        print(f"[formato] formatos.yaml ilegível ({exc}); usando o formato de hoje")
+        return padrao
+
+
+def _merge_perfil(base, perfil):
+    """Base do container + perfil da campanha, chave a chave, contra uma lista FECHADA.
+
+    Merge por chave e NÃO substituição de documento. Deixar o operador substituir o YAML
+    inteiro poria segredo, custo e alvo de entrega numa superfície sem revisão, e um perfil
+    incompleto quebraria o pipeline no meio, longe de quem escreveu. Chave fora da lista é
+    ignorada com aviso, nunca gravada: incluindo a forma ANINHADA (`{"gemini": {...}}`), que
+    é a que um operador tentaria por analogia com o YAML e a que passaria despercebida se a
+    guarda só olhasse as pontilhadas."""
+    out = copy.deepcopy(base if isinstance(base, dict) else {})
+    for chave, valor in sorted((perfil or {}).items()):
+        if chave not in _PERFIL_CHAVES:
+            print(f"[perfil] chave ignorada (fora do perfil de campanha): {chave!r}")
+            continue
+        partes = chave.split(".")
+        alvo = out
+        for p in partes[:-1]:
+            filho = alvo.get(p)
+            if not isinstance(filho, dict):
+                filho = {}
+                alvo[p] = filho
+            alvo = filho
+        alvo[partes[-1]] = valor
+    return out
+
+
+def _write_newsletter_yaml(path, campanha, sm=None):
+    """Aplica o perfil da campanha no newsletter.yaml JÁ COPIADO para o workdir.
+
+    Irmão do `_write_feeds_yaml`. Duas escolhas que valem registro:
+
+    1. Sem perfil, não reescreve nada. Um round-trip por `yaml.safe_dump` apagaria os
+       comentários do arquivo (que são metade da documentação daquela config) e reordenaria
+       o documento sem necessidade, e a campanha padrão — a única que existe hoje — não tem
+       perfil. O caminho de retrocompat é o caminho que não toca no arquivo.
+    2. NUNCA levanta. `_workdir` roda em TODO estágio, `send` incluído, e perfil podre não
+       pode derrubar um envio: o YAML do container fica como está, que é o comportamento de
+       antes da v1.8.0. Mesma política do fallback de sources.json."""
+    try:
+        _slug, regra, _doc = _regra(sm or _sm(), campanha)
+        perfil = _perfil_da_campanha(regra)
+        formato = _formato_da_campanha(regra)
+        if formato:
+            perfil["formato"] = formato
+        if not perfil:
+            return
+        base = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        doc = _merge_perfil(base, perfil)
+        path.write_text(yaml.safe_dump(doc, allow_unicode=True, sort_keys=False),
+                        encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[perfil] não apliquei o perfil de {campanha!r}: {exc}")
+
+
 def _write_feeds_yaml(path, feeds):
     """Grava a lista de fontes no formato que o research.py lê."""
     path.write_text(yaml.safe_dump({"feeds": feeds}, allow_unicode=True, sort_keys=False),
@@ -912,10 +1120,49 @@ def _merge_tests(sm, feeds):
     return {"tested_by": testes.get("tested_by", ""), "tested_at": testes.get("tested_at", "")}
 
 
-def _effective_feeds(sm=None):
-    """Só as fontes ativas, no formato {source, url} que o research.py consome."""
-    return [{"source": f.get("source", ""), "url": f.get("url", "")}
-            for f in get_sources(sm)["feeds"] if f.get("enabled", True)]
+def _effective_feeds(sm=None, campanha=None):
+    """Só as fontes ativas, no formato {source, url} que o research.py consome. Com
+    `campanha`, aplica também a seleção daquela campanha, DEPOIS do `enabled`.
+
+    Cadastro é global, seleção é por campanha (decisão 5): uma fonte que dá 403 dá 403 para
+    todo mundo, e duplicar o cadastro duplicaria o diagnóstico e o `last_test`.
+
+    A seleção NÃO cai para "todas" quando não casa com nada (decisão 12): pesquisar na fonte
+    errada não é o mesmo defeito que pesquisar demais. Sem fonte, a pesquisa sai curta, o
+    alerta de pauta da v1.7.0 dispara e o generate falha em MIN_BLOCOS, que é o contrato que
+    já existe. O fail-open aqui faria a campanha de beleza pesquisar em varejo e ninguém
+    notaria até ler a edição."""
+    ativos = [{"source": f.get("source", ""), "url": f.get("url", "")}
+              for f in get_sources(sm)["feeds"] if f.get("enabled", True)]
+    if campanha is None:
+        return ativos
+    try:
+        _slug, regra, _doc = _regra(sm or _sm(), campanha)
+    except Exception as exc:  # noqa: BLE001 — roda em TODO estágio, send incluído
+        print(f"[fontes] não li a seleção de {campanha!r} ({exc}); usando todas as ativas")
+        return ativos
+    sel = _fontes_da_campanha(regra)
+    if sel["modo"] != "lista":
+        return ativos
+    querem = {_norm_name(n) for n in sel["nomes"]}
+    return [f for f in ativos if _norm_name(f.get("source")) in querem]
+
+
+def _campanha_da_edicao_id(edition, sm=None, st=None):
+    """Campanha de uma edição, para resolver fontes, perfil e entrega. NUNCA levanta.
+
+    O campo do state é a autoridade e o id só carrega (decisão 3); sem state gravado — que é
+    o caso na criação — vale o prefixo do id. Não conhecer a campanha não pode derrubar um
+    estágio, então o último degrau é a padrão, que é o comportamento de antes da v1.8.0."""
+    try:
+        st = st if st is not None else (sm or _sm()).get_state(edition)
+        if st.get("campanha"):
+            return campanha_da_edicao(st)
+        do_id, _data = split_edition_id(edition)
+        return do_id or CAMPANHA_PADRAO
+    except Exception as exc:  # noqa: BLE001
+        print(f"[campanha] não resolvi a campanha de {edition}: {exc}")
+        return CAMPANHA_PADRAO
 
 
 def _write_sources(sm, feeds, cur, updates):
@@ -940,6 +1187,48 @@ def _find_source(feeds, name=None, url=None):
             if _norm_url(f.get("url")) == u:
                 return f
     return None
+
+
+def _valida_selecao_de_fontes(sm, modo, nomes):
+    """Valida a seleção ANTES de gravar, e devolve (modo, nomes canônicos do cadastro).
+
+    Recusa aqui, e não na leitura, porque aqui o operador ainda está olhando: ao vivo, o
+    efeito de uma seleção que não casa com nada é pauta curta amanhã de manhã, com o generate
+    falhando no piso de 3 blocos e ninguém sabendo por quê. Os nomes gravados são os do
+    cadastro, não os digitados: guardar 'glossy' e comparar com 'Glossy' funcionaria hoje
+    (`_norm_name` nos dois lados) e quebraria no dia em que alguém comparasse cru."""
+    if modo not in FONTES_MODOS:
+        raise EntradaInvalida(
+            f"modo de fontes inválido: {modo!r}. Use um de: {', '.join(FONTES_MODOS)}")
+    if modo == "todas":
+        return "todas", []
+    if not isinstance(nomes, list):
+        raise EntradaInvalida("campo 'nomes' tem que ser uma lista de nomes de fonte")
+    pedidos = [n.strip() for n in nomes if isinstance(n, str) and n.strip()]
+    if not pedidos:
+        raise EntradaInvalida(
+            "seleção vazia: 'lista' sem nome nenhum deixaria a campanha sem nenhuma fonte. "
+            "Para pesquisar em tudo, use modo 'todas'.")
+    cadastro = {_norm_name(f.get("source")): f.get("source", "")
+                for f in get_sources(sm)["feeds"]}
+    faltando = [n for n in pedidos if _norm_name(n) not in cadastro]
+    if faltando:
+        raise EntradaInvalida(
+            f"fonte(s) não encontrada(s) no cadastro: {', '.join(repr(n) for n in faltando)}. "
+            f"Rode: sources list")
+    canonicos, vistos = [], set()
+    for n in pedidos:
+        chave = _norm_name(n)
+        if chave not in vistos:
+            vistos.add(chave)
+            canonicos.append(cadastro[chave])
+    ativos = {_norm_name(f.get("source")) for f in get_sources(sm)["feeds"]
+              if f.get("enabled", True)}
+    if not (vistos & ativos):
+        raise EntradaInvalida(
+            f"seleção resolve para nenhuma fonte ATIVA: {', '.join(canonicos)} "
+            f"está(ão) desativada(s) no cadastro. Rode: sources list")
+    return "lista", canonicos
 
 
 def _guard_last_active(feeds, target):
@@ -1074,7 +1363,8 @@ def test_sources(payload=None):
 # states enviados. Ficam separados pelo mesmo motivo que sources.json e sources-tests.json
 # ficam: gravar derivado dentro do arquivo de edição congela a fonte na primeira escrita.
 CAMPANHAS_KEY = "campanhas.json"
-_CURADORIA_OPS = ("criar", "janela", "titulo", "bloquear", "liberar", "remover")
+_CURADORIA_OPS = ("criar", "janela", "titulo", "bloquear", "liberar", "remover",
+                  "fontes", "entrega", "formato", "ativar", "desativar")
 TITULO_MODOS = ("relatorio", "on", "off")
 
 
@@ -1092,7 +1382,64 @@ def _janela_padrao():
 def _campanha_nova(nome="", email="", janela=None):
     return {"nome": nome or "", "janela_dias": _janela_padrao() if janela is None else janela,
             "titulo_modo": "relatorio", "bloqueados": [], "liberados": [],
+            # Campanha nova nasce ATIVA, pesquisando em tudo, sem alvo próprio e sem formato
+            # próprio: herda o global em tudo o que não escolher. Quem NÃO nasce ligado é o
+            # envio — o SCHEDULE_DEFAULTS mantém `enabled: false` e `auto_send: false`.
+            "ativa": True, "fontes": {"modo": "todas"}, "entrega": {}, "formato": "",
+            "perfil": {},
             "set_by": email, "set_at": datetime.now(BRT).isoformat(timespec="seconds")}
+
+
+# Campanha gravada pela v1.7.0 não tem `ativa`, `fontes`, `entrega`, `formato` nem `perfil`.
+# Os acessores abaixo são o ÚNICO lugar que decide o que a ausência significa, pelo mesmo
+# motivo de `campanha_da_edicao`: espalhar `regra.get("ativa", True)` por seis chamadores é
+# onde um deles lê a ausência como desligada e a newsletter para de sair sem ninguém mexer.
+FONTES_MODOS = ("todas", "lista")
+_ENTREGA_CAMPOS = ("list_key", "list_name", "from_email", "from_name")
+
+
+def _campanha_ativa(regra):
+    """Ausente é ATIVA. As campanhas que estão gravadas em produção hoje não têm o campo, e
+    ler a ausência como desligada tiraria a Daily Drops do tick no primeiro deploy."""
+    return bool((regra or {}).get("ativa", True))
+
+
+def _fontes_da_campanha(regra):
+    """Seleção de fontes, normalizada. Modo desconhecido cai em 'todas': é config lida em
+    TODO estágio (o `_popula_workdir` roda até no send), e um valor estranho no documento não
+    pode derrubar um envio. A recusa de valor inválido acontece na GRAVAÇÃO."""
+    bloco = (regra or {}).get("fontes")
+    if not isinstance(bloco, dict):
+        return {"modo": "todas", "nomes": []}
+    modo = (bloco.get("modo") or "todas").strip().lower() if isinstance(bloco.get("modo"), str) \
+        else "todas"
+    if modo not in FONTES_MODOS:
+        modo = "todas"
+    nomes = [n.strip() for n in (bloco.get("nomes") or [])
+             if isinstance(n, str) and n.strip()]
+    return {"modo": modo, "nomes": nomes}
+
+
+def _entrega_da_campanha(regra):
+    """Alvo de entrega da campanha, só com os quatro campos conhecidos e não vazios. Campo
+    vazio é ausência: é assim que o operador volta a herdar o global sem comando de 'limpar'."""
+    bloco = (regra or {}).get("entrega")
+    if not isinstance(bloco, dict):
+        return {}
+    return {k: v.strip() for k, v in bloco.items()
+            if k in _ENTREGA_CAMPOS and isinstance(v, str) and v.strip()}
+
+
+def _formato_da_campanha(regra):
+    bruto = (regra or {}).get("formato")
+    return bruto.strip() if isinstance(bruto, str) else ""
+
+
+def _perfil_da_campanha(regra):
+    """Perfil editorial: as chaves pontilhadas que o merge aplica no newsletter.yaml. A
+    validação da lista fechada mora no `_merge_perfil`, que é quem grava."""
+    bloco = (regra or {}).get("perfil")
+    return dict(bloco) if isinstance(bloco, dict) else {}
 
 
 def _valida_slug(slug):
@@ -1157,6 +1504,44 @@ def _valida_edition_id(edition):
             f"id de edição inválido: {edition!r} (use letras, números, ponto, hífen e "
             f"sublinhado, começando por letra ou número, até 80)")
     return edition
+
+
+def _valida_entrega(payload, regra):
+    """Merge dos campos de entrega PRESENTES no payload sobre o que já está gravado.
+
+    Campo ausente é herança (não mexe); campo presente e vazio é limpeza explícita, que é
+    como o operador volta a herdar o global sem precisar de um comando de "limpar". Sem essa
+    distinção, um `set-list` sem `--from-email` apagaria o remetente da campanha em silêncio
+    e o envio seguinte sairia de outro endereço."""
+    atual = dict(_entrega_da_campanha(regra))
+    for campo in _ENTREGA_CAMPOS:
+        if campo not in payload:
+            continue
+        bruto = payload.get(campo)
+        if bruto is None or (isinstance(bruto, str) and not bruto.strip()):
+            atual.pop(campo, None)
+            continue
+        if not isinstance(bruto, str):
+            raise EntradaInvalida(f"campo {campo!r} inválido: {bruto!r} (esperava texto)")
+        valor = bruto.strip()
+        if campo == "from_email" and "@" not in valor:
+            raise EntradaInvalida(f"'from_email' inválido: {valor!r} (esperava um e-mail)")
+        atual[campo] = valor
+    return atual
+
+
+def _edicoes_da_campanha(sm, campanha):
+    """Ids de edição que pertencem a uma campanha, pela fila.
+
+    Pela fila e não varrendo o bucket: `_rebuild_queue` já resolveu a campanha de cada state,
+    com a retrocompat do campo ausente dentro. Listar states de novo aqui duplicaria essa
+    regra, que é exatamente o que `campanha_da_edicao` existe para impedir.
+
+    LEVANTA se não conseguir ler: quem chama é a guarda do `remover`, e ali um fail-open
+    apagaria a regra de uma campanha que tem edição gravada — o oposto do que a guarda quer.
+    Quem só quer mostrar o número (o `campanha status`) trata a exceção no ponto de uso."""
+    return sorted(l.get("edition") for l in (sm.get_queue().get("editions") or [])
+                  if (l.get("campanha") or CAMPANHA_PADRAO) == campanha and l.get("edition"))
 
 
 def get_curadoria(sm=None):
@@ -1273,10 +1658,51 @@ def set_curadoria(payload):
             # sair de uma lista ao entrar na outra: guardar o mesmo link nas duas deixaria o
             # resultado dependendo da ordem de aplicação, que é onde o operador se perde.
             alvo[outra] = [e for e in (alvo.get(outra) or []) if e.get("link") != link]
+        elif op == "fontes":
+            bruto = payload.get("modo")
+            modo = bruto.strip().lower() if isinstance(bruto, str) and bruto.strip() else "todas"
+            modo, nomes = _valida_selecao_de_fontes(sm, modo, payload.get("nomes"))
+            alvo["fontes"] = {"modo": modo, "nomes": nomes}
+        elif op == "entrega":
+            alvo["entrega"] = _valida_entrega(payload, alvo)
+        elif op == "formato":
+            bruto = payload.get("formato")
+            if bruto is not None and not isinstance(bruto, str):
+                raise EntradaInvalida(f"'formato' inválido: {bruto!r} (esperava texto)")
+            nome = (bruto or "").strip()
+            disponiveis = _formatos()
+            if nome and nome not in disponiveis:
+                raise EntradaInvalida(
+                    f"formato não encontrado: {nome!r}. Disponíveis: "
+                    f"{', '.join(sorted(disponiveis))}. Formato novo é PR de dev: o par "
+                    f"prompt+template é código com marca dentro.")
+            alvo["formato"] = nome
+        elif op in ("ativar", "desativar"):
+            if op == "desativar" and slug == doc["default"]:
+                # `ativa: false` na padrão também bloquearia `create-campaign` do id nu, que
+                # é a operação manual do dia a dia, e o motivo ficaria longe do sintoma.
+                raise EntradaInvalida(
+                    f"{slug!r} é a campanha padrão e não se desativa: isso bloquearia também "
+                    f"a criação manual de edição pelo id nu. Para pausar o envio, rode: "
+                    f"schedule off")
+            alvo["ativa"] = (op == "ativar")
         elif op == "remover":
             if slug == doc["default"]:
+                # A v1.7.0 dizia "troque a padrão antes", prometendo um comando que não
+                # existe e que a decisão 10 põe fora de escopo: trocar a padrão reescreveria
+                # o significado de 35+ chaves de edição já gravadas, de uma vez.
                 raise EntradaInvalida(
-                    f"{slug!r} é a campanha padrão e não pode ser removida; troque a padrão antes")
+                    f"{slug!r} é a campanha padrão e não pode ser removida. Trocar a campanha "
+                    f"padrão não existe como operação. Para tirá-la do ar: schedule off")
+            usadas = _edicoes_da_campanha(sm, slug)
+            if usadas:
+                # Decisão 11: apagar a regra deixaria `publicados/<slug>.json` e os states
+                # órfãos, e o rebuild os traria de volta como campanha desconhecida.
+                mostra = ", ".join(usadas[:3]) + (" e outras" if len(usadas) > 3 else "")
+                raise EntradaInvalida(
+                    f"{slug!r} já tem edição gravada ({mostra}) e não pode ser removida: a "
+                    f"memória e os states ficariam órfãos. Use: campanha desativar "
+                    f"--campanha {slug}")
             campanhas.pop(slug)
             _neutraliza_schedule(sm, slug)
         alvo["set_by"], alvo["set_at"] = email, now
@@ -1311,7 +1737,14 @@ def get_curadoria_report(payload=None, sm=None):
     out = {}
     for slug, regra in doc["campanhas"].items():
         mem = sm.get_publicados(slug)
+        # Os quatro campos novos passam pelos acessores mesmo quando estão gravados: é o que
+        # faz a tela mostrar a mesma coisa para campanha da v1.7.0 (sem os campos) e para
+        # campanha nova, em vez de uma linha vazia para a que está em produção hoje.
         out[slug] = {**regra,
+                     "ativa": _campanha_ativa(regra),
+                     "fontes": _fontes_da_campanha(regra),
+                     "entrega": _entrega_da_campanha(regra),
+                     "formato": _formato_da_campanha(regra) or FORMATO_PADRAO,
                      "memoria_links": len(mem.get("links") or []),
                      "memoria_edicoes": mem.get("edicoes", 0)}
     return {"default": doc["default"], "campanhas": out}
@@ -1821,10 +2254,16 @@ def _candidatas_do_tick(sm, now, hoje):
     minutos, para sempre, e leva junto as campanhas que viriam depois dela no laço. Com N
     arquivos de agenda, essa superfície é N vezes maior do que era com um só."""
     aprovadas, ignoradas, erros = [], [], []
-    for slug in sorted(get_curadoria(sm)["campanhas"]):
+    for slug, regra in sorted(get_curadoria(sm)["campanhas"].items()):
         try:
-            sched = get_schedule(sm, slug)
             edition = edition_id(slug, hoje)
+            if not _campanha_ativa(regra):
+                # Desativada sai com MOTIVO, e não some: campanha que parou de sair sem
+                # nenhuma linha em lugar nenhum é o pior modo de falha desta rota.
+                ignoradas.append({"campanha": slug, "edition": edition,
+                                  "reason": "campanha desativada"})
+                continue
+            sched = get_schedule(sm, slug)
             # O stage é lido DENTRO do laço, por campanha. Hoistar este get_state para fora
             # (é de onde ele veio) faria toda campanha herdar o stage da primeira, e o guard
             # de `done` do _should_run_now passaria a bloquear todas ou nenhuma.
