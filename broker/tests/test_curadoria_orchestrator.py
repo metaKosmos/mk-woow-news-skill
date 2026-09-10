@@ -211,11 +211,18 @@ def test_popula_workdir_escreve_publicados_json(tmp_path, monkeypatch):
 
 # ------------------------------------------------------------------ create_campaign
 def test_create_campaign_com_campanha(tmp_path, monkeypatch):
+    """v1.8.0: receber só a data COMPÕE o id, em vez de gravar na edição daquele dia.
+
+    Até a 1.7.0 este mesmo comando escrevia `campanha` no state de `2026-09-15`, que é a
+    edição do Daily Drops. Agora ele cria `woow-beauty--2026-09-15` e não toca na outra.
+    """
     sm = _local_sm(tmp_path, monkeypatch)
     orchestrator.set_curadoria({"op": "criar", "campanha": "woow-beauty"})
     r = orchestrator.create_campaign({"edition": "2026-09-15", "campanha": "woow-beauty"})
+    assert r["edition"] == "woow-beauty--2026-09-15"
     assert r["campanha"] == "woow-beauty"
-    assert sm.get_state("2026-09-15")["campanha"] == "woow-beauty"
+    assert sm.get_state("woow-beauty--2026-09-15")["campanha"] == "woow-beauty"
+    assert sm.store.read("editions/2026-09-15.state.json") is None
 
 
 def test_create_campaign_recusa_campanha_inexistente(tmp_path, monkeypatch):
@@ -365,16 +372,38 @@ def test_titulo_modo_viaja_no_doc(tmp_path, monkeypatch):
 
 
 def test_nao_sequestra_a_edicao_do_dia_para_outra_campanha(tmp_path, monkeypatch):
-    """A chave da edição do Daily Drops é a DATA, então `create-campaign --edition <data>
-    --campanha outra` não cria uma segunda edição: reescreve a do dia. Sem guarda, o
-    sequestro é silencioso e a pauta passa a ser barrada pela memória da campanha errada.
-    Rodar duas campanhas no mesmo dia exige id próprio de edição, que não existe hoje."""
+    """O sequestro deixou de ser RECUSADO e passou a ser IMPOSSÍVEL (v1.8.0).
+
+    Até a 1.7.0 a chave da edição do Daily Drops era a data, `--edition <data> --campanha
+    outra` reescrevia a edição do dia, e uma guarda tinha de barrar isso. Com o id próprio o
+    comando compõe `woow-beauty--2026-09-15`: a edição do Daily Drops não é sequer tocada, e
+    esta asserção é mais forte do que a de antes — não é 'levantou', é 'o state ficou byte a
+    byte igual, com a edição em andamento intacta'."""
     sm = _local_sm(tmp_path, monkeypatch)
     orchestrator.set_curadoria({"op": "criar", "campanha": "woow-beauty"})
     sm.upsert_edition("2026-09-15", {"stage": "researched", "date": "2026-09-15"})
-    with pytest.raises(orchestrator.EntradaInvalida):
-        orchestrator.create_campaign({"edition": "2026-09-15", "campanha": "woow-beauty"})
+    antes = sm.store.read("editions/2026-09-15.state.json")
+
+    r = orchestrator.create_campaign({"edition": "2026-09-15", "campanha": "woow-beauty"})
+
+    assert r["edition"] == "woow-beauty--2026-09-15"
+    assert sm.store.read("editions/2026-09-15.state.json") == antes
     assert campanha_da_edicao(sm.get_state("2026-09-15")) == "daily-drops"
+    assert sm.get_state("2026-09-15")["stage"] == "researched"
+
+
+def test_guarda_de_sequestro_ainda_morde_onde_nao_ha_id_para_compor(tmp_path, monkeypatch):
+    """O vizinho da guarda: chave legada não carrega data, então não há id a compor e a
+    recusa da 1.7.0 continua sendo a única proteção. Sem este teste, 'a colisão sumiu'
+    esconderia 'a guarda foi removida'."""
+    sm = _local_sm(tmp_path, monkeypatch)
+    orchestrator.set_curadoria({"op": "criar", "campanha": "woow-beauty"})
+    orchestrator.set_curadoria({"op": "criar", "campanha": "woow-food"})
+    orchestrator.create_campaign({"edition": "webinar-lembrete", "campanha": "woow-beauty"})
+    sm.upsert_edition("webinar-lembrete", {"stage": "researched"})
+    with pytest.raises(orchestrator.EntradaInvalida):
+        orchestrator.create_campaign({"edition": "webinar-lembrete", "campanha": "woow-food"})
+    assert campanha_da_edicao(sm.get_state("webinar-lembrete")) == "woow-beauty"
 
 
 def test_edicao_vazia_ainda_pode_receber_campanha(tmp_path, monkeypatch):

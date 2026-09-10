@@ -16,7 +16,12 @@ from pathlib import Path
 
 import yaml
 
-from state_manager import StateManager, GcsStore, BRT, CAMPANHA_PADRAO, campanha_da_edicao
+# `_SLUG_RE` vem de lá em vez de ser recompilado aqui: eram duas cópias do mesmo padrão em
+# dois arquivos, e o aperto da v1.8.0 (fullmatch, sem hífen final) precisava ser aplicado nas
+# duas para valer. A camada de baixo não importa esta, então a direção da dependência segue
+# a mesma.
+from state_manager import (StateManager, GcsStore, BRT, CAMPANHA_PADRAO, campanha_da_edicao,
+                           data_da_edicao, edition_id, split_edition_id, _SLUG_RE)
 from cost_tracker import compute_cost
 import zma_metrics
 import secrets_store
@@ -60,9 +65,17 @@ def _resolve_edition_date(edition, carimbo=None):
     UTC: edição gerada depois das 21h BRT carimba o dia seguinte. A trava de repetição
     recorta a memória por esta data, então um dia a mais aqui faz a janela pular a véspera e
     devolve inteira a repetição de 1 dia, que é a esmagadora maioria dos casos medidos.
-    Preferir a chave torna a classe toda de erro de fuso inalcançável para edição diária."""
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", edition or ""):
-        return edition
+    Preferir a chave torna a classe toda de erro de fuso inalcançável para edição diária.
+
+    O parse sai por `split_edition_id` (v1.8.0) e não mais por um fullmatch de data solto: o
+    id composto `<slug>--<data>` também CARREGA a data, e o fullmatch antigo não casava com
+    ele. Sem isto o defeito é silencioso e vale para TODA edição de campanha não-padrão — a
+    função desceria para o carimbo (relógio UTC do container) ou para hoje-BRT, gravaria
+    `date` errado, e o recorte de janela da trava de repetição, que compara
+    `entrada.date < data_da_edicao`, corromperia a memória de publicados junto."""
+    _campanha, data_do_id = split_edition_id(edition)
+    if data_do_id:
+        return data_do_id
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", (carimbo or "").strip()):
         return carimbo.strip()
     return datetime.now(BRT).strftime("%Y-%m-%d")
@@ -132,14 +145,20 @@ def _restore_content(sm, wd, edition):
             (wd / "content" / f"{edition}{suffix}").write_text(raw, encoding="utf-8")
 
 
+def _publish_key(edition):
+    """Caminho do HTML público da edição. Existe para ser testável sem GCS: é o terceiro
+    lugar onde duas campanhas colidiam no mesmo dia, e o id composto o separa sozinho."""
+    return f"nl/{edition}.html"
+
+
 def _publish_public(wd, edition):
     """Sobe HTML + imagem pro bucket público; devolve (html_url, img_url)."""
     from google.cloud import storage
     bucket = storage.Client().bucket(PUBLIC_BUCKET)
     html = wd / "renders" / f"woow-{edition}.html"
-    bucket.blob(f"nl/{edition}.html").upload_from_filename(
+    bucket.blob(_publish_key(edition)).upload_from_filename(
         str(html), content_type="text/html; charset=utf-8")
-    html_url = f"https://storage.googleapis.com/{PUBLIC_BUCKET}/nl/{edition}.html"
+    html_url = f"https://storage.googleapis.com/{PUBLIC_BUCKET}/{_publish_key(edition)}"
     img_url = ""
     for ext in ("jpg", "png"):
         img = wd / "renders" / f"woow-{edition}-manchete.{ext}"
@@ -384,13 +403,39 @@ def create_campaign(payload):
     divergente se a edição já saiu de 'empty' (evita estado híbrido). O conteúdo (HTML,
     subject) entra depois, no estágio generate (manual_html) ou no pipeline (news_auto)."""
     payload = payload or {}
-    edition = payload.get("edition")
-    if not edition:
-        raise EntradaInvalida("campo 'edition' obrigatório")
+    edition = _valida_edition_id(payload.get("edition"))
     etype = payload.get("type", "news_auto")
     if etype not in CAMPAIGN_TYPES:
         raise EntradaInvalida(f"type inválido: {etype!r} (use {' | '.join(CAMPAIGN_TYPES)})")
     sm = _sm()
+
+    # A edição ganha id próprio (v1.8.0). `is not None`, e não `if campanha:`, pelo mesmo
+    # motivo que o set_curadoria usa: com o teste de verdade, um `{"campanha": ""}` respondia
+    # 200, pulava a checagem de existência e criava a edição na campanha padrão — o operador
+    # ficava com confirmação escrita de ter criado na campanha certa.
+    campanha = payload.get("campanha")
+    if campanha is not None:
+        slug = _valida_slug(campanha)
+        if slug not in get_curadoria(sm)["campanhas"]:
+            raise EntradaInvalida(
+                f"campanha não encontrada: {slug!r}. Crie antes: curadoria criar --campanha {slug}")
+        prefixo, data = split_edition_id(edition)
+        if prefixo is not None and prefixo != slug:
+            # Divergência entre o id e a campanha é recusada, nunca resolvida em silêncio:
+            # os dois são declaração do operador e um deles está errado.
+            raise EntradaInvalida(
+                f"o id {edition!r} é da campanha {prefixo!r}, mas --campanha diz {slug!r}. "
+                f"Use um dos dois.")
+        if prefixo is None and data:
+            # Recebeu só a data: compõe. É isto que impede o sequestro da edição do dia —
+            # `--edition 2026-09-15 --campanha woow-beauty` deixa de reescrever a edição do
+            # Daily Drops e passa a criar `woow-beauty--2026-09-15`, um id que não existia.
+            edition = edition_id(slug, data)
+        elif prefixo is None and not data:
+            # Chave legada sem data (`2026-w37`, `webinar-*`): não há o que compor, e o
+            # campo `campanha` no state resolve sozinho. Segue o comportamento da 1.7.0.
+            pass
+
     st = sm.get_state(edition)
     cur_type = st.get("type", "news_auto")
     cur_stage = st.get("stage", "empty")
@@ -402,17 +447,12 @@ def create_campaign(payload):
     # o Daily Drops e uma campanha nova podem ser os dois `news_auto` e ter regra de
     # curadoria diferente. Omitida, a edição herda a campanha padrão.
     patch = {"type": etype}
-    campanha = payload.get("campanha")
-    if campanha:
-        slug = _valida_slug(campanha)
-        if slug not in get_curadoria(sm)["campanhas"]:
-            raise EntradaInvalida(
-                f"campanha não encontrada: {slug!r}. Crie antes: curadoria criar --campanha {slug}")
-        # A chave da edição do Daily Drops é a DATA, então `create-campaign --edition
-        # 2026-09-15 --campanha outra` não cria uma segunda edição: reescreve a campanha da
-        # edição daquele dia, que já é a do Daily Drops. Sem esta guarda o sequestro é
-        # silencioso, e a pauta do dia passa a ser barrada pela memória da campanha errada.
-        # Rodar duas campanhas no mesmo dia exige id próprio de edição, que não existe aqui.
+    if campanha is not None:
+        # A guarda de sequestro fica, mas mudou de alcance. Para campanha não-padrão a
+        # colisão deixou de ser possível: o id é exclusivo, e a composição acima garante que
+        # a edição do Daily Drops daquele dia não é sequer tocada. O que sobra e continua
+        # precisando de guarda é a padrão, cujo id segue sendo a data nua, e a chave legada
+        # sem data, onde não há o que compor.
         if cur_stage != "empty" and campanha_da_edicao(st) != slug:
             raise EntradaInvalida(
                 f"edição {edition} já é da campanha '{campanha_da_edicao(st)}' em stage "
@@ -621,13 +661,48 @@ def get_queue():
     return _sm().get_queue()
 
 
+METRICS_POR_CAMPANHA = 3
+METRICS_TETO_GLOBAL = 12
+
+
+def _ultimas_enviadas(queue):
+    """As últimas enviadas de CADA campanha, por data, com teto global.
+
+    Ordena por `date` e não pela chave: a fila é ordenada lexicograficamente pelo id, e id
+    composto ordena depois de qualquer data. O desempate pelo id mantém determinismo quando
+    duas edições da mesma campanha têm a mesma data."""
+    por_campanha = {}
+    for e in (queue.get("editions") or []):
+        if e.get("stage") != "sent":
+            continue
+        por_campanha.setdefault(e.get("campanha") or CAMPANHA_PADRAO, []).append(e)
+    escolhidas = []
+    for _slug, linhas in sorted(por_campanha.items()):
+        linhas.sort(key=lambda e: ((e.get("date") or ""), e.get("edition") or ""))
+        escolhidas += linhas[-METRICS_POR_CAMPANHA:]
+    # O teto corta as campanhas menos recentes, não as primeiras da ordem alfabética: sem
+    # isto, a campanha de slug 'a' comeria a cota e a de slug 'z' nunca apareceria.
+    escolhidas.sort(key=lambda e: ((e.get("date") or ""), e.get("edition") or ""))
+    return escolhidas[-METRICS_TETO_GLOBAL:]
+
+
 def _refresh_metrics(sm):
     """Atualiza no estado (GCS) as métricas ZMA das últimas edições enviadas. Cada
     edição é isolada por try/except: uma falha do Zoho numa não impede as outras.
-    Devolve o payload usado pela rota /metrics."""
-    q = sm.get_queue()
-    sent = [e for e in q["editions"] if e["stage"] == "sent"][-4:]
+    Devolve o payload usado pela rota /metrics.
+
+    O recorte é POR CAMPANHA, e isso não é comodidade de relatório: era um defeito silencioso
+    que a identidade da edição (v1.8.0) acendia. O `[-4:]` global saía de uma fila ordenada
+    pela CHAVE (`state_manager._rebuild_queue`), e `'w' > '2'` em ASCII — no instante em que
+    existisse a primeira edição `woow-*--<data>`, as quatro últimas passavam a ser sempre as
+    do slug alfabeticamente maior e o Daily Drops SUMIA do /metrics, sem exceção e sem log,
+    com a rota devolvendo 200 e as edições erradas. Uma newsletter semanal teria o mesmo
+    destino assim que a diária ocupasse a janela.
+
+    O teto global existe porque cada edição aqui é uma chamada de rede ao ZMA dentro de uma
+    request: sem ele, N campanhas multiplicariam o tempo do /metrics por N."""
     env = secrets_store.get_zma_gemini_env()
+    sent = _ultimas_enviadas(sm.get_queue())
     out = []
     for e in sent:
         st = sm.get_state(e["edition"])
@@ -956,7 +1031,6 @@ def test_sources(payload=None):
 CAMPANHAS_KEY = "campanhas.json"
 _CURADORIA_OPS = ("criar", "janela", "titulo", "bloquear", "liberar", "remover")
 TITULO_MODOS = ("relatorio", "on", "off")
-_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 
 
 def _research_cfg():
@@ -982,10 +1056,48 @@ def _valida_slug(slug):
         # e o handler devolveria 502 "broker quebrado" para um erro de digitação.
         raise EntradaInvalida(f"slug de campanha inválido: {slug!r} (esperava texto)")
     s = (slug or "").strip().lower()
-    if not _SLUG_RE.match(s):
+    if not _SLUG_RE.fullmatch(s):
         raise EntradaInvalida(
-            f"slug de campanha inválido: {slug!r} (use minúsculas, números e hífen, até 40)")
+            f"slug de campanha inválido: {slug!r} (use minúsculas, números e hífen, até 40; "
+            f"não pode terminar em hífen)")
+    # Slug e data não podem ser o mesmo namespace. `2026-09-15` casa com o _SLUG_RE, e uma
+    # campanha batizada assim tornaria o id `2026-09-15--2026-09-15` ambíguo à vista e faria
+    # `split_edition_id` de um id nu (`2026-09-15`) responder pela campanha errada. A
+    # separação é feita onde a campanha NASCE, não no parse do id: lá o custo é uma mensagem
+    # de erro, aqui seria uma regra que ninguém consegue ler.
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        raise EntradaInvalida(
+            f"slug de campanha inválido: {slug!r} (tem forma de data, e data é a outra "
+            f"metade do id da edição)")
     return s
+
+
+# O id da edição vira nome de blob (`editions/<id>.state.json`), segmento de path
+# (`nl/hist/<id>/<stamp>.html`) e PADRÃO DE GLOB (`_persist_content`). Até a v1.7.0 ele nascia
+# de código; a v1.8.0 o põe na mão do operador, então ele ganha régua própria.
+#
+# A régua é deliberadamente PERMISSIVA: recusa o que é perigoso, não o que é estranho. As 9
+# chaves não-data que já existem em produção (`2026-wNN`, `webinar-*`, `teste-remetente-*`)
+# e as fixtures da suíte (`camp-x`, `e`, `no-lk`, `2026-09-08-b`) continuam valendo.
+_EDITION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
+
+
+def _valida_edition_id(edition):
+    """Recusa id que viraria caminho, glob ou travessia. Devolve o id como veio.
+
+    Os três modos de falha, medidos: `a/b` grava `editions/a/b.state.json` e o
+    `GcsStore.list_editions`, que faz `blob.name.split("/")[-1]`, devolve `b` — a edição some
+    da fila com o state existindo no bucket; `e*` e `e[1]` entram cru no
+    `glob(f"{edition}*")` do `_persist_content` e casam o conjunto errado, sem exceção e sem
+    log, e o estágio seguinte falha como se o arquivo nunca tivesse sido gerado; e espaço em
+    branco faz a edição sumir de toda tela que casa por regex."""
+    if not isinstance(edition, str) or not edition.strip():
+        raise EntradaInvalida("campo 'edition' obrigatório")
+    if not _EDITION_ID_RE.fullmatch(edition):
+        raise EntradaInvalida(
+            f"id de edição inválido: {edition!r} (use letras, números, ponto, hífen e "
+            f"sublinhado, começando por letra ou número, até 80)")
+    return edition
 
 
 def get_curadoria(sm=None):
@@ -1163,6 +1275,10 @@ def _memoria_publicados(edition, sm=None):
         slug = campanha_da_edicao(st)
         slug, regra, _ = _regra(sm, slug)
         janela = int(regra.get("janela_dias", _janela_padrao()))
+        # NÃO trocar por `data_da_edicao`: aqui o último degrau precisa ser hoje-BRT, e não o
+        # id cru. `ate` vai para `datetime.fromisoformat` logo abaixo, e chave legada sem
+        # `date` no state (`2026-w37`) levantaria ValueError. O id composto já é resolvido
+        # dentro do `_resolve_edition_date` desde a v1.8.0.
         ate = st.get("date") or _resolve_edition_date(edition)
         links = []
         if janela > 0:
@@ -1237,10 +1353,20 @@ def get_publicados_report(payload=None, sm=None):
     mem = sm.get_publicados(slug)
     links = list(mem.get("links") or [])
     dias = _valida_dias(payload.get("dias"))
+
+    def _data(e):
+        """A mesma régua que `_memoria_publicados` aplica no recorte da janela.
+
+        Aqui ela faltava: o filtro e a ordenação usavam `date or edition` cru, sem a guarda
+        de `fullmatch`. Com id composto, `"woow-..." > "2026-..."` em ASCII, e os links da
+        campanha nova ficavam no topo do histórico para sempre — e `--dias 7` os mantinha
+        sempre dentro do corte, porque a comparação é de string."""
+        return data_da_edicao(e.get("edition") or "", {"date": e.get("date")})
+
     if dias:
         corte = (datetime.now(BRT) - timedelta(days=dias)).strftime("%Y-%m-%d")
-        links = [e for e in links if (e.get("date") or e.get("edition") or "") >= corte]
-    links.sort(key=lambda e: (e.get("date") or e.get("edition") or ""), reverse=True)
+        links = [e for e in links if _data(e) >= corte]
+    links.sort(key=_data, reverse=True)
     return {"campanha": slug, "janela_dias": regra.get("janela_dias"),
             "titulo_modo": regra.get("titulo_modo"), "edicoes": mem.get("edicoes", 0),
             "links": links, "bloqueados": regra.get("bloqueados") or [],
@@ -1291,8 +1417,14 @@ def contribuicao_por_fonte(sm=None, campanha=None):
         if linha.get("campanha", CAMPANHA_PADRAO) != slug or linha.get("stage") == "empty":
             continue
         ed = linha.get("edition") or ""
-        chave_e_data = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", ed))
-        data = ed if chave_e_data else (linha.get("date") or "").strip()
+        # A pergunta é "a CHAVE carrega a data?", e desde a v1.8.0 o id composto também
+        # carrega. Com o fullmatch de data solto que estava aqui, `chave_e_data` virava False
+        # para toda edição de campanha não-padrão e a escolha passava a depender só do campo
+        # `date` — e essa é exatamente a dependência que reintroduz o defeito descrito no
+        # comentário acima, agora pelo lado da campanha nova.
+        _prefixo, data_do_id = split_edition_id(ed)
+        chave_e_data = bool(data_do_id)
+        data = data_do_id or (linha.get("date") or "").strip()
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", data):
             continue
         # Empate de data: ganha a edição cuja CHAVE é a data. Sem isto uma campanha de

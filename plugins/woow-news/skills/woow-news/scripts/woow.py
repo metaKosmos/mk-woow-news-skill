@@ -48,6 +48,21 @@ STAGE_GLYPH = {"sent": "✓ Enviado   ", "ready": "◷ Pronto    ", "generated":
 # dizer: `status` roda todo dia e não vai gastar uma chamada a /curadoria para descobrir
 # que a edição é do Daily Drops. Quem decide a padrão continua sendo o broker.
 CAMPANHA_PADRAO = "daily-drops"
+
+# A régua do id da edição, espelhando `state_manager.EDITION_RE`. Duplicada porque o CLI é um
+# script solto que não importa o broker — mesma razão pela qual `CAMPANHA_PADRAO` está aqui.
+# A AUTORIDADE é o broker: isto serve só para a renderização saber ler a data de um id
+# composto, nunca para decidir a qual campanha uma edição pertence (isso vem do campo
+# `campanha` que a queue já traz).
+_EDITION_RE = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?--)?(\d{4}-\d{2}-\d{2})")
+
+
+def _data_do_id(edition):
+    """Data que o id CARREGA, ou "" quando ele não carrega nenhuma (`2026-wNN`, `webinar-*`)."""
+    m = _EDITION_RE.fullmatch(edition or "")
+    return m.group(1) if m else ""
+
+
 # Abaixo disto, "0 publicada(s)" diz mais sobre o tamanho da memória do que sobre a fonte.
 # A procedência que alimenta o índice só existe desde 02/09/2026, então no início toda fonte
 # de publicação esparsa aparece com zero, e a acusação "NUNCA PUBLICOU" mais o conselho de
@@ -684,8 +699,14 @@ def _ultima_edicao(linhas, slug):
         if (e.get("campanha") or CAMPANHA_PADRAO) != slug or e.get("stage") == "empty":
             continue
         ed = e.get("edition") or ""
-        chave_e_data = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", ed))
-        data = ed if chave_e_data else (e.get("date") or "").strip()
+        # `_data_do_id`, não um fullmatch de data solto: desde a v1.8.0 o id composto
+        # `<slug>--<data>` também CARREGA a data. Com o teste antigo, `chave_e_data` virava
+        # False para toda edição de campanha não-padrão, a escolha passava a depender só do
+        # campo `date`, e o `curadoria status` da campanha nova voltava a não achar a última
+        # pesquisa — o mesmo defeito que 19b747e consertou, entrando pela outra porta.
+        data_do_id = _data_do_id(ed)
+        chave_e_data = bool(data_do_id)
+        data = data_do_id or (e.get("date") or "").strip()
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", data):
             continue
         candidatas.append((data, chave_e_data, ed, e))
