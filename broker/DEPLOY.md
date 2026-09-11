@@ -144,6 +144,10 @@ export CRON_TOKEN="$(gcloud functions describe woow-news-broker --gen2 --region=
 # a versão vem do repo (fonte única), não do seu histórico de shell
 export SKILL_VERSION="$(tr -d '[:space:]' < ../plugins/woow-news/skills/woow-news/VERSION)"
 
+# e o commit vem do git, pelo mesmo motivo: a versão sozinha não identifica o código,
+# porque vários commits vivem sob o mesmo x.y.z
+export SKILL_COMMIT="$(git rev-parse --short HEAD)"
+
 gcloud functions deploy woow-news-broker \
   --gen2 \
   --runtime=python312 \
@@ -153,7 +157,7 @@ gcloud functions deploy woow-news-broker \
   --trigger-http \
   --allow-unauthenticated \
   --service-account=$RUNTIME_SA \
-  --set-env-vars="ALLOWED_DOMAIN=metakosmos.com.br,OAUTH_CLIENT_ID=SEU_CLIENT_ID.apps.googleusercontent.com,OAUTH_CLIENT_SECRET=GOCSPX-...,ADMIN_EMAILS=david@metakosmos.com.br,OPERATOR_EMAILS=joao@metakosmos.com.br;patrick@metakosmos.com.br,CRON_TOKEN=$CRON_TOKEN,STATE_BUCKET=mk-woow-news-state,PUBLIC_BUCKET=mk-woow-news-public,FIREBASE_DB_URL=https://mk-ai-first-ops.firebaseio.com,SKILL_VERSION=$SKILL_VERSION,BRL_RATE=5.70"
+  --set-env-vars="ALLOWED_DOMAIN=metakosmos.com.br,OAUTH_CLIENT_ID=SEU_CLIENT_ID.apps.googleusercontent.com,OAUTH_CLIENT_SECRET=GOCSPX-...,ADMIN_EMAILS=david@metakosmos.com.br,OPERATOR_EMAILS=joao@metakosmos.com.br;patrick@metakosmos.com.br,CRON_TOKEN=$CRON_TOKEN,STATE_BUCKET=mk-woow-news-state,PUBLIC_BUCKET=mk-woow-news-public,FIREBASE_DB_URL=https://mk-ai-first-ops.firebaseio.com,SKILL_VERSION=$SKILL_VERSION,SKILL_COMMIT=$SKILL_COMMIT,BRL_RATE=5.70"
 ```
 
 > Os emails em `OPERATOR_EMAILS` são separados por ponto e vírgula porque o
