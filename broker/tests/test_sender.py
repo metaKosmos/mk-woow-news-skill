@@ -1,4 +1,10 @@
-# broker/tests/test_sender.py — MAR-175: autosserviço de remetente (settings.json, global)
+# broker/tests/test_sender.py — MAR-175: autosserviço de remetente.
+#
+# Desde a v1.8.0 (MAR-523) o remetente é gravado NA CAMPANHA (`campanhas.json`), não mais no
+# `settings.json` global: com duas campanhas, um remetente global é o remetente errado para
+# pelo menos uma delas. O `settings.json` continua sendo LIDO como um dos quatro níveis de
+# precedência (decisão 6), e os testes de `get_active_sender` abaixo são justamente o que
+# prende essa leitura — por isso eles não mudaram.
 import sys, pathlib, json
 BROKER = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BROKER))
@@ -11,6 +17,12 @@ def _local_sm(tmp_path, monkeypatch):
     sm = StateManager(LocalStore(tmp_path))
     monkeypatch.setattr(orchestrator, "_sm", lambda: sm)
     return sm
+
+
+def _entrega(sm, campanha="daily-drops"):
+    """Onde lista e remetente moram desde a v1.8.0."""
+    return orchestrator._entrega_da_campanha(
+        orchestrator.get_curadoria(sm)["campanhas"][campanha])
 
 
 # ------------------------------------------------------------- get_active_sender
@@ -40,7 +52,8 @@ def test_set_sender_verified_no_warning(tmp_path, monkeypatch):
                                  "from_name": "WooW!", "_email": "op@metakosmos.com.br"})
     assert r["verified"] is True
     assert "warning" not in r
-    assert json.loads(sm.store.read("settings.json"))["active_from_email"] == "patrick@metakosmos.com.br"
+    assert _entrega(sm)["from_email"] == "patrick@metakosmos.com.br"
+    assert r["campanha"] == "daily-drops"
 
 def test_set_sender_unverified_warns_but_saves(tmp_path, monkeypatch):
     sm = _local_sm(tmp_path, monkeypatch)
@@ -50,16 +63,16 @@ def test_set_sender_unverified_warns_but_saves(tmp_path, monkeypatch):
     assert r["verified"] is False
     assert "6610" in r["warning"]
     # gravou mesmo assim (não bloqueia)
-    assert json.loads(sm.store.read("settings.json"))["active_from_email"] == "david@metakosmos.com.br"
+    assert _entrega(sm)["from_email"] == "david@metakosmos.com.br"
 
 def test_set_sender_preserves_active_list(tmp_path, monkeypatch):
     sm = _local_sm(tmp_path, monkeypatch)
     monkeypatch.setattr(orchestrator, "_check_sender_verified", lambda e: (True, "zma"))
     orchestrator.set_active_list({"list_key": "LK-INTERNA", "list_name": "Time mK"})
     orchestrator.set_sender({"from_email": "patrick@metakosmos.com.br", "_email": "op@x"})
-    s = json.loads(sm.store.read("settings.json"))
-    assert s["active_list_key"] == "LK-INTERNA"          # remetente não apagou a lista
-    assert s["active_from_email"] == "patrick@metakosmos.com.br"
+    e = _entrega(sm)
+    assert e["list_key"] == "LK-INTERNA"                 # remetente não apagou a lista
+    assert e["from_email"] == "patrick@metakosmos.com.br"
 
 def test_set_sender_requires_valid_email(tmp_path, monkeypatch):
     _local_sm(tmp_path, monkeypatch)

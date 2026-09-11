@@ -56,7 +56,13 @@ WEEKDAYS = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira",
 MONTHS = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho",
           "agosto", "setembro", "outubro", "novembro", "dezembro"]
 
+# Os campos que o JSON gerado PRECISA ter. Continua sendo o default de fábrica: desde a
+# v1.8.0 o formato da campanha pode declarar outra lista (config/formatos.yaml), e este valor
+# é o que vale quando não há formato escolhido, quando o catálogo some ou quando ele está
+# ilegível. O default É o comportamento de antes, e é ele que a suíte antiga prende.
 REQUIRED_FIELDS = ["cabecalho", "titulo_edicao", "sumario", "manchete"]
+FORMATO_DEFAULT = {"prompt_write": "write.md", "template": "woow-daily-drops.html.j2",
+                   "campos_obrigatorios": list(REQUIRED_FIELDS)}
 
 # Os 5 blocos de notícia, na ordem em que a edição os apresenta. Só a manchete é
 # obrigatória: com o pool curto a edição encolhe (piso em MIN_BLOCOS) em vez de ser
@@ -100,6 +106,44 @@ def load_yaml(name):
 
 def load_prompt(name):
     return (PROMPTS / name).read_text(encoding="utf-8")
+
+
+# O resolvedor abaixo está DUPLICADO em generate_content.py e render_newsletter.py, de
+# propósito. `_run_script` copia UM arquivo para o workdir e roda com BASE = workdir: um
+# módulo compartilhado em pipeline/ simplesmente não chegaria lá. Os dois já duplicam BRT,
+# load_env e o carregamento de YAML pela mesma razão.
+def formato_cfg():
+    """Formato editorial desta edição: prompt do Escritor, template e campos obrigatórios.
+
+    Sai de dois arquivos que o orchestrator já injeta no workdir: a chave `formato` do
+    newsletter.yaml (escrita pelo perfil da campanha) e o catálogo em formatos.yaml. O script
+    continua sem saber o que é campanha — ele lê arquivo, como já lê feeds.yaml e
+    publicados.json.
+
+    NUNCA levanta. Qualquer buraco (chave ausente, catálogo sumido, entrada malformada) cai
+    no formato de hoje: um deploy parcial não pode virar edição não publicada."""
+    try:
+        nome = ((load_yaml("newsletter.yaml") or {}).get("formato") or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[formato] não li o newsletter.yaml ({exc}); usando o formato de hoje")
+        return dict(FORMATO_DEFAULT)
+    if not nome:
+        return dict(FORMATO_DEFAULT)
+    try:
+        catalogo = (load_yaml("formatos.yaml") or {}).get("formatos") or {}
+    except Exception as exc:  # noqa: BLE001
+        print(f"[formato] formatos.yaml ilegível ({exc}); usando o formato de hoje")
+        return dict(FORMATO_DEFAULT)
+    cfg = catalogo.get(nome)
+    if not isinstance(cfg, dict):
+        print(f"[formato] {nome!r} não está no formatos.yaml; usando o formato de hoje")
+        return dict(FORMATO_DEFAULT)
+    campos = cfg.get("campos_obrigatorios")
+    campos = [c for c in campos if isinstance(c, str) and c.strip()] \
+        if isinstance(campos, list) else []
+    return {"prompt_write": cfg.get("prompt_write") or FORMATO_DEFAULT["prompt_write"],
+            "template": cfg.get("template") or FORMATO_DEFAULT["template"],
+            "campos_obrigatorios": campos or list(FORMATO_DEFAULT["campos_obrigatorios"])}
 
 
 def _agora_brt() -> datetime:
@@ -490,7 +534,9 @@ def _diagnostico(provenance):
     return f"Motivos dos {len(motivos)} descartes: {', '.join(sorted(set(motivos)))}."
 
 
-def validate(content, provenance=None):
+def validate(content, provenance=None, campos=None):
+    # `campos` no fim e com default: a assinatura de antes é chamada com um e dois
+    # posicionais na suíte, e ela é o gabarito do comportamento sem formato.
     """Recusa a edição em vez de publicar item sem fonte. O generate falhando é o que
     impede o envio: run_daily encadeia research -> generate -> send, e a exceção para
     antes do send.
@@ -502,7 +548,7 @@ def validate(content, provenance=None):
     if len(blocos) < MIN_BLOCOS:
         sys.exit(f"Só {len(blocos)} item(ns) com fonte confirmada, e o piso é {MIN_BLOCOS}. "
                  f"Edição NÃO publicada. {_diagnostico(provenance)}")
-    missing = [f for f in REQUIRED_FIELDS if f not in content]
+    missing = [f for f in (campos or REQUIRED_FIELDS) if f not in content]
     if missing:
         sys.exit(f"Conteúdo gerado sem os campos: {missing}")
     if blocos != BLOCK_FIELDS[:len(blocos)]:
@@ -589,10 +635,13 @@ def main():
     top = pool[0]
     print(f"Top score: {top.get('score')} — {top.get('title', '')[:70]}")
 
-    content = write_edition(gcfg, key, load_prompt("write.md"), pool, edition_date)
+    fmt = formato_cfg()
+    if fmt != FORMATO_DEFAULT:
+        print(f"Formato: {fmt['prompt_write']} + {fmt['template']}")
+    content = write_edition(gcfg, key, load_prompt(fmt["prompt_write"]), pool, edition_date)
     content, provenance = apply_provenance(content, pool)
     relata_descartes(provenance)
-    validate(content, provenance)
+    validate(content, provenance, fmt["campos_obrigatorios"])
 
     links = None
     if not args.skip_link_check:

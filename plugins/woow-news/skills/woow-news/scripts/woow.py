@@ -73,8 +73,25 @@ MEMORIA_CURTA_EDICOES = 20
 
 def cmd_status(_):
     q = bc.queue()
-    print("WooW! Daily Drops — Gaveta\n" + "━" * 26)
+    # Agrupado por campanha desde a v1.8.0. Numa lista só, ordenada pelo id, a edição de uma
+    # campanha nova cai depois de TODAS as datas nuas (`'w' > '2'` em ASCII) e o operador
+    # lê a fila da diária inteira antes de achar a dele.
+    por_campanha = {}
     for e in q["editions"]:
+        por_campanha.setdefault(e.get("campanha") or CAMPANHA_PADRAO, []).append(e)
+    for i, (campanha, linhas) in enumerate(sorted(por_campanha.items())):
+        titulo = ("WooW! Daily Drops — Gaveta" if campanha == CAMPANHA_PADRAO
+                  else f"{campanha} — Gaveta")
+        print(("\n" if i else "") + titulo + "\n" + "━" * max(len(titulo), 26))
+        _render_gaveta(linhas)
+    print()
+    c = Counter(e["stage"] for e in q["editions"])
+    print(f"Cobertura: {c.get('ready',0)} pronto · {c.get('generated',0)} gerado · "
+          f"{c.get('researched',0)} pesquisado · {c.get('sent',0)} enviado")
+
+
+def _render_gaveta(linhas):
+    for e in linhas:
         glyph = STAGE_GLYPH.get(e["stage"], e["stage"])
         bits = []
         if e.get("open_rate"):
@@ -92,14 +109,9 @@ def cmd_status(_):
         # tinha saído. Sem esta linha, a edição curta parecia dia fraco de notícia.
         if e.get("barrados"):
             bits.append(f"{e['barrados']} barrado(s) por repetição")
-        if (e.get("campanha") or CAMPANHA_PADRAO) != CAMPANHA_PADRAO:
-            bits.append(f"campanha {e['campanha']}")
         if e.get("links_suspeitos"):
             bits.append(f"⚠ {e['links_suspeitos']} link(s) suspeito(s)")
         print(f"{glyph} {e['edition']}   {e.get('date',''):10}   {'  ·  '.join(bits)}")
-    c = Counter(e["stage"] for e in q["editions"])
-    print(f"\nCobertura: {c.get('ready',0)} pronto · {c.get('generated',0)} gerado · "
-          f"{c.get('researched',0)} pesquisado · {c.get('sent',0)} enviado")
 
 
 def cmd_queue(_):
@@ -107,8 +119,14 @@ def cmd_queue(_):
     print(json.dumps(bc.queue(), ensure_ascii=False, indent=2))
 
 
-def cmd_metrics(_):
-    for e in bc.metrics()["editions"]:
+def cmd_metrics(a):
+    r = bc.metrics(getattr(a, "campanha", None))
+    if r.get("campanha"):
+        print(f"Campanha: {r['campanha']}\n")
+    if not r["editions"]:
+        print("Nenhuma edição enviada ainda nesse recorte.")
+        return
+    for e in r["editions"]:
         m, cost = e.get("metrics", {}), e.get("cost", {})
         print(f"{e['edition']} — {e.get('subject','')}")
         print(f"  open {m.get('open_rate')} · click {m.get('click_rate')} · bounce {m.get('bounce_rate')}"
@@ -245,10 +263,14 @@ def cmd_set_list(a):
     cnt = f" ({match.get('count')} contatos)" if match.get("count") is not None else ""
     print(f"Alvo atual : {cur.get('list_name')!r}")
     print(f"Novo alvo  : {(match['listname'] or '').strip()!r}{cnt}")
-    print("\nTrocar o destinatário do ENVIO DIÁRIO da news para esta lista?")
+    alvo = getattr(a, "campanha", None) or CAMPANHA_PADRAO
+    print(f"Campanha   : {alvo}")
+    print(f"\nTrocar o destinatário do envio da campanha {alvo!r} para esta lista?")
     if input("[s/N] ").strip().lower() != "s":
         print("Cancelado."); return
-    print(bc.set_active_list(match["listkey"], match["listname"]))
+    r = bc.set_active_list(match["listkey"], match["listname"],
+                           getattr(a, "campanha", None))
+    print(f"Lista da campanha {r.get('campanha')!r}: {r.get('active_list_name') or r.get('active_list_key')}")
 
 
 _DAYNAMES = ["seg", "ter", "qua", "qui", "sex", "sab", "dom"]  # 0=seg .. 6=dom
@@ -442,10 +464,15 @@ def cmd_set_sender(a):
     if not verified:
         print(f"\n⚠ {a.from_email} NÃO consta como Sender verificado no ZMA.")
         print("  Se não estiver verificado no painel ZMA, o disparo falha com erro 6610.")
-    print("\nTrocar o REMETENTE de TODOS os envios (news diária + campanhas manuais)?")
+    alvo = getattr(a, "campanha", None) or CAMPANHA_PADRAO
+    print(f"Campanha       : {alvo}")
+    print(f"\nTrocar o REMETENTE dos envios da campanha {alvo!r}?")
     if input("[s/N] ").strip().lower() != "s":
         print("Cancelado."); return
-    print(bc.set_sender(a.from_email, a.from_name))
+    r = bc.set_sender(a.from_email, a.from_name, getattr(a, "campanha", None))
+    print(f"Remetente da campanha {r.get('campanha')!r}: {r.get('active_from_email')}")
+    if r.get("warning"):
+        print(f"⚠ {r['warning']}")
 
 
 def cmd_set_html(a):
@@ -516,9 +543,20 @@ def cmd_sources_list(a):
     r = bc.get_sources(campanha=a.campanha)
     feeds = r.get("feeds", [])
     edicoes = r.get("edicoes_na_memoria")
-    print("WooW! Daily Drops — Fontes da pesquisa  (✓ = ativa)\n" + "━" * 51)
+    sel = r.get("selecao") or {}
+    recorte = sel.get("modo") == "lista"
+    legenda = ("(✓ = entra nesta campanha · ✗ = ativa mas fora da seleção · · = desativada)"
+               if recorte else "(✓ = ativa)")
+    print(f"WooW! Daily Drops — Fontes da pesquisa  {legenda}\n" + "━" * 51)
     for f in feeds:
-        mark = "✓" if f.get("enabled", True) else "·"
+        if not f.get("enabled", True):
+            mark = "·"
+        elif recorte and f.get("entra") is False:
+            # Ativa no cadastro global, fora da seleção desta campanha. Sem distinguir dos
+            # dois outros estados, o operador lê "ativa" e espera pauta que nunca vem.
+            mark = "✗"
+        else:
+            mark = "✓"
         print(f"{mark} {(f.get('source') or '')[:24]:24} {_fmt_last_test(f.get('last_test'))}")
         print(f"    {_fmt_contribuicao(f, edicoes)}")
         print(f"    {f.get('url')}")
@@ -852,8 +890,13 @@ def cmd_curadoria_remover(a):
     print(f"Remover a REGRA de curadoria da campanha {slug!r}"
           + (f" ({regra['nome']})" if regra.get("nome") else "") + "?")
     _print_regra(regra, prefixo="  ")
-    print("\nA memória do que já saiu nessa campanha NÃO é apagada aqui, e as edições")
-    print("que apontam para ela passam a cair na regra da campanha padrão.")
+    # O texto antigo dizia que as edições da campanha "passam a cair na regra da padrão".
+    # Desde a v1.8.0 isso não acontece mais, porque o broker RECUSA remover campanha que
+    # tenha edição gravada: aviso que descreve um efeito impossível ensina o operador a não
+    # ler o aviso.
+    print("\nA memória do que já saiu nessa campanha NÃO é apagada aqui.")
+    print("Campanha com edição gravada é recusada pelo broker: nesse caso use")
+    print(f"  python scripts/woow.py campanha desativar --campanha {slug}")
     if not _confirma():
         print("Cancelado."); return
     r = bc.set_curadoria("remover", campanha=a.campanha)
@@ -946,6 +989,164 @@ def cmd_release(a):
     print("Copie o bloco acima e cole no Slack.")
 
 
+# ============================================================== grupo `campanha` (v1.8.0)
+# O grupo `curadoria` da v1.7.0 continua funcionando como alias: ele é o que está escrito na
+# SKILL.md instalada nas máquinas do time, e quebrar um comando publicado para renomeá-lo
+# custaria mais do que carregar dois nomes por uma versão. O aviso é do mesmo tipo do aviso
+# de versão: avisa, não bloqueia.
+_AVISO_CURADORIA = ("[!] `curadoria` virou `campanha` na v1.8.0. O comando antigo continua "
+                    "funcionando; o novo mostra os cinco eixos de config juntos.")
+
+
+def _avisa_nome_novo(a):
+    if getattr(a, "_grupo_antigo", False):
+        print(_AVISO_CURADORIA, file=sys.stderr)
+
+
+def cmd_campanha_fontes(a):
+    """Seleção de fontes da campanha. `--usar` escolhe, `--todas` volta ao default."""
+    if a.todas and a.usar:
+        sys.exit("Use --todas OU --usar \"A,B\", não os dois.")
+    if not a.todas and a.usar is None:
+        sys.exit("Informe --usar \"Glossy,Modern Retail\" ou --todas.")
+    if a.todas:
+        r = bc.set_campanha("fontes", campanha=a.campanha, modo="todas")
+    else:
+        nomes = [n.strip() for n in a.usar.split(",") if n.strip()]
+        r = bc.set_campanha("fontes", campanha=a.campanha, modo="lista", nomes=nomes)
+    slug = r.get("campanha")
+    fontes = ((r.get("campanhas") or {}).get(slug) or {}).get("fontes") or {}
+    if fontes.get("modo") == "lista":
+        print(f"Campanha {slug!r} pesquisa em: {', '.join(fontes.get('nomes') or [])}")
+    else:
+        print(f"Campanha {slug!r} pesquisa em TODAS as fontes ativas do cadastro.")
+    print("O cadastro de fontes segue global: `sources add` vale para todas as campanhas.")
+
+
+def cmd_campanha_entrega(a):
+    """Lista e remetente da campanha. Campo vazio LIMPA e volta a herdar o global."""
+    campos = {k: v for k, v in (("list_key", a.list_key), ("list_name", a.list_name),
+                                ("from_email", a.from_email), ("from_name", a.from_name))
+              if v is not None}
+    if not campos:
+        sys.exit("Informe ao menos um de: --list-key, --list-name, --from-email, --from-name.")
+    r = bc.set_campanha("entrega", campanha=a.campanha, **campos)
+    slug = r.get("campanha")
+    print(f"Entrega da campanha {slug!r} atualizada.\n")
+    _render_entrega(bc.get_campanha_status(slug).get("entrega") or {})
+
+
+def _render_entrega(e):
+    origem = e.get("origem") or {}
+    for campo, rotulo in (("list_key", "Lista (key) "), ("list_name", "Lista (nome)"),
+                          ("from_email", "Remetente   "), ("from_name", "Nome exibido")):
+        valor = e.get(campo) or "—"
+        print(f"  {rotulo}: {valor}  [{origem.get(campo, 'ausente')}]")
+    print("  precedência: edição > campanha > settings (global) > config do container")
+
+
+def cmd_campanha_formato(a):
+    r = bc.set_campanha("formato", campanha=a.campanha, formato=a.formato or "")
+    slug = r.get("campanha")
+    escolhido = ((r.get("campanhas") or {}).get(slug) or {}).get("formato") or "daily-drops"
+    print(f"Campanha {slug!r} passa a escrever no formato {escolhido!r}.")
+    print("Formato é par prompt+template versionado: criar um novo é PR de dev.")
+
+
+def cmd_campanha_ativar(a):
+    r = bc.set_campanha("ativar", campanha=a.campanha)
+    print(f"Campanha {r.get('campanha')!r} ATIVA: volta ao tick e aceita edição nova.")
+
+
+def cmd_campanha_desativar(a):
+    r = bc.set_campanha("desativar", campanha=a.campanha)
+    print(f"Campanha {r.get('campanha')!r} desativada: sai do tick e recusa edição nova.")
+    print("Memória e histórico ficam. Para voltar: campanha ativar --campanha "
+          f"{r.get('campanha')}")
+
+
+def cmd_campanha_agenda(a):
+    """Frente fina do grupo `schedule`, para a agenda caber na mesma tela do resto.
+
+    Um comando só porque o passo real do operador é um só: 'esta campanha sai 09:00 nos dias
+    úteis, ligada'. Em três comandos, esquecer o terceiro deixa a agenda gravada e desligada,
+    que é indistinguível de não ter feito nada."""
+    cfg = {}
+    if a.time is not None:
+        cfg["send_time"] = a.time
+    if a.days is not None:
+        cfg["weekdays"] = _parse_days(a.days)
+    if a.until is not None:
+        cfg["until"] = a.until or None
+    if a.on:
+        cfg["enabled"] = True
+    if a.off:
+        cfg["enabled"] = False
+    if a.on and a.off:
+        sys.exit("Use --on OU --off, não os dois.")
+    if not cfg:
+        _render_schedule(bc.get_schedule(a.campanha))
+        return
+    _render_schedule(bc.set_schedule(_cfg_campanha(a, cfg)))
+
+
+def cmd_campanha_status(a):
+    """O raio-X: os cinco eixos de config juntos, mais agenda, memória e edições.
+
+    Cinco eixos por campanha só são operáveis se existir uma tela que mostre os cinco lado a
+    lado. Sem ela, 'por que esta edição saiu assim?' vira uma caça a cinco documentos."""
+    r = bc.get_campanha_status(a.campanha)
+    marca = " ★ padrão" if r.get("padrao") else ""
+    estado = "ativa" if r.get("ativa") else "DESATIVADA"
+    titulo = f"Campanha {r['campanha']} — {r.get('nome') or r['campanha']}"
+    print(f"{titulo}{marca}   [{estado}]\n" + "━" * max(len(titulo) + 12, 48))
+
+    regra = r.get("regra") or {}
+    print(f"Curadoria : janela {_fmt_janela(regra.get('janela_dias'))} · "
+          f"título {regra.get('titulo_modo')} · "
+          f"{regra.get('bloqueados', 0)} bloqueio(s) · {regra.get('liberados', 0)} liberação(ões)")
+
+    f = r.get("fontes") or {}
+    if f.get("modo") == "lista":
+        print(f"Fontes    : {len(f.get('entram') or [])} de "
+              f"{len(f.get('selecionadas') or [])} selecionada(s) — "
+              f"{', '.join(f.get('entram') or []) or 'nenhuma'}")
+    else:
+        print(f"Fontes    : todas as ativas do cadastro ({len(f.get('entram') or [])})")
+    for aviso in (f.get("avisos") or []):
+        print(f"            ⚠ {aviso}")
+
+    fmt = r.get("formato") or {}
+    print(f"Formato   : {fmt.get('nome')} — {fmt.get('prompt_write')} + {fmt.get('template')}")
+    if r.get("perfil"):
+        print(f"Perfil    : {', '.join(f'{k}={v}' for k, v in sorted(r['perfil'].items()))}")
+
+    print("Entrega   :")
+    _render_entrega(r.get("entrega") or {})
+
+    ag = r.get("agenda") or {}
+    if ag.get("erro"):
+        print(f"Agenda    : ⚠ não consegui ler ({ag['erro']})")
+    else:
+        dias = ",".join(_DAYNAMES[d] for d in (ag.get("weekdays") or []) if 0 <= d <= 6)
+        estado_ag = "ligada" if ag.get("enabled") else "desligada"
+        envio = "auto-send" if ag.get("auto_send") else "revisão manual"
+        print(f"Agenda    : {ag.get('send_time') or '--:--'} · {dias or 'sem dias'} · "
+              f"{estado_ag} · {envio}")
+        if ag.get("last_run_date"):
+            print(f"            última rodada: {ag['last_run_date']}")
+
+    mem = r.get("memoria") or {}
+    eds = r.get("edicoes") or {}
+    print(f"Memória   : {mem.get('links', 0)} link(s) de {mem.get('edicoes', 0)} edição(ões)")
+    print(f"Edições   : {eds.get('total', 0)} no total · "
+          f"R$ {eds.get('custo_brl_ultimas', 0):.2f} nas últimas {len(eds.get('ultimas') or [])}")
+    for e in (eds.get("ultimas") or []):
+        print(f"            {STAGE_GLYPH.get(e['stage'], e['stage'])} {e['edition']:28} "
+              f"{e.get('subject', '')[:44]}")
+    print(f"\nPróxima edição desta campanha: {r.get('edicao_referencia')}")
+
+
 def monta_parser():
     """Fora do main() para o teste conseguir perguntar qual função cada subcomando chama.
     Com a árvore montada dentro do main(), a única forma de checar a fiação era rodar o
@@ -954,7 +1155,9 @@ def monta_parser():
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     sub.add_parser("queue").set_defaults(fn=cmd_queue)
-    sub.add_parser("metrics").set_defaults(fn=cmd_metrics)
+    met = sub.add_parser("metrics")
+    met.add_argument("--campanha", default=None, help="só as edições desta campanha")
+    met.set_defaults(fn=cmd_metrics)
     sub.add_parser("sync").set_defaults(fn=cmd_sync)
     r = sub.add_parser("run"); r.add_argument("--edition", required=True); r.add_argument("--stage")
     r.set_defaults(fn=cmd_run)
@@ -1021,6 +1224,63 @@ def monta_parser():
     # `--campanha` é sempre opcional (menos em criar/remover, que nomeiam a campanha): sem
     # ele o broker resolve a padrão. Exigir o slug todo dia só faria o operador digitar
     # "daily-drops" em toda linha para não mudar nada.
+    # ------------------------------------------------------------ grupo `campanha`
+    _AJ_CAMP = "slug da campanha (omitido: a padrão)"
+    cmp_ = sub.add_parser("campanha", help="a campanha e os cinco eixos de config dela")
+    cmpsub = cmp_.add_subparsers(dest="campanha_cmd", required=True)
+    cmpsub.add_parser("list").set_defaults(fn=cmd_curadoria_list)
+    mcr = cmpsub.add_parser("criar")
+    mcr.add_argument("--campanha", required=True, help="slug: minúsculas, números e hífen")
+    mcr.add_argument("--nome", default=None, help="nome legível, ex: \"WooW! Beauty\"")
+    mcr.add_argument("--copiar-de", default=None,
+                     help="copia a regra de outra campanha (sem bloqueios nem liberações)")
+    mcr.set_defaults(fn=cmd_curadoria_criar)
+    mst = cmpsub.add_parser("status", help="o raio-X: config, agenda, memória e edições")
+    mst.add_argument("--campanha", default=None, help=_AJ_CAMP)
+    mst.set_defaults(fn=cmd_campanha_status)
+    mfo = cmpsub.add_parser("fontes", help="quais fontes esta campanha pesquisa")
+    mfo.add_argument("--campanha", default=None, help=_AJ_CAMP)
+    mfo.add_argument("--usar", default=None, help="nomes separados por vírgula")
+    mfo.add_argument("--todas", action="store_true", help="volta a pesquisar em tudo")
+    mfo.set_defaults(fn=cmd_campanha_fontes)
+    men = cmpsub.add_parser("entrega", help="lista e remetente desta campanha")
+    men.add_argument("--campanha", default=None, help=_AJ_CAMP)
+    men.add_argument("--list-key", default=None, help="vazio LIMPA e volta a herdar o global")
+    men.add_argument("--list-name", default=None)
+    men.add_argument("--from-email", default=None)
+    men.add_argument("--from-name", default=None)
+    men.set_defaults(fn=cmd_campanha_entrega)
+    mfm = cmpsub.add_parser("formato", help="qual par prompt+template esta campanha usa")
+    mfm.add_argument("--campanha", default=None, help=_AJ_CAMP)
+    mfm.add_argument("--formato", default=None, help="vazio volta ao formato de fábrica")
+    mfm.set_defaults(fn=cmd_campanha_formato)
+    mag = cmpsub.add_parser("agenda", help="horário, dias e liga/desliga, numa tacada")
+    mag.add_argument("--campanha", default=None, help=_AJ_CAMP)
+    mag.add_argument("--time", default=None, help="HH:MM em BRT (ex.: 09:00)")
+    mag.add_argument("--days", default=None, help="diario | util | seg,ter,qua,qui,sex")
+    mag.add_argument("--until", default=None, help="YYYY-MM-DD (janela opcional; vazio limpa)")
+    mag.add_argument("--on", action="store_true"); mag.add_argument("--off", action="store_true")
+    mag.set_defaults(fn=cmd_campanha_agenda)
+    for _op, _fn in (("ativar", cmd_campanha_ativar), ("desativar", cmd_campanha_desativar)):
+        _p = cmpsub.add_parser(_op)
+        _p.add_argument("--campanha", required=True)
+        _p.set_defaults(fn=_fn)
+    for _op, _fn in (("bloquear", cmd_curadoria_bloquear), ("liberar", cmd_curadoria_liberar)):
+        _p = cmpsub.add_parser(_op)
+        _p.add_argument("--link", required=True)
+        _p.add_argument("--campanha", default=None, help=_AJ_CAMP)
+        if _op == "bloquear":
+            _p.add_argument("--motivo", default=None)
+        _p.set_defaults(fn=_fn)
+    mse = cmpsub.add_parser("set", help="janela e camada de título")
+    mse.add_argument("--campanha", default=None, help=_AJ_CAMP)
+    mse.add_argument("--janela", type=int, default=None)
+    mse.add_argument("--titulo", choices=["relatorio", "on", "off"], default=None)
+    mse.set_defaults(fn=cmd_curadoria_set)
+    mrm = cmpsub.add_parser("remover")
+    mrm.add_argument("--campanha", required=True)
+    mrm.set_defaults(fn=cmd_curadoria_remover)
+
     cur = sub.add_parser("curadoria")
     cursub = cur.add_subparsers(dest="curadoria_cmd", required=True)
     cursub.add_parser("list").set_defaults(fn=cmd_curadoria_list)
@@ -1055,6 +1315,10 @@ def monta_parser():
     crm.add_argument("--campanha", required=True)
     crm.set_defaults(fn=cmd_curadoria_remover)
     cursub.add_parser("rebuild").set_defaults(fn=cmd_curadoria_rebuild)
+    # Marca o grupo inteiro de uma vez, em vez de repetir a flag em doze parsers: acrescentar
+    # um subcomando ao grupo antigo depois disto já nasce avisando.
+    for _p in cursub.choices.values():
+        _p.set_defaults(_grupo_antigo=True)
     # A agenda passou a ser POR CAMPANHA (`schedules/<campanha>.json`). `--campanha` é
     # opcional em todos, no padrão do grupo `sources`/`curadoria`: omitido, a padrão, e a
     # tela diz em qual campanha gravou.
@@ -1083,6 +1347,7 @@ def monta_parser():
 
 def main():
     args = monta_parser().parse_args()
+    _avisa_nome_novo(args)
     try:
         args.fn(args)
     except bc.BrokerError as e:

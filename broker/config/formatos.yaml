@@ -1,0 +1,34 @@
+# Formatos editoriais — o par prompt + template + campos que definem COMO uma campanha
+# escreve. Versionado de propósito (decisão 7 do plano da v1.8.0).
+#
+# Criar formato novo é PR de dev, com CI e revisão, porque é código com marca dentro: o
+# `write.md` tem 18 KB de instrução editorial e o template tem 324 linhas de HTML com o nome
+# e a assinatura de uma pessoa real. O operador ESCOLHE entre os que existem aqui
+# (`woow campanha formato --campanha X --formato <nome>`); não edita prompt nem HTML pela
+# CLI. Para o caso pontual de trocar o HTML de UMA edição já existe o `set-html`.
+#
+# Campos:
+#   prompt_write         arquivo em config/prompts/ que redige a edição (Escritor)
+#   template             arquivo em templates/ que vira o HTML do e-mail
+#   campos_obrigatorios  o que o JSON gerado precisa ter, ou o generate recusa a edição
+#   descricao            o que uma pessoa lê para escolher
+#
+# Ausente ou ilegível, o pipeline roda com os valores de hoje (que são os do `daily-drops`
+# abaixo). O default É o comportamento atual, e é ele que a suíte antiga prende.
+
+formatos:
+  daily-drops:
+    descricao: >-
+      WooW! Daily Drops: 1 manchete + 2 secundárias + 2 sinais, com imagem de manchete
+      gerada e assinatura do Ian. É o formato que existia antes de haver formato.
+    prompt_write: write.md
+    template: woow-daily-drops.html.j2
+    # Os quatro que o `validate` do generate_content.py exige hoje. A docstring do topo
+    # daquele arquivo fala em "schema fixo de 8 campos", que é o schema que o PROMPT pede;
+    # obrigatórios, medidos no código, são estes quatro. Os 5 blocos de notícia têm guarda
+    # própria (BLOCK_FIELDS + MIN_BLOCOS) e não entram aqui.
+    campos_obrigatorios:
+      - cabecalho
+      - titulo_edicao
+      - sumario
+      - manchete

@@ -128,8 +128,11 @@ o histórico guarda as versões anteriores para o painel listar. Cortado nas úl
   "sender_set_by": "joao@metakosmos.com.br", "sender_set_at": "2026-07-01T10:00:00-03:00"
 }
 ```
-Lista-alvo do envio diário (`active_list_*`, editado por `set-list`) e remetente ativo global
-(`active_from_*`, editado por `set-sender`). Ambos têm precedência sobre `newsletter.yaml`.
+Lista-alvo e remetente **globais**. Desde a **v1.8.0** este arquivo é só LEITURA: `set-list` e
+`set-sender` passaram a gravar no bloco `entrega` da campanha, e o global virou o terceiro
+dos quatro níveis de precedência (abaixo da campanha, acima do `newsletter.yaml`). Com duas
+campanhas, um alvo global é o alvo errado para pelo menos uma delas. O que já está gravado
+aqui continua valendo para toda campanha que não definir o seu.
 
 ## schedules/<campanha>.json (no GCS) — agendamento, um por campanha
 ```json
@@ -232,12 +235,19 @@ lista**. Guardar o resultado dentro do `sources.json` fazia o primeiro teste con
                       "em": "2026-09-08T10:00:00-03:00", "motivo": "matéria paga"}],
       "liberados": [{"link": "https://...", "por": "patrick@metakosmos.com.br",
                      "em": "2026-09-08T10:00:00-03:00"}],
+      "ativa": true,
+      "fontes": {"modo": "todas", "nomes": []},
+      "entrega": {"list_key": "3z...", "list_name": "Beleza mK",
+                  "from_email": "patrick@metakosmos.com.br", "from_name": "WooW! Beauty"},
+      "formato": "daily-drops",
+      "perfil": {"research.days_lookback": 7},
       "set_by": "patrick@metakosmos.com.br", "set_at": "2026-09-08T10:00:00-03:00"
     }
   }
 }
 ```
-Editado por `curadoria criar|set|bloquear|liberar|remover`, sem redeploy — mesmo padrão do
+Editado por `campanha criar|set|fontes|entrega|formato|ativar|desativar|bloquear|liberar|remover`
+(`curadoria ...` é alias), sem redeploy — mesmo padrão do
 `sources.json`. É a metade **editada** da curadoria; a metade **derivada** é o
 `publicados/<campanha>.json` abaixo. Ficam separadas pelo mesmo motivo que `sources.json` e
 `sources-tests.json` ficam: gravar derivado junto de editado congela a fonte na primeira
@@ -257,7 +267,46 @@ escrita.
 - O mesmo link nunca fica nas duas listas: entrar numa remove da outra, senão o resultado
   dependeria da ordem de aplicação.
 - A campanha padrão nasce sozinha na primeira leitura (não existe estado "sem regra" para o
-  resto do código adivinhar) e **não pode ser removida**.
+  resto do código adivinhar) e **não pode ser removida nem desativada**.
+
+Os cinco campos abaixo entraram na **v1.8.0**. Campanha gravada pela v1.7.0 não tem nenhum
+deles, e o que a ausência significa é decidido em um acessor por campo, nunca no chamador:
+
+- `ativa` (**ausente = `true`**): campanha desativada sai do tick e recusa edição nova,
+  preservando memória e histórico. É o caminho normal para "esta newsletter parou";
+  `remover` só aceita campanha **sem nenhuma edição gravada**.
+- `fontes` (**ausente = `{"modo": "todas"}`**): `todas` pesquisa em todo o cadastro ativo;
+  `lista` recorta pelos `nomes`, que são gravados na grafia **canônica do cadastro**. A
+  seleção é validada na gravação: nome que não existe é recusado nomeando o nome, e seleção
+  que resolve para zero fonte ativa é recusada. Ao vivo ela **não** cai para "todas": fonte
+  que sai do cadastro depois some da seleção e vira aviso no `campanha status`.
+- `entrega` (**ausente = `{}`**): só os quatro campos, e **campo vazio é ausência** — é assim
+  que o operador volta a herdar o global. Precedência do envio, do mais específico ao mais
+  geral: **edição (`st.list_key`) → campanha → `settings.json` → `newsletter.yaml`**. Chave e
+  nome de lista são resolvidos como PAR, senão a campanha definiria o nome e o `settings`
+  seguiria mandando a chave, que é quem manda no envio.
+- `formato` (**ausente = `daily-drops`**): nome de uma entrada de `broker/config/formatos.yaml`.
+- `perfil` (**ausente = `{}`**): chaves pontilhadas mescladas no `newsletter.yaml` do workdir,
+  contra a lista FECHADA `formato`, `research.days_lookback`, `research.max_per_source`,
+  `gemini.pool_to_writer`. Chave fora da lista é ignorada com aviso — inclusive na forma
+  aninhada. Segredo, endpoint, modelos e o bloco `delivery` **nunca** passam por aqui.
+
+## config/formatos.yaml (versionado no container) — os formatos editoriais
+```yaml
+formatos:
+  daily-drops:
+    descricao: "..."
+    prompt_write: write.md
+    template: woow-daily-drops.html.j2
+    campos_obrigatorios: [cabecalho, titulo_edicao, sumario, manchete]
+```
+O par prompt + template mais a lista de campos que o `validate` do `generate_content.py`
+exige. **Não é config de operador**: criar um formato novo é PR de dev, com CI e revisão,
+porque são 18 KB de instrução editorial e 324 linhas de HTML com marca dentro. O operador
+escolhe entre os que existem (`campanha formato --formato <nome>`).
+
+Arquivo ausente, ilegível ou nome que não está no catálogo caem no formato de hoje, nos dois
+scripts do pipeline. O default É o comportamento de antes da v1.8.0.
 
 ## publicados/<campanha>.json (no GCS) — a memória do que já saiu
 ```json

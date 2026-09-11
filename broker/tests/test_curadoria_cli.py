@@ -91,8 +91,8 @@ SOURCES = {"source": "state", "campanha": "daily-drops", "edicao_referencia": "2
 @pytest.fixture
 def broker(monkeypatch):
     b = BrokerFalso()
-    b.respostas["/curadoria"] = CURADORIA
-    b.respostas["/curadoria/set"] = {"op": "?", "campanha": "daily-drops",
+    b.respostas["/campanhas"] = CURADORIA
+    b.respostas["/campanhas/set"] = {"op": "?", "campanha": "daily-drops",
                                      "default": "daily-drops", "campanhas": CURADORIA["campanhas"]}
     b.respostas["/publicados"] = PUBLICADOS
     b.respostas["/queue"] = QUEUE
@@ -151,7 +151,7 @@ def test_cada_subcomando_de_curadoria_tem_funcao(monkeypatch):
 
 def test_list_le_curadoria_e_marca_a_padrao(broker):
     saida = _roda(woow.cmd_curadoria_list)
-    assert broker.rotas() == [("GET", "/curadoria")]
+    assert broker.rotas() == [("GET", "/campanhas")]
     assert "★ daily-drops" in saida and "woow-beauty" in saida
     assert "janela 14 dia(s)" in saida and "janela 7 dia(s)" in saida
     assert "128 link(s) em 35 edição(ões)" in saida
@@ -161,15 +161,15 @@ def test_list_le_curadoria_e_marca_a_padrao(broker):
 def test_criar_manda_slug_nome_e_copiar_de(broker):
     _roda(woow.cmd_curadoria_criar, campanha="woow-beauty", nome="WooW! Beauty",
           copiar_de="daily-drops")
-    assert broker.rotas() == [("POST", "/curadoria/set")]
-    assert broker.payload("/curadoria/set") == {
+    assert broker.rotas() == [("POST", "/campanhas/set")]
+    assert broker.payload("/campanhas/set") == {
         "op": "criar", "campanha": "woow-beauty", "nome": "WooW! Beauty",
         "copiar_de": "daily-drops"}
 
 
 def test_criar_sem_nome_e_sem_copia_nao_manda_os_campos(broker):
     _roda(woow.cmd_curadoria_criar, campanha="woow-beauty", nome=None, copiar_de=None)
-    assert broker.payload("/curadoria/set") == {"op": "criar", "campanha": "woow-beauty"}
+    assert broker.payload("/campanhas/set") == {"op": "criar", "campanha": "woow-beauty"}
 
 
 # ------------------------------------------------- --campanha omitido não vira campo vazio
@@ -177,7 +177,7 @@ def test_set_sem_campanha_nao_manda_o_campo(broker):
     """Campo ausente é o que faz o broker resolver a padrão. Mandar `campanha: null` cairia
     na validação de slug, e mandar "" seria uma campanha inexistente."""
     _roda(woow.cmd_curadoria_set, campanha=None, janela=7, titulo=None)
-    payload = broker.payload("/curadoria/set")
+    payload = broker.payload("/campanhas/set")
     assert payload == {"op": "janela", "janela_dias": 7}
     assert "campanha" not in payload
 
@@ -185,7 +185,7 @@ def test_set_sem_campanha_nao_manda_o_campo(broker):
 def test_set_com_campanha_manda_o_slug(broker):
     """Controle positivo do teste acima: o campo tem de continuar chegando quando existe."""
     _roda(woow.cmd_curadoria_set, campanha="woow-beauty", janela=7, titulo=None)
-    assert broker.payload("/curadoria/set") == {
+    assert broker.payload("/campanhas/set") == {
         "op": "janela", "campanha": "woow-beauty", "janela_dias": 7}
 
 
@@ -201,7 +201,7 @@ def test_historico_com_dias_manda_a_query(broker):
 
 def test_set_titulo_usa_a_op_titulo(broker):
     _roda(woow.cmd_curadoria_set, campanha=None, janela=None, titulo="on")
-    assert broker.payload("/curadoria/set") == {"op": "titulo", "titulo_modo": "on"}
+    assert broker.payload("/campanhas/set") == {"op": "titulo", "titulo_modo": "on"}
 
 
 def test_set_sem_nada_para_mudar_recusa(broker):
@@ -221,7 +221,7 @@ def test_janela_zero_avisa_em_destaque_e_pede_confirmacao(broker, diz_nao):
 
 def test_janela_zero_confirmada_grava(broker, diz_sim):
     _roda(woow.cmd_curadoria_set, campanha=None, janela=0, titulo=None)
-    assert broker.payload("/curadoria/set") == {"op": "janela", "janela_dias": 0}
+    assert broker.payload("/campanhas/set") == {"op": "janela", "janela_dias": 0}
 
 
 def test_janela_maior_que_zero_nao_pergunta_nada(broker, monkeypatch):
@@ -251,12 +251,12 @@ def test_bloquear_mostra_o_estado_atual_e_manda_link_e_motivo(broker, diz_sim):
                   link="https://glossy.co/a", motivo="matéria paga")
     assert "sem marca manual" in saida  # estado atual, antes de confirmar
     assert "https://glossy.co/a" in saida
-    assert broker.payload("/curadoria/set") == {
+    assert broker.payload("/campanhas/set") == {
         "op": "bloquear", "link": "https://glossy.co/a", "motivo": "matéria paga"}
 
 
 def test_bloquear_mostra_que_o_link_ja_estava_bloqueado(broker, diz_sim):
-    broker.respostas["/curadoria"] = {
+    broker.respostas["/campanhas"] = {
         "default": "daily-drops",
         "campanhas": {"daily-drops": _campanha(
             "WooW! Daily Drops",
@@ -269,7 +269,7 @@ def test_bloquear_mostra_que_o_link_ja_estava_bloqueado(broker, diz_sim):
 
 def test_liberar_confirmado_usa_a_op_liberar(broker, diz_sim):
     _roda(woow.cmd_curadoria_liberar, campanha=None, link="https://glossy.co/a")
-    assert broker.payload("/curadoria/set") == {"op": "liberar", "link": "https://glossy.co/a"}
+    assert broker.payload("/campanhas/set") == {"op": "liberar", "link": "https://glossy.co/a"}
 
 
 def test_remover_recusa_a_campanha_padrao_sem_chamar_o_broker(broker, diz_sim):
@@ -297,7 +297,7 @@ def test_status_renderiza_a_regra_e_os_barrados(broker):
 
 
 def test_status_com_janela_zero_diz_que_nada_e_barrado(broker):
-    broker.respostas["/curadoria"] = {
+    broker.respostas["/campanhas"] = {
         "default": "daily-drops",
         "campanhas": {"daily-drops": _campanha("WooW! Daily Drops", janela=0)}}
     saida = _roda(woow.cmd_curadoria_status, campanha=None)
@@ -316,7 +316,7 @@ def test_status_sem_barrado_nao_pede_a_quebra_por_fonte(broker):
 
 
 def test_status_mostra_o_bloqueio_manual(broker):
-    broker.respostas["/curadoria"] = {
+    broker.respostas["/campanhas"] = {
         "default": "daily-drops",
         "campanhas": {"daily-drops": _campanha(
             "WooW! Daily Drops",
@@ -383,8 +383,15 @@ def test_gaveta_mostra_barrados_e_a_campanha_nao_padrao(broker):
     ]}
     saida = _roda(woow.cmd_status)
     assert "3 barrado(s) por repetição" in saida
-    assert "campanha woow-beauty" in saida
-    assert "campanha daily-drops" not in saida  # a padrão não polui a linha
+    # Desde a v1.8.0 a campanha é CABEÇALHO de grupo, não sufixo de linha: numa lista só,
+    # ordenada pelo id, a edição de campanha nova cai depois de todas as datas nuas
+    # (`'w' > '2'` em ASCII) e o operador lê a fila da diária inteira antes de achar a dele.
+    assert "woow-beauty — Gaveta" in saida
+    assert "WooW! Daily Drops — Gaveta" in saida
+    assert "campanha woow-beauty" not in saida  # não sobrou o sufixo antigo
+    # e cada edição ficou embaixo do cabeçalho certo
+    corpo_beauty = saida.split("woow-beauty — Gaveta")[1]
+    assert "2026-09-09" in corpo_beauty and "2026-09-08" not in corpo_beauty
 
 
 # `titulo`/`fonte` é o formato canônico, o que o `build_health` do research grava. Os dois

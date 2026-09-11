@@ -20,8 +20,19 @@ def _now_brt():
     return datetime.now(BRT).isoformat(timespec="seconds")
 
 
-def campanha_da_edicao(st):
+def campanha_da_edicao(st, edition=None):
     """Campanha de um state, com a retrocompat em UM lugar só.
+
+    Com `edition`, o ID é consultado quando o STATE ESTÁ CALADO. Silêncio do state não é
+    declaração da padrão: `admin/reset` deixa `{"edition": ..., "stage": "empty"}`, sem o
+    campo, e sem esta consulta a edição `woow-beauty--2026-09-15` passava a ser contada como
+    da diária — medido em produção em 10/09/2026, na tela do `campanha status`. O estrago
+    passa da tela: `_rebuild_publicados_com_status` indexaria os links dela na memória da
+    campanha errada, barrando a pauta de quem nunca publicou aquilo.
+
+    Isto NÃO contradiz a decisão 3 (o campo do state é a autoridade). Contradição é o state
+    dizer uma coisa e o id outra, e aí o campo continua ganhando: o id só fala quando não há
+    ninguém do outro lado falando.
 
     Edição anterior à trava de repetição não tem o campo `campanha` (mesmo caso do `type`
     ausente, que se lê como news_auto). Três chamadores decidindo isso por conta é onde uma
@@ -35,6 +46,10 @@ def campanha_da_edicao(st):
     cai na campanha padrão e denuncia no log, em vez de virar caminho de arquivo."""
     bruto = st.get("campanha")
     if not bruto:
+        if edition:
+            do_id, _data = split_edition_id(edition)
+            if do_id:
+                return do_id
         return CAMPANHA_PADRAO
     if not isinstance(bruto, str) or not _SLUG_RE.fullmatch(bruto):
         print(f"[publicados] campanha inválida no state ({bruto!r}); lendo como "
@@ -258,7 +273,7 @@ class StateManager:
             rows.append({
                 "edition": ed,
                 "type": st.get("type", "news_auto"),  # campo, não estágio: edições legadas = news_auto
-                "campanha": campanha_da_edicao(st),
+                "campanha": campanha_da_edicao(st, ed),
                 # `date` SEMPRE preenchido quando o id o carrega: é o que um consumidor da
                 # fila precisa para não ter de parsear o id por conta. O "" continua sendo a
                 # resposta para chave legada sem data (`2026-wNN`, `webinar-*`).
@@ -300,7 +315,7 @@ class StateManager:
             st = self.get_state(ed)
             if st.get("stage") != "sent":
                 continue
-            por_campanha.setdefault(campanha_da_edicao(st), []).append((ed, st))
+            por_campanha.setdefault(campanha_da_edicao(st, ed), []).append((ed, st))
 
         docs = {}
         for campanha, edicoes in por_campanha.items():
