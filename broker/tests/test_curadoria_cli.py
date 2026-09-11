@@ -214,7 +214,10 @@ def test_set_sem_nada_para_mudar_recusa(broker):
 def test_janela_zero_avisa_em_destaque_e_pede_confirmacao(broker, diz_nao):
     saida = _roda(woow.cmd_curadoria_set, campanha=None, janela=0, titulo=None)
     assert "DESLIGA A TRAVA DE REPETIÇÃO" in saida
-    assert "39 links repetidos em 35" in saida
+    # Prende o número MEDIDO, e é o único lado que o CI enxerga: a mesma frase na
+    # SKILL.md não tem teste. Medido em 10/09/2026 contra o bucket público, e
+    # reconfirmado em 11/09: 36 edições, 40 links, 51 pares.
+    assert "40 links repetidos em 36" in saida
     assert "Cancelado." in saida
     assert broker.escritas() == []
 

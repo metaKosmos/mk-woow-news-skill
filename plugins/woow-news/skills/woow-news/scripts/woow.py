@@ -727,8 +727,12 @@ def cmd_curadoria_set(a):
         # então é a única que pede confirmação.
         print("\n⚠ JANELA 0 DESLIGA A TRAVA DE REPETIÇÃO NESTA CAMPANHA.")
         print("  Matéria já enviada volta a poder sair de novo, inclusive no dia seguinte.")
-        print("  Foi essa a situação medida antes da trava: 39 links repetidos em 35")
-        print("  edições, todos com 1 ou 2 dias de intervalo.")
+        # O número vive em DOIS lugares que o CI trata de forma diferente: aqui e na
+        # SKILL.md. Só este é preso por teste (test_curadoria_cli.py), então mudar a
+        # SKILL.md sozinha deixa os dois divergentes e o CI passa verde, e foi exatamente
+        # o que aconteceu na v1.8.0 (issue #18). Ao atualizar, mude os três juntos.
+        print("  Foi essa a situação medida antes da trava: 40 links repetidos em 36")
+        print("  edições, em 51 pares, quase todos com 1 ou 2 dias de intervalo.")
         print("  Bloqueio manual continua valendo; a memória, não.")
         if not _confirma("\nDesligar a trava de repetição desta campanha? [s/N] "):
             print("Cancelado."); return
