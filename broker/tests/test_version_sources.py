@@ -73,3 +73,49 @@ def test_bump_recusa_regressao(tmp_path):
     assert _versao_da_arvore() == "1.0.0"
     assert _bump("1.6.0").returncode == 0
     assert _versao_da_arvore() == "1.6.0"
+
+
+# --------------------------------------------------------------------- carimbo do commit
+# A versão sozinha não identifica o código. Entre o bump da v1.8.0 (7a78895) e a ponta
+# publicada (a50de1e) entraram seis commits, três deles mexendo em produção, e todos
+# respondem "1.8.0" no /version. O DEPLOY.md já avisa do caso pior, no rollback: a env var
+# é da revisão, então voltar o tráfego deixa a versão certa apontando para outro código.
+import sys  # noqa: E402
+
+sys.path.insert(0, str(REPO / "broker"))
+import main  # noqa: E402
+
+
+def test_version_body_leva_o_commit_quando_o_deploy_injeta():
+    assert main.version_body("1.8.0", "a50de1e") == {"version": "1.8.0", "commit": "a50de1e"}
+
+
+def test_version_body_omite_o_commit_quando_ele_nao_veio():
+    """O vizinho que continua passando. Deploy anterior a esta mudança e execução local não
+    têm SKILL_COMMIT, e /version é rota pública que o CI consulta: ela não pode quebrar.
+    Campo ausente diz "não sei qual commit"; valor fixo ou inventado mentiria."""
+    assert main.version_body("1.8.0") == {"version": "1.8.0"}
+    assert main.version_body("1.8.0", "") == {"version": "1.8.0"}
+    assert main.version_body("1.8.0", "   ") == {"version": "1.8.0"}
+
+
+def test_deploy_passa_o_commit_por_variavel_e_nunca_cravado():
+    """Mesmo cuidado que o SKILL_VERSION tem desde a MAR-427, e pelo mesmo motivo: SHA
+    cravado no script mente em silêncio, apontando para um commit que não é o deployado."""
+    for rel in ("broker/provision.sh", "broker/DEPLOY.md"):
+        texto = (REPO / rel).read_text(encoding="utf-8")
+        cravados = re.findall(r"SKILL_COMMIT=[0-9a-f]{7,}", texto)
+        assert not cravados, f"{rel} tem commit cravado: {cravados}"
+        assert "SKILL_COMMIT=$" in texto, f"{rel} não passa SKILL_COMMIT por variável"
+
+
+def test_o_despacho_do_version_chama_o_version_body():
+    """O ponto de produção. As três asserções acima passam com o despacho montando o dict
+    na mão, e a suíte não veria: o handler mora dentro de _handlers(), que importa
+    functions_framework e não roda no CI. Por isso a checagem é sobre a fonte."""
+    fonte = (REPO / "broker/main.py").read_text(encoding="utf-8")
+    trecho = re.search(r'if path == "/version" and method == "GET":\n([^\n]+)', fonte)
+    assert trecho, "o despacho de /version mudou de forma; reveja este teste"
+    assert "version_body(" in trecho.group(1), (
+        "o despacho de /version não chama version_body, então o commit não sairia na "
+        f"resposta real. Linha: {trecho.group(1).strip()!r}")

@@ -4,7 +4,8 @@ Valida login Google mK (ID token), aplica papéis (admin/operador), lê segredos
 Secret Manager e orquestra os passos do pipeline server-side. Nenhum segredo sai do GCP.
 
 Rotas:
-  GET  /version       público — versão publicada (checagem de versão da skill)
+  GET  /version       público — versão publicada, e o commit deployado quando o
+                      deploy o injetou (checagem de versão da skill)
   GET  /oauth-config  público — client_id/secret de Desktop (molde blog-mk)
   GET  /sync          operador OU token de cron — espelha estado -> Firebase
   POST /cron/tick     token de cron (OU operador) — roda o agendamento se for a hora
@@ -84,6 +85,21 @@ def with_notice(body, status, client_version, published_version, notice_fn):
         return body
 
 
+def version_body(skill_version, skill_commit=""):
+    """Corpo do /version. Fora do handler para ser testável sem functions_framework.
+
+    O commit entra só quando o deploy o injetou: campo ausente diz "não sei qual commit",
+    enquanto um valor fixo mentiria. A versão sozinha não identifica o código, porque
+    vários commits vivem sob o mesmo x.y.z, e o caso pior é o rollback: a env var pertence
+    à revisão, então voltar o tráfego deixa a versão certa apontando para outro código
+    (o DEPLOY.md já avisava disso no passo 3 do rollback, sem ter como provar)."""
+    body = {"version": skill_version}
+    commit = (skill_commit or "").strip()
+    if commit:
+        body["commit"] = commit
+    return body
+
+
 def _split_emails(raw):
     return {e.strip().lower() for e in re.split(r"[,;]", raw or "") if e.strip()}
 
@@ -112,6 +128,7 @@ def _handlers():
     OPERATORS = _split_emails(os.environ.get("OPERATOR_EMAILS", "")) | ADMINS
     CRON_TOKEN = os.environ.get("CRON_TOKEN", "")
     SKILL_VERSION = os.environ.get("SKILL_VERSION", "1.0.0")
+    SKILL_COMMIT = os.environ.get("SKILL_COMMIT", "")
     adapter = google_requests.Request()
 
     def j(body, status=200):
@@ -147,7 +164,7 @@ def _handlers():
             return j(with_notice(body, status, cli_ver, SKILL_VERSION, _notice), status)
 
         if path == "/version" and method == "GET":
-            return j({"version": SKILL_VERSION})
+            return j(version_body(SKILL_VERSION, SKILL_COMMIT))
         if path == "/oauth-config" and method == "GET":
             return j({"client_id": ALLOWED_AUDIENCE, "client_secret": OAUTH_CLIENT_SECRET})
 
