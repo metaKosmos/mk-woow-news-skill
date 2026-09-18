@@ -233,3 +233,20 @@ def test_nano_banana_nao_repete_403(monkeypatch, sem_espera):
     with pytest.raises(SystemExit):
         gi.gemini_image(CFG["endpoint"], "chave", "m", "prompt", "16:9")
     assert seq.chamadas == 1
+
+
+# ---------------------------------------------------------------- guarda do próprio teto
+
+def test_teto_permite_mais_de_uma_tentativa_e_os_dois_blocos_andam_juntos():
+    """Os testes acima se referem a `MAX_TENTATIVAS` em vez de um número cravado, para não
+    quebrarem quando o teto mudar de valor. O preço disso é que um teto reduzido a 1, que é
+    o retry DESLIGADO, passaria por `test_teto_de_tentativas_e_backoff_crescente` sem que
+    nada reclamasse: ele compara `seq.chamadas` com a própria constante mutada.
+
+    As outras asserções guardam o risco que a duplicação do bloco criou: os dois arquivos do
+    pipeline têm cópias independentes, e nada além disto impede que uma mude sem a outra.
+    """
+    assert gc.MAX_TENTATIVAS >= 2, "com teto 1 não existe retry"
+    assert gi.MAX_TENTATIVAS == gc.MAX_TENTATIVAS
+    assert gi.BACKOFF_BASE == gc.BACKOFF_BASE
+    assert gi.STATUS_TRANSITORIO == gc.STATUS_TRANSITORIO
