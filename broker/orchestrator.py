@@ -2348,8 +2348,13 @@ def run_daily(edition, auto_send=False):
     Gemini de texto mais o art-director e o Nano Banana: o retry do tick ficaria caro
     demais para ter teto útil, e a falha no `send` custaria a edição de novo.
 
-    O posto é lido UMA vez, antes de qualquer estágio: ler a cada passo faria o `research`
-    recém-concluído barrar o `generate` que ele mesmo destravou.
+    O posto é lido UMA vez, antes de qualquer estágio, porque a decisão do que rodar
+    pertence ao estado com que o tick ENTROU. Reler a cada passo daria o mesmo resultado
+    hoje, e isso foi medido: nenhum estágio salta o posto do seguinte, então o `researched`
+    recém-gravado continua abaixo do `ready` que o `generate` exige. A versão anterior deste
+    comentário afirmava que reler barraria o `generate`, e a prova por mutação derrubou a
+    afirmação. Ler uma vez segue sendo a escolha, por não amarrar a decisão à ordem em que
+    os estágios avançam o estado, mas é escolha de clareza e não de correção.
     """
     sm = _sm()
     stage_atual = sm.get_state(edition).get("stage", "empty")
