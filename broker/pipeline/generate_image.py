@@ -18,6 +18,7 @@ import base64
 import json
 import re
 import sys
+import time
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -59,6 +60,56 @@ def strip_html(raw: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw or "")).strip()
 
 
+# --------------------------------------------------------------------- retry (MAR-194)
+# Cópia do bloco de generate_content.py, e não um import: `_run_script` copia UM script por
+# vez para o workdir, então módulo compartilhado em pipeline/ não chega lá. `load_env` e
+# `BRT` já são duplicados pelo mesmo motivo. Cobrir só o texto deixaria metade do dia
+# desprotegida: uma instabilidade do Nano Banana derruba a edição igual.
+MAX_TENTATIVAS = 3
+BACKOFF_BASE = 2
+STATUS_TRANSITORIO = {408, 429, 500, 502, 503, 504}
+
+
+class _Transitorio(Exception):
+    """Falha que a chamada seguinte provavelmente não teria."""
+
+
+def _com_retry(descricao, tentativa_unica):
+    """Repete `tentativa_unica` enquanto ela levantar _Transitorio, com backoff crescente."""
+    ultimo = ""
+    for tentativa in range(1, MAX_TENTATIVAS + 1):
+        try:
+            return tentativa_unica()
+        except _Transitorio as e:
+            ultimo = str(e)
+            if tentativa == MAX_TENTATIVAS:
+                break
+            espera = BACKOFF_BASE ** tentativa
+            print(f"[retry {tentativa}/{MAX_TENTATIVAS}] {descricao}: {ultimo[:200]}. "
+                  f"Nova tentativa em {espera}s.", file=sys.stderr)
+            time.sleep(espera)
+    sys.exit(f"{descricao} falhou em {MAX_TENTATIVAS} tentativas: {ultimo[:500]}")
+
+
+def _payload_gemini(req, timeout, descricao):
+    """Faz a chamada e devolve o payload parseado. Levanta _Transitorio no que se repete,
+    sai na hora no que não se repete."""
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            bruto = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        msg = f"{descricao} HTTP {e.code}: {e.read().decode('utf-8')[:400]}"
+        if e.code in STATUS_TRANSITORIO:
+            raise _Transitorio(msg)
+        sys.exit(msg)
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+        raise _Transitorio(f"{descricao} sem resposta: {type(e).__name__}: {e}")
+    try:
+        return json.loads(bruto)
+    except json.JSONDecodeError:
+        raise _Transitorio(f"{descricao} devolveu corpo não-JSON: {bruto[:300]}")
+
+
 def gemini_text(endpoint, api_key, model, system_prompt, user_text):
     """Chamada de texto ao Gemini: devolve a string crua (o prompt de imagem)."""
     body = {
@@ -67,24 +118,27 @@ def gemini_text(endpoint, api_key, model, system_prompt, user_text):
         "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024,
                              "thinkingConfig": {"thinkingBudget": 0}},
     }
-    req = urllib.request.Request(
-        f"{endpoint}/{model}:generateContent",
-        data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        sys.exit(f"Art-director HTTP {e.code} ({model}): {e.read().decode('utf-8')[:400]}")
-    um = payload.get("usageMetadata", {})
-    USAGE["art_director"] = {"input": um.get("promptTokenCount", 0),
-                             "output": um.get("candidatesTokenCount", 0)}
-    try:
-        return payload["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except (KeyError, IndexError):
-        sys.exit(f"Art-director sem texto ({model}): {json.dumps(payload)[:400]}")
+    descricao = f"Art-director ({model})"
+    gasto = {"input": 0, "output": 0}
+
+    def _uma_tentativa():
+        req = urllib.request.Request(
+            f"{endpoint}/{model}:generateContent",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+            method="POST",
+        )
+        payload = _payload_gemini(req, 120, descricao)
+        um = payload.get("usageMetadata", {})
+        gasto["input"] += um.get("promptTokenCount", 0)
+        gasto["output"] += um.get("candidatesTokenCount", 0)
+        USAGE["art_director"] = dict(gasto)
+        try:
+            return payload["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except (KeyError, IndexError):
+            raise _Transitorio(f"{descricao} sem texto: {json.dumps(payload)[:400]}")
+
+    return _com_retry(descricao, _uma_tentativa)
 
 
 def gemini_image(endpoint, api_key, model, prompt, aspect):
@@ -94,27 +148,33 @@ def gemini_image(endpoint, api_key, model, prompt, aspect):
         "generationConfig": {"responseModalities": ["IMAGE"],
                             "imageConfig": {"aspectRatio": aspect}},
     }
-    req = urllib.request.Request(
-        f"{endpoint}/{model}:generateContent",
-        data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=240) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        sys.exit(f"Nano Banana HTTP {e.code} ({model}): {e.read().decode('utf-8')[:400]}")
-    um = payload.get("usageMetadata", {})
-    USAGE["image"] = {"input": um.get("promptTokenCount", 0),
-                      "output": um.get("candidatesTokenCount", 0)}
-    parts = payload.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-    img = next((p for p in parts if "inlineData" in p), None)
-    if not img:
-        reason = payload.get("candidates", [{}])[0].get("finishReason", "?")
-        sys.exit(f"Nano Banana não retornou imagem (finishReason={reason}): {json.dumps(payload)[:300]}")
-    data = base64.b64decode(img["inlineData"]["data"])
-    return data, img["inlineData"].get("mimeType", "image/png")
+    descricao = f"Nano Banana ({model})"
+    gasto = {"input": 0, "output": 0}
+
+    def _uma_tentativa():
+        req = urllib.request.Request(
+            f"{endpoint}/{model}:generateContent",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+            method="POST",
+        )
+        payload = _payload_gemini(req, 240, descricao)
+        um = payload.get("usageMetadata", {})
+        gasto["input"] += um.get("promptTokenCount", 0)
+        gasto["output"] += um.get("candidatesTokenCount", 0)
+        USAGE["image"] = dict(gasto)
+        parts = payload.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        img = next((p for p in parts if "inlineData" in p), None)
+        if not img:
+            # finishReason sem imagem (RECITATION, SAFETY) é intermitente do mesmo jeito
+            # que o texto malformado: a mesma chamada de novo costuma passar.
+            reason = payload.get("candidates", [{}])[0].get("finishReason", "?")
+            raise _Transitorio(f"{descricao} não devolveu imagem (finishReason={reason}): "
+                               f"{json.dumps(payload)[:300]}")
+        data = base64.b64decode(img["inlineData"]["data"])
+        return data, img["inlineData"].get("mimeType", "image/png")
+
+    return _com_retry(descricao, _uma_tentativa)
 
 
 def main():

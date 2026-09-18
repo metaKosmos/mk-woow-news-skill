@@ -21,8 +21,9 @@ import yaml
 # dois arquivos, e o aperto da v1.8.0 (fullmatch, sem hífen final) precisava ser aplicado nas
 # duas para valer. A camada de baixo não importa esta, então a direção da dependência segue
 # a mesma.
-from state_manager import (StateManager, GcsStore, BRT, CAMPANHA_PADRAO, campanha_da_edicao,
-                           data_da_edicao, edition_id, split_edition_id, _SLUG_RE)
+from state_manager import (StateManager, GcsStore, BRT, CAMPANHA_PADRAO, STAGE_RANK,
+                           campanha_da_edicao, data_da_edicao, edition_id, split_edition_id,
+                           _SLUG_RE)
 from cost_tracker import compute_cost
 import zma_metrics
 import secrets_store
@@ -2339,12 +2340,31 @@ def _should_run_now(sched, now_brt, edition_stage):
 
 def run_daily(edition, auto_send=False):
     """Pipeline do dia: research -> generate -> (send se auto_send). Reaproveita run_stage;
-    a monotonia de stage no StateManager evita rebaixar/duplicar. Pula se já enviada."""
+    a monotonia de stage no StateManager evita rebaixar/duplicar. Pula se já enviada.
+
+    Estágio cujo posto o estado já alcançou não roda de novo (MAR-194). O `STAGE_RANK` já
+    governava a monotonia da escrita; aqui ele passa a governar também o que executar. Sem
+    isto, uma segunda tentativa refaria o `generate` inteiro, que são três chamadas ao
+    Gemini de texto mais o art-director e o Nano Banana: o retry do tick ficaria caro
+    demais para ter teto útil, e a falha no `send` custaria a edição de novo.
+
+    O posto é lido UMA vez, antes de qualquer estágio, porque a decisão do que rodar
+    pertence ao estado com que o tick ENTROU. Reler a cada passo daria o mesmo resultado
+    hoje, e isso foi medido: nenhum estágio salta o posto do seguinte, então o `researched`
+    recém-gravado continua abaixo do `ready` que o `generate` exige. A versão anterior deste
+    comentário afirmava que reler barraria o `generate`, e a prova por mutação derrubou a
+    afirmação. Ler uma vez segue sendo a escolha, por não amarrar a decisão à ordem em que
+    os estágios avançam o estado, mas é escolha de clareza e não de correção.
+    """
     sm = _sm()
-    if sm.get_state(edition).get("stage") == "sent":
+    stage_atual = sm.get_state(edition).get("stage", "empty")
+    if stage_atual == "sent":
         return {"skipped": "já enviada", "edition": edition, "stage": "sent"}
-    run_stage(edition, "research", {})
-    run_stage(edition, "generate", {})
+    posto = STAGE_RANK.get(stage_atual, 0)
+    if posto < STAGE_RANK["researched"]:
+        run_stage(edition, "research", {})
+    if posto < STAGE_RANK["ready"]:
+        run_stage(edition, "generate", {})
     if auto_send:
         run_stage(edition, "send", {})
     return {"edition": edition, "auto_send": bool(auto_send),
