@@ -24,6 +24,7 @@ import html
 import json
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -162,6 +163,68 @@ def strip_html(raw: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw or "")).strip()
 
 
+# --------------------------------------------------------------------- retry (MAR-194)
+# O incidente de 2026-07-07 foi output malformado INTERMITENTE do Gemini: a chamada
+# seguinte teria funcionado, e não houve chamada seguinte. Por isso o que se repete não é
+# só falha de rede: um 200 cujo corpo não vira o que foi pedido é da mesma família.
+#
+# Este bloco é DUPLICADO em generate_image.py, como load_env e BRT já são. `_run_script`
+# copia UM script por vez para o workdir, então módulo compartilhado em pipeline/ não
+# chega lá. A alternativa era deixar a imagem sem proteção, e uma instabilidade do Nano
+# Banana derruba a edição igual à do Gemini de texto.
+MAX_TENTATIVAS = 3
+BACKOFF_BASE = 2
+# 408, 429 e a família 5xx passam sozinhos. 400/401/403/404 são defeito de quem chama
+# (prompt inválido, chave errada, modelo que não existe): repetir atrasa o erro e gasta cota.
+STATUS_TRANSITORIO = {408, 429, 500, 502, 503, 504}
+
+
+class _Transitorio(Exception):
+    """Falha que a chamada seguinte provavelmente não teria."""
+
+
+def _com_retry(descricao, tentativa_unica):
+    """Repete `tentativa_unica` enquanto ela levantar _Transitorio, com backoff crescente.
+
+    Esgotado o teto, sai com sys.exit e não com raise, porque é o contrato que o resto do
+    pipeline já tem: o orchestrator lê o returncode do subprocesso, não a exceção.
+    """
+    ultimo = ""
+    for tentativa in range(1, MAX_TENTATIVAS + 1):
+        try:
+            return tentativa_unica()
+        except _Transitorio as e:
+            ultimo = str(e)
+            if tentativa == MAX_TENTATIVAS:
+                break
+            espera = BACKOFF_BASE ** tentativa
+            print(f"[retry {tentativa}/{MAX_TENTATIVAS}] {descricao}: {ultimo[:200]}. "
+                  f"Nova tentativa em {espera}s.", file=sys.stderr)
+            time.sleep(espera)
+    sys.exit(f"{descricao} falhou em {MAX_TENTATIVAS} tentativas: {ultimo[:500]}")
+
+
+def _payload_gemini(req, timeout, descricao):
+    """Faz a chamada e devolve o payload parseado. Levanta _Transitorio no que se repete,
+    sai na hora no que não se repete."""
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            bruto = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        msg = f"{descricao} HTTP {e.code}: {e.read().decode('utf-8')[:500]}"
+        if e.code in STATUS_TRANSITORIO:
+            raise _Transitorio(msg)
+        sys.exit(msg)
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+        raise _Transitorio(f"{descricao} sem resposta: {type(e).__name__}: {e}")
+    try:
+        return json.loads(bruto)
+    except json.JSONDecodeError:
+        # 200 com corpo que não é JSON: proxy ou CDN respondendo por cima da API. Este
+        # json.loads era o único sem guarda, e subia como traceback cru.
+        raise _Transitorio(f"{descricao} devolveu corpo não-JSON: {bruto[:300]}")
+
+
 def gemini_json(cfg, api_key, model, system_prompt, user_data, expect,
                 thinking_budget=0, max_tokens=8192):
     """Chama Gemini via REST e devolve JSON (list ou dict). Sem SDK, só stdlib.
@@ -169,6 +232,10 @@ def gemini_json(cfg, api_key, model, system_prompt, user_data, expect,
     Em modelos 2.5 (thinking), os tokens de raciocínio consomem maxOutputTokens. Por
     isso thinking_budget=0 nas etapas mecânicas (classify/score) evita truncar o JSON;
     a etapa criativa (write) usa budget > 0 e maxOutputTokens folgado.
+
+    Repete o que é transitório (MAR-194). O gasto ACUMULA entre as tentativas: tentativa
+    que falhou no parse consumiu tokens de verdade, e contar só a última subestimaria a
+    conta. Entre chamadas o comportamento segue o de antes, a última sobrescreve.
     """
     url = f"{cfg['endpoint']}/{model}:generateContent"
     body = {
@@ -181,38 +248,45 @@ def gemini_json(cfg, api_key, model, system_prompt, user_data, expect,
             "thinkingConfig": {"thinkingBudget": thinking_budget},
         },
     }
-    req = urllib.request.Request(
-        url, data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        sys.exit(f"Gemini HTTP {e.code} ({model}): {e.read().decode('utf-8')[:500]}")
-    um = payload.get("usageMetadata", {})
-    USAGE[model] = {
-        "input": um.get("promptTokenCount", 0),
-        "output": um.get("candidatesTokenCount", 0),
-        "thinking": um.get("thoughtsTokenCount", 0),
-    }
-    try:
-        text = payload["candidates"][0]["content"]["parts"][0]["text"]
-    except (KeyError, IndexError):
-        sys.exit(f"Resposta Gemini sem texto ({model}): {json.dumps(payload)[:500]}")
-    text = re.sub(r"^```(?:json)?|```$", "", text.strip()).strip()
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        # tenta achar o primeiro array/objeto balanceado
-        m = re.search(r"(\[.*\]|\{.*\})", text, re.DOTALL)
-        if not m:
-            sys.exit(f"Gemini não retornou JSON válido ({model}): {text[:300]}")
-        data = json.loads(m.group(1))
-    if expect is list and not isinstance(data, list):
-        data = data.get("items") or data.get("noticias") or list(data.values())
-    return data
+    descricao = f"Gemini ({model})"
+    gasto = {"input": 0, "output": 0, "thinking": 0}
+
+    def _uma_tentativa():
+        req = urllib.request.Request(
+            url, data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+            method="POST",
+        )
+        payload = _payload_gemini(req, 120, descricao)
+        um = payload.get("usageMetadata", {})
+        gasto["input"] += um.get("promptTokenCount", 0)
+        gasto["output"] += um.get("candidatesTokenCount", 0)
+        gasto["thinking"] += um.get("thoughtsTokenCount", 0)
+        USAGE[model] = dict(gasto)
+        try:
+            text = payload["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError):
+            # 200 sem texto é o que o bloqueio de safety devolve, e ele é intermitente.
+            raise _Transitorio(f"{descricao} sem texto: {json.dumps(payload)[:500]}")
+        text = re.sub(r"^```(?:json)?|```$", "", text.strip()).strip()
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            # tenta achar o primeiro array/objeto balanceado
+            m = re.search(r"(\[.*\]|\{.*\})", text, re.DOTALL)
+            if not m:
+                raise _Transitorio(f"{descricao} não devolveu JSON: {text[:300]}")
+            try:
+                data = json.loads(m.group(1))
+            except json.JSONDecodeError:
+                # Truncado no meio: o regex casa até o fim do texto sem fechar. Era o
+                # segundo json.loads sem guarda, e também subia como traceback cru.
+                raise _Transitorio(f"{descricao} devolveu JSON truncado: {text[:300]}")
+        if expect is list and not isinstance(data, list):
+            data = data.get("items") or data.get("noticias") or list(data.values())
+        return data
+
+    return _com_retry(descricao, _uma_tentativa)
 
 
 def _slim(items, content_len):
