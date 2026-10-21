@@ -1,6 +1,7 @@
 # broker/tests/test_notify.py — MAR-484: aviso de edição pronta ou falha, antes do envio.
 import pathlib
 import sys
+from datetime import datetime, timezone
 
 import pytest
 
@@ -96,18 +97,28 @@ def test_edicao_enviada_nem_chega_a_ler_o_segredo(monkeypatch):
 
 
 # ------------------------------------------------------- integração com o tick diário
-def _tick(tmp_path, monkeypatch, sched, estado_final, erro=None):
+class _Relogio(datetime):
+    """Relógio do orchestrator congelado numa segunda ao meio-dia (BRT), dentro da agenda."""
+
+    @classmethod
+    def now(cls, tz=None):
+        instante = datetime(2026, 9, 15, 15, 0, tzinfo=timezone.utc)
+        return instante.astimezone(tz) if tz else instante.replace(tzinfo=None)
+
+
+def _tick(tmp_path, monkeypatch, estado_final, erro=None):
+    """Roda o cron_tick de verdade, com agenda por campanha, só o pipeline e o Slack falsos."""
     import orchestrator
-    from state_manager import StateManager, LocalStore
+    from state_manager import CAMPANHA_PADRAO, StateManager, LocalStore
     sm = StateManager(LocalStore(tmp_path))
-    sm.upsert_edition("2026-09-03", estado_final)
     monkeypatch.setattr(orchestrator, "_sm", lambda: sm)
-    monkeypatch.setattr(orchestrator, "get_schedule", lambda s=None: sched)
-    monkeypatch.setattr(orchestrator, "_mark_schedule_run", lambda s, d: None)
-    monkeypatch.setattr(orchestrator, "_resolve_edition_date", lambda e: "2026-09-03")
-    monkeypatch.setattr(orchestrator, "_should_run_now", lambda *a: (True, "ok"))
-    monkeypatch.setattr(sm, "sync_to_firebase", lambda: {})
+    monkeypatch.setattr(orchestrator, "datetime", _Relogio)
+    monkeypatch.setattr(StateManager, "sync_to_firebase", lambda self: {"synced": 0})
+    orchestrator.set_schedule({"campanha": CAMPANHA_PADRAO, "enabled": True, "auto_send": False,
+                               "_email": "david@metakosmos.com.br"})
+
     def _run_daily(ed, auto):
+        sm.upsert_edition(ed, estado_final)
         if erro:
             raise RuntimeError(erro)
         return {"edition": ed, "stage": estado_final["stage"]}
@@ -118,20 +129,17 @@ def _tick(tmp_path, monkeypatch, sched, estado_final, erro=None):
     return orchestrator.cron_tick(), recebidos
 
 
-SCHED = {"enabled": True, "send_time": "07:00", "weekdays": [0, 1, 2, 3, 4, 5, 6],
-         "auto_send": False, "until": None, "last_run_date": None}
-
-
 def test_tick_avisa_quando_a_edicao_fica_pronta(tmp_path, monkeypatch):
-    out, recebidos = _tick(tmp_path, monkeypatch, SCHED, {"stage": "ready"})
+    out, recebidos = _tick(tmp_path, monkeypatch, {"stage": "ready"})
     assert out["aviso"] == "enviado"
-    assert recebidos == [("2026-09-03", "ready", None)]
+    assert out["ran"] is True
+    assert [(st, err) for _ed, st, err in recebidos] == [("ready", None)]
 
 
 def test_tick_avisa_com_o_erro_quando_o_estagio_falha(tmp_path, monkeypatch):
     """O dia já foi claimado e não há nova tentativa: sem este aviso, o único sinal de que
     a edição não saiu é a ausência do e-mail."""
-    out, recebidos = _tick(tmp_path, monkeypatch, SCHED, {"stage": "researched"},
+    out, recebidos = _tick(tmp_path, monkeypatch, {"stage": "researched"},
                            erro="generate_content.py falhou: piso é 3")
     assert "piso é 3" in recebidos[0][2]
     assert out["aviso"] == "enviado"
@@ -143,7 +151,8 @@ def test_tick_que_nao_roda_nao_avisa(tmp_path, monkeypatch):
     from state_manager import StateManager, LocalStore
     sm = StateManager(LocalStore(tmp_path))
     monkeypatch.setattr(orchestrator, "_sm", lambda: sm)
-    monkeypatch.setattr(orchestrator, "get_schedule", lambda s=None: {**SCHED, "enabled": False})
+    monkeypatch.setattr(orchestrator, "datetime", _Relogio)
+    # nenhuma agenda ligada: a padrão nasce desligada
     def _nao(*a, **k):
         raise AssertionError("avisou sem ter rodado")
     monkeypatch.setattr(orchestrator.notify, "avisa", _nao)
