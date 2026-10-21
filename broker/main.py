@@ -144,7 +144,10 @@ def _handlers():
         email = (claims.get("email") or "").lower()
         if not email or not claims.get("email_verified"):
             raise PermissionError("Email não verificado.")
-        if not (claims.get("hd") == ALLOWED_DOMAIN or email.endswith("@" + ALLOWED_DOMAIN)):
+        # Conta fora do domínio só passa se estiver nominalmente em ADMIN/OPERATOR_EMAILS
+        # (email_verified já foi exigido acima); o resto segue travado ao domínio.
+        if not (claims.get("hd") == ALLOWED_DOMAIN or email.endswith("@" + ALLOWED_DOMAIN)
+                or email in OPERATORS):
             raise PermissionError(f"Email {email} fora do domínio {ALLOWED_DOMAIN}.")
         return email
 
