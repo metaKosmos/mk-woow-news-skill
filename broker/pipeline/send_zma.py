@@ -273,13 +273,25 @@ def main():
 
     send_resp = send_campaign(token, key)
     print(f"sendcampaign -> {json.dumps(send_resp)}")
-    code = str(send_resp.get("code", ""))
-    if code not in ("0", "200"):
-        sys.exit(
-            "sendcampaign não confirmou sucesso. Se for 6611 (Content not "
-            "reviewed), validar autenticação de domínio / fluxo de revisão em ZMA."
-        )
+    falha = falha_sendcampaign(send_resp, key)
+    if falha:
+        sys.exit(falha)
     print("OK envio confirmado")
+
+
+def falha_sendcampaign(send_resp, campaignkey):
+    """Mensagem de falha do sendcampaign, ou None quando o ZMA confirmou o envio.
+
+    A resposta crua vai na mensagem: o orquestrador só guarda o stderr, e sem o código
+    do ZMA a falha não tem diagnóstico (o Daily Drops ficou parado dias por isso)."""
+    code = str(send_resp.get("code", ""))
+    if code in ("0", "200"):
+        return None
+    crua = json.dumps(send_resp, ensure_ascii=False)[:300]
+    msg = f"sendcampaign recusado pelo ZMA (code {code or 'ausente'}, campaignKey {campaignkey}): {crua}"
+    if code == "6611":
+        msg += " | 6611 = Content not reviewed: validar autenticação de domínio / fluxo de revisão em ZMA."
+    return msg
 
 
 if __name__ == "__main__":
