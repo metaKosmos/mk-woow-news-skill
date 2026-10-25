@@ -42,7 +42,8 @@ def test_estagio_intermediario_nao_avisa(stage):
 
 def test_falha_avisa_com_o_erro_e_o_comando_de_recuperacao():
     txt = notify.monta_aviso("2026-09-03", {"stage": "researched"},
-                             erro="Só 2 item(ns) com fonte confirmada, e o piso é 3.")
+                             erro="Só 2 item(ns) com fonte confirmada, e o piso é 3.",
+                             contexto={"nova_tentativa": False, "tentativa": 3})
     assert "NÃO foi gerada" in txt
     assert "piso é 3" in txt
     assert "não tenta de novo" in txt
@@ -52,7 +53,81 @@ def test_falha_avisa_com_o_erro_e_o_comando_de_recuperacao():
 def test_falha_vence_o_estagio():
     """Erro no send de uma edição que ficou 'ready' precisa avisar do erro, não da revisão."""
     txt = notify.monta_aviso("2026-09-03", PRONTA, erro="ZMA 6610")
-    assert "NÃO foi gerada" in txt and "6610" in txt
+    assert "NÃO foi enviada" in txt and "6610" in txt
+
+
+def test_falha_no_envio_nao_diz_que_a_edicao_nao_foi_gerada():
+    """De 22 a 25/10/2026 o aviso dizia "NÃO foi gerada" com a edição pronta e o preview no
+    ar: só o envio tinha falhado. Quem lia ia procurar defeito na geração."""
+    txt = notify.monta_aviso("2026-09-03", PRONTA, erro="sendcampaign recusado pelo ZMA")
+    assert "NÃO foi gerada" not in txt
+    assert "gerada, mas NÃO foi enviada" in txt
+
+
+def test_falha_com_nova_tentativa_diz_ate_quando():
+    txt = notify.monta_aviso("2026-09-03", {"stage": "researched"}, erro="Gemini 503",
+                             contexto={"nova_tentativa": True, "tentativa": 1,
+                                       "tentativas_max": 3, "prazo": "12:00"})
+    assert "tenta de novo" in txt and "não tenta de novo" not in txt
+    assert "12:00" in txt and "1 de 3" in txt
+
+
+# ------------------------------------------------------- edição barrada pela revisão do ZMA
+BARRADA = {"stage": "ready", "envio_zma": {
+    "campaign_key": "K1", "campaign_name": "mK Newsletter 2026-10-26",
+    "status": "barrado_revisao", "codigo": "6608",
+    "significado": "os destinatários mudaram depois da revisão"}}
+
+
+def test_aviso_de_revisao_marca_quem_libera_e_diz_ate_quando(monkeypatch):
+    monkeypatch.setenv("ALERT_REVIEW_MENTION", "U04JLC4HPFT")
+    txt = notify.monta_aviso("2026-10-26", BARRADA, evento="revisao",
+                             contexto={"prazo": "12:00"})
+    assert txt.startswith("<@U04JLC4HPFT>")
+    assert "6608" in txt and "os destinatários mudaram depois da revisão" in txt
+    assert "mK Newsletter 2026-10-26" in txt
+    assert "12:00" in txt
+    assert "não crie outra campanha" in txt.lower()
+
+
+def test_sem_mencao_configurada_o_aviso_sai_sem_marcar_ninguem(monkeypatch):
+    monkeypatch.delenv("ALERT_REVIEW_MENTION", raising=False)
+    txt = notify.monta_aviso("2026-10-26", BARRADA, evento="revisao", contexto={"prazo": "12:00"})
+    assert "<@" not in txt and "6608" in txt
+
+
+def test_mencao_que_nao_e_id_do_slack_nao_entra_no_aviso(monkeypatch):
+    """A variável vira texto do Slack: `<!channel>` ali chamaria o canal inteiro."""
+    monkeypatch.setenv("ALERT_REVIEW_MENTION", "<!channel>")
+    txt = notify.monta_aviso("2026-10-26", BARRADA, evento="revisao", contexto={"prazo": "12:00"})
+    assert "channel" not in txt and "<@" not in txt
+
+
+def test_aviso_de_que_saiu_traz_o_horario():
+    estado = {"stage": "sent", "envio_zma": {**BARRADA["envio_zma"], "status": "enviada",
+                                             "enviada_em": "2026-10-26T10:31:00-03:00"}}
+    txt = notify.monta_aviso("2026-10-26", estado, evento="saiu")
+    assert "saiu às 10:31" in txt
+
+
+def test_aviso_de_que_saiu_com_horario_do_zma_mostra_o_que_veio():
+    estado = {"stage": "sent", "envio_zma": {**BARRADA["envio_zma"], "status": "enviada",
+                                             "enviada_em": "26 Oct 2026, 10:20 AM"}}
+    assert "26 Oct 2026, 10:20 AM" in notify.monta_aviso("2026-10-26", estado, evento="saiu")
+
+
+def test_aviso_de_prazo_diz_que_o_dia_foi_pulado():
+    txt = notify.monta_aviso("2026-10-26", {**BARRADA, "envio_zma": {
+        **BARRADA["envio_zma"], "status": "prazo_vencido"}}, evento="prazo",
+        contexto={"prazo": "12:00"})
+    assert "não saiu até 12:00" in txt
+    assert "mK Newsletter 2026-10-26" in txt and "6608" in txt
+
+
+def test_aviso_de_prazo_sem_conferencia_no_zma_diz_isso():
+    txt = notify.monta_aviso("2026-10-26", BARRADA, evento="prazo",
+                             contexto={"prazo": "12:00", "conferido": False})
+    assert "conferir no painel" in txt
 
 
 def test_edicao_pronta_sem_procedencia_nao_quebra():
@@ -125,7 +200,8 @@ def _tick(tmp_path, monkeypatch, estado_final, erro=None):
     monkeypatch.setattr(orchestrator, "run_daily", _run_daily)
     recebidos = []
     monkeypatch.setattr(orchestrator.notify, "avisa",
-                        lambda st, ed, err=None: recebidos.append((ed, st.get("stage"), err)) or "enviado")
+                        lambda st, ed, err=None, **kw: recebidos.append((ed, st.get("stage"), err))
+                        or "enviado")
     return orchestrator.cron_tick(), recebidos
 
 
@@ -159,9 +235,13 @@ def test_tick_que_nao_roda_nao_avisa(tmp_path, monkeypatch):
     assert orchestrator.cron_tick()["ran"] is False
 
 
-@pytest.mark.parametrize("estado,erro", [(PRONTA, None), ({"stage": "researched"}, "falhou")])
-def test_aviso_nao_usa_travessao_longo(estado, erro):
+@pytest.mark.parametrize("estado,erro,evento", [
+    (PRONTA, None, None), ({"stage": "researched"}, "falhou", None), (PRONTA, "falhou", None),
+    (BARRADA, None, "revisao"), (BARRADA, None, "saiu"), (BARRADA, None, "prazo")])
+def test_aviso_nao_usa_travessao_longo(estado, erro, evento):
     """A regra editorial da mK proíbe travessão longo, e o próprio prompt da newsletter
     abre com "ZERO TRAVESSÃO LONGO". O aviso é texto da mK como qualquer outro."""
-    txt = notify.monta_aviso("2026-09-03", estado, erro)
+    txt = notify.monta_aviso("2026-09-03", estado, erro, evento=evento,
+                             contexto={"prazo": "12:00", "nova_tentativa": True,
+                                       "tentativa": 1, "tentativas_max": 3})
     assert "—" not in txt and "–" not in txt
