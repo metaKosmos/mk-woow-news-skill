@@ -319,7 +319,9 @@ gcloud scheduler jobs create http woow-news-tick \
 > ```
 > Falha de um dia tenta de novo nos ticks seguintes, até 3 vezes e até o prazo da agenda
 > (PROD-3167); o claim do dia não é reaberto, quem decide é o `_retomada`. Edição barrada
-> pela revisão do ZMA tenta a cada tick até o prazo, sempre com a mesma campanha. Esgotado
+> pela revisão do ZMA tenta a cada tick até o prazo, sempre com a mesma campanha. Tentativa
+> que morre sem registro (timeout da request, instância reciclada) conta como falha 20 min
+> depois de começar, o `TENTATIVA_MAX_S`, que precisa ficar acima do `--timeout`. Esgotado
 > isso, um operador roda na mão com `woow.py run --edition <hoje>`.
 
 ## Papéis e allowlist

@@ -20,7 +20,7 @@ sys.path.insert(0, str(BROKER))
 
 import notify  # noqa: E402
 import orchestrator  # noqa: E402
-from state_manager import CAMPANHA_PADRAO, LocalStore, StateManager  # noqa: E402
+from state_manager import BRT, CAMPANHA_PADRAO, LocalStore, StateManager  # noqa: E402
 
 ED = "2026-10-26"  # segunda-feira
 NOME = "mK Newsletter 2026-10-26"
@@ -57,18 +57,31 @@ class _Ambiente:
         self.raiz = tmp_path
         self.n = 0
         self.envios = []      # args de cada chamada ao send_zma.py
-        self.respostas = []   # (código de saída, resultado ou None, stderr)
+        self.respostas = []   # (código de saída, resultado ou None, stderr), ou a exceção
         self.slack = []
+        self.falhas_slack = 0  # quantos avisos seguidos o Slack recusa
+        self.syncs = 0
         monkeypatch.setattr(orchestrator, "_sm", lambda: self.sm)
         monkeypatch.setattr(orchestrator, "datetime", _Relogio)
         monkeypatch.setattr(orchestrator, "_restore_content", lambda *a, **k: None)
         monkeypatch.setattr(orchestrator, "_workdir", lambda ed: self._wd())
         monkeypatch.setattr(orchestrator, "_envmk_workdir", self._wd)
         monkeypatch.setattr(orchestrator, "_run_script_proc", self._proc)
-        monkeypatch.setattr(StateManager, "sync_to_firebase", lambda s: {"synced": 0})
+        monkeypatch.setattr(StateManager, "sync_to_firebase", lambda s: self._sync())
         monkeypatch.setattr(notify.secrets_store, "get_slack_webhook", lambda: "https://hooks/x")
-        monkeypatch.setattr(notify, "envia", lambda url, texto: self.slack.append(texto) or True)
+        monkeypatch.setattr(notify, "envia", self._envia)
         monkeypatch.setenv("ALERT_REVIEW_MENTION", PATRICK)
+
+    def _sync(self):
+        self.syncs += 1
+        return {"synced": 0}
+
+    def _envia(self, url, texto):
+        if self.falhas_slack:
+            self.falhas_slack -= 1
+            raise OSError("Slack fora do ar")
+        self.slack.append(texto)
+        return True
 
     def _wd(self):
         self.n += 1
@@ -79,7 +92,10 @@ class _Ambiente:
     def _proc(self, wd, script, args):
         assert script == "send_zma.py"
         self.envios.append(list(args))
-        rc, res, err = self.respostas.pop(0)
+        resposta = self.respostas.pop(0)
+        if isinstance(resposta, Exception):
+            raise resposta
+        rc, res, err = resposta
         out = "OK access_token obtido\n" + (json.dumps(res, ensure_ascii=False) if res else "")
         return subprocess.CompletedProcess(args, rc, out, err)
 
@@ -278,3 +294,143 @@ def test_falha_comum_tenta_de_novo_ate_tres_vezes(amb, monkeypatch):
     for msg in amb.slack[:2]:
         assert "tenta de novo" in msg and "não tenta de novo" not in msg
     assert "não tenta de novo" in amb.slack[2]
+
+
+# ------------------------------------------------------- achados da revisão independente
+
+def test_envio_que_estoura_o_tempo_guarda_a_chave_ja_impressa(amb):
+    """O subprocess de 600 s estourou depois do createCampaign. A chave já estava no stdout:
+    sem guardá-la, a tentativa seguinte criaria a segunda campanha com o mesmo nome."""
+    amb.pronta()
+    parcial = ("OK access_token obtido\n" + json.dumps(
+        {"tipo": "criada", "campaign_key": "K1", "campaign_name": NOME}) + "\n")
+    amb.respostas = [subprocess.TimeoutExpired(["send_zma.py"], 600, output=parcial.encode()),
+                     ENVIADA]
+    with pytest.raises(RuntimeError) as exc:
+        orchestrator.run_stage(ED, "send", {})
+    assert not isinstance(exc.value, orchestrator.EnvioBarradoPelaRevisao)
+    assert amb.envio()["campaign_key"] == "K1"
+    assert "600" in amb.sm.get_state(ED)["health"]["last_error"]["message"]
+    orchestrator.run_stage(ED, "send", {})
+    assert _tem_par(amb.envios[1], "--campaign-key", "K1")
+
+
+def test_tentativa_barrada_que_morreu_sem_registro_volta_depois_do_teto(amb):
+    """Tick interrompido (timeout da request, instância reciclada) não grava nada. A edição não
+    pode ficar parada até o prazo esperando um registro que nunca vem."""
+    amb.agenda()
+    amb.pronta(envio_zma={"campaign_key": "K1", "campaign_name": NOME,
+                          "status": "barrado_revisao", "codigo": "6608",
+                          "ultima_tentativa_em": "2026-10-26T09:00:05-03:00",
+                          "avisos": ["revisao"]})
+    orchestrator._mark_schedule_run(amb.sm, ED, CAMPANHA_PADRAO, _brt(9, 15))
+    amb.respostas = [ENVIADA]
+    amb.tick(9, 30)
+    assert amb.envios == [], "15 min depois do começo ela ainda pode estar rodando"
+    amb.tick(9, 45)
+    assert _tem_par(amb.envios[0], "--campaign-key", "K1")
+    assert amb.sm.get_state(ED)["stage"] == "sent"
+
+
+def test_aviso_do_prazo_que_nao_chegou_sai_no_tick_seguinte(amb):
+    amb.agenda()
+    amb.pronta()
+    amb.respostas = [BARRADO, CHECK_PENDENTE, CHECK_PENDENTE]
+    amb.tick(9, 0)
+    amb.falhas_slack = 1
+    amb.tick(12, 0)
+    assert not any("não saiu até" in m for m in amb.slack)
+    amb.tick(12, 15)
+    assert "não saiu até 12:00" in amb.slack[-1]
+    total = len(amb.slack)
+    amb.tick(12, 30)
+    assert len(amb.slack) == total and len(amb.envios) == 3
+
+
+def test_duas_campanhas_barradas_se_revezam_no_tick(amb):
+    """Uma por tick, a de tentativa mais antiga primeiro. Pelo slug, o Daily Drops rodaria em
+    todo tick e a outra campanha nunca seria reenviada."""
+    amb.agenda()
+    orchestrator.set_curadoria({"op": "criar", "campanha": "woow-beauty",
+                                "_email": "david@metakosmos.com.br"})
+    amb.agenda(campanha="woow-beauty")
+    beauty = orchestrator.edition_id("woow-beauty", ED)
+    barrada = {"status": "barrado_revisao", "codigo": "6608", "avisos": ["revisao"]}
+    amb.pronta(envio_zma={**barrada, "campaign_key": "K1",
+                          "ultima_tentativa_em": "2026-10-26T09:15:05-03:00"})
+    amb.sm.upsert_edition(beauty, {"stage": "ready", "date": ED, "campanha": "woow-beauty",
+                                   "envio_zma": {**barrada, "campaign_key": "B1",
+                                                 "ultima_tentativa_em": "2026-10-26T09:00:05-03:00"}})
+    orchestrator._mark_schedule_run(amb.sm, ED, "woow-beauty", _brt(9, 0))
+    orchestrator._mark_schedule_run(amb.sm, ED, CAMPANHA_PADRAO, _brt(9, 15))
+    aprovadas, _ignoradas, _erros = orchestrator._candidatas_do_tick(
+        amb.sm, _brt(9, 30).astimezone(BRT), ED)
+    assert [a[1] for a in aprovadas] == ["woow-beauty", CAMPANHA_PADRAO]
+
+
+def test_edicao_que_ja_tinha_saido_avisa_que_nao_enviou_de_novo(amb):
+    """Duas campanhas com o mesmo nome no mesmo dia contam como uma: a segunda vira `sent` sem
+    sair. Sem aviso, ninguém fica sabendo."""
+    amb.agenda()
+    amb.pronta()
+    amb.respostas = [(0, {"tipo": "ja_enviada", "campaign_key": "K9", "campaign_name": NOME,
+                          "enviada_em": "26 Oct 2026, 08:40 AM"}, "")]
+    amb.tick(9, 0)
+    assert amb.sm.get_state(ED)["stage"] == "sent"
+    assert len(amb.slack) == 1
+    assert "já tinha saído" in amb.slack[0] and NOME in amb.slack[0]
+
+
+def test_falha_que_nao_e_da_revisao_aparece_no_aviso_do_prazo(amb):
+    """Com a edição barrada, uma falha de outro tipo (token revogado) mantém as tentativas,
+    mas não pode chegar ao prazo disfarçada de revisão."""
+    amb.agenda()
+    amb.pronta()
+    amb.respostas = [BARRADO, (1, None, "Falha ao obter access_token: invalid_code"),
+                     CHECK_PENDENTE]
+    amb.tick(9, 0)
+    amb.tick(9, 15)
+    assert amb.envio()["status"] == "barrado_revisao"
+    amb.tick(12, 0)
+    assert "não saiu até 12:00" in amb.slack[-1] and "invalid_code" in amb.slack[-1]
+
+
+def test_prazo_nao_fecha_edicao_de_agenda_sem_envio_automatico(amb):
+    """Sem auto_send o broker não tenta de novo: dizer que ele "parou de tentar" é falso, e
+    quem disparou à mão já recebeu a recusa."""
+    amb.agenda(auto_send=False)
+    amb.pronta(envio_zma={"campaign_key": "K1", "campaign_name": NOME,
+                          "status": "barrado_revisao", "codigo": "6608"})
+    amb.tick(12, 0)
+    assert amb.envios == [] and amb.slack == []
+
+
+def test_espelho_sincroniza_quando_so_o_prazo_mudou_o_estado(amb):
+    amb.agenda()
+    amb.pronta()
+    amb.respostas = [BARRADO, CHECK_PENDENTE]
+    amb.tick(9, 0)
+    antes = amb.syncs
+    amb.tick(12, 0)
+    assert amb.syncs > antes
+
+
+def test_conteudo_novo_descarta_a_campanha_que_tem_o_antigo(amb, monkeypatch):
+    """O ZMA importa HTML e assunto na criação: reenviar a campanha antiga depois de corrigir o
+    HTML mandaria a versão velha. A próxima tentativa cria outra, e o aviso cita a nova."""
+    monkeypatch.setattr(orchestrator, "_publish_public",
+                        lambda w, ed: (f"https://pub/nl/{ed}.html", ""))
+    monkeypatch.setattr(orchestrator, "_publish_html_version",
+                        lambda w, ed, stamp: f"https://pub/nl/hist/{ed}/{stamp}.html")
+    amb.agenda()
+    amb.pronta()
+    amb.respostas = [BARRADO, (3, {**BARRADO[1], "campaign_key": "K2"}, BARRADO[2])]
+    amb.tick(9, 0)
+    orchestrator.set_html({"edition": ED, "html": "<p>corrigido</p>"})
+    envio = amb.envio()
+    assert "campaign_key" not in envio and envio["status"] == "barrado_revisao"
+    assert [d["campaign_key"] for d in envio["descartadas"]] == ["K1"]
+    amb.tick(9, 15)
+    assert "--campaign-key" not in amb.envios[1]
+    assert amb.envio()["campaign_key"] == "K2"
+    assert len(amb.slack) == 2 and "criada às 09:15" in amb.slack[1]

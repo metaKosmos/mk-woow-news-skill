@@ -6,9 +6,10 @@ de alguém lembrar de rodar `woow status`. Quando o estágio falha é pior: o `c
 engole a exceção e devolve 200 ao Cloud Scheduler, e a nova tentativa (até 3 por dia) só
 sai no tick seguinte.
 
-Aviso DEPOIS do envio não serve: a essa altura o time já recebeu o e-mail. A exceção é a
-edição barrada pela revisão do ZMA: o aviso marca quem libera no painel, e o "saiu" fecha
-o assunto quando ela sai depois disso.
+Aviso DEPOIS do envio não serve: a essa altura o time já recebeu o e-mail. As exceções são a
+edição barrada pela revisão do ZMA, em que o aviso marca quem libera no painel e o "saiu"
+fecha o assunto quando ela sai depois disso, e a edição que o broker não enviou porque já
+constava como enviada.
 
 Falha de aviso nunca derruba a edição. Toda a superfície pública é try/except.
 """
@@ -64,14 +65,24 @@ def _quando(valor):
 def _aviso_revisao(edition, envio, contexto):
     codigo, significado = envio.get("codigo") or "?", envio.get("significado")
     nome = envio.get("campaign_name") or edition
+    criada = _quando(envio.get("criada_em"))
     prazo = contexto.get("prazo") or "o prazo"
-    return "\n".join([
+    # Caminho e botão conferidos no painel em 25/10/2026. O horário de criação é o que o painel
+    # mostra ao lado do nome, e separa as campanhas de mesmo nome (24/10 teve duas).
+    linhas = [
         f"{_mencao()}*WooW! Daily Drops {edition}: envio barrado pela revisão do Zoho*",
         f"Código {codigo}" + (f": {significado}." if significado else "."),
-        f"Para liberar: no Zoho Marketing Automation, abrir a campanha \"{nome}\" e liberar a "
-        f"revisão. Não crie outra campanha: o broker reenvia esta mesma.",
-        f"O broker tenta enviar de novo a cada 15 min até {prazo}. Se não sair até lá, o dia é "
-        f"pulado e aviso aqui."])
+        f"Para liberar: Zoho Marketing Automation, Marketing Campaigns › Email, abrir \"{nome}\""
+        + (f" (criada {criada})" if criada else "") + " e seguir em \"Review and launch\". "
+        "Não crie outra campanha: o broker reenvia esta mesma."]
+    antigas = [_quando(d.get("criada_em")) for d in envio.get("descartadas") or []
+               if d.get("criada_em")]
+    if antigas:
+        linhas.append(f"Não libere a de mesmo nome criada {', '.join(antigas)}: ficou com o "
+                      f"conteúdo antigo.")
+    linhas.append(f"O broker tenta enviar de novo a cada 15 min até {prazo}. Se não sair até "
+                  f"lá, o dia é pulado e aviso aqui.")
+    return "\n".join(linhas)
 
 
 def _aviso_saiu(edition, envio):
@@ -79,12 +90,26 @@ def _aviso_saiu(edition, envio):
     return f"*WooW! Daily Drops {edition}: saiu{' ' + quando if quando else ''}*, depois da revisão do Zoho."
 
 
+def _aviso_ja_saiu(edition, envio):
+    nome = envio.get("campaign_name") or edition
+    quando = _quando(envio.get("enviada_em"))
+    return "\n".join([
+        f"*WooW! Daily Drops {edition}: já tinha saído, o broker não enviou de novo*",
+        f"A campanha \"{nome}\" já constava como enviada no Zoho{' ' + quando if quando else ''}. "
+        f"Se esta edição devia sair também, confira no painel: duas campanhas com o mesmo nome "
+        f"no mesmo dia contam como uma."])
+
+
 def _aviso_prazo(edition, envio, contexto):
     prazo = contexto.get("prazo") or "o prazo"
     nome = envio.get("campaign_name") or edition
+    significado = envio.get("significado")
     linhas = [f"*WooW! Daily Drops {edition}: não saiu até {prazo}*",
               f"A campanha \"{nome}\" seguiu barrada pela revisão do Zoho (código "
-              f"{envio.get('codigo') or '?'}). O dia foi pulado e o broker parou de tentar."]
+              f"{envio.get('codigo') or '?'}" + (f": {significado}" if significado else "")
+              + "). O dia foi pulado e o broker parou de tentar."]
+    if envio.get("ultimo_erro"):
+        linhas.append(f"A última tentativa falhou por outro motivo: {envio['ultimo_erro']}")
     if contexto.get("conferido") is False:
         linhas.append("Não consegui confirmar com o Zoho se ela saiu pelo painel: vale "
                       "conferir no painel.")
@@ -113,9 +138,9 @@ def _aviso_falha(edition, estado, erro, contexto):
 def monta_aviso(edition, estado, erro=None, evento=None, contexto=None):
     """Texto do aviso, ou None quando não há o que avisar. Função pura, testável sem rede.
 
-    `evento` é o da edição barrada pela revisão do ZMA (revisao | saiu | prazo); sem ele, o
-    aviso de sempre: falha, ou edição pronta esperando revisão. `contexto` traz o prazo e as
-    tentativas do dia, que só o tick conhece.
+    `evento` é o da edição barrada pela revisão do ZMA (revisao | saiu | prazo) ou o da que
+    já constava como enviada (ja_saiu); sem ele, o aviso de sempre: falha, ou edição pronta
+    esperando revisão. `contexto` traz o prazo e as tentativas do dia, que só o tick conhece.
 
     `sent` não gera aviso de propósito: o e-mail já chegou a quem seria avisado."""
     estado = estado or {}
@@ -127,6 +152,8 @@ def monta_aviso(edition, estado, erro=None, evento=None, contexto=None):
         return _aviso_saiu(edition, envio)
     if evento == "prazo":
         return _aviso_prazo(edition, envio, contexto)
+    if evento == "ja_saiu":
+        return _aviso_ja_saiu(edition, envio)
     if erro:
         return _aviso_falha(edition, estado, erro, contexto)
     if estado.get("stage") != "ready":

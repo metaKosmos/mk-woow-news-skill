@@ -197,5 +197,33 @@ def test_ja_rodou_sem_falha_registrada_segue_sem_rodar():
     assert not ok and motivo == "já rodou hoje"
 
 
+def test_tentativa_que_morreu_sem_registro_conta_como_falha_depois_do_teto():
+    """Request interrompida (timeout, instância reciclada) não grava `last_error`. Passado o
+    teto de uma request, a tentativa morreu, e o dia ainda tem conserto."""
+    ok, motivo = orchestrator._should_run_now(_hoje(), _dt(2026, 7, 1, 9, 30), "empty", {})
+    assert ok and "2 de 3" in motivo
+
+
+def test_agenda_sem_inicio_de_tentativa_segue_o_dedup_de_sempre():
+    """Agenda gravada antes desta versão não tem `tentativa_em`: sem régua, nada de nova
+    tentativa por tempo."""
+    sched = _hoje(tentativa_em=None)
+    assert not orchestrator._should_run_now(sched, _dt(2026, 7, 1, 11, 0), "empty", {})[0]
+
+
+def test_barrada_cuja_tentativa_falhou_antes_de_registrar_o_envio_tenta_de_novo():
+    """A tentativa levantou antes de chegar ao send_zma (leitura do GCS no `_workdir`): ficou o
+    `last_error`, não o `ultima_tentativa_em`."""
+    sched = _hoje(tentativa_em="2026-07-01T09:15:00-03:00")
+    estado = {**_barrada(), **_falhou(at="2026-07-01T09:15:04-03:00")}
+    assert orchestrator._should_run_now(sched, _dt(2026, 7, 1, 9, 30), "ready", estado)[0]
+
+
+def test_barrada_cuja_tentativa_morreu_sem_registro_tenta_de_novo_depois_do_teto():
+    sched = _hoje(tentativa_em="2026-07-01T09:15:00-03:00")
+    assert not orchestrator._should_run_now(sched, _dt(2026, 7, 1, 9, 30), "ready", _barrada())[0]
+    assert orchestrator._should_run_now(sched, _dt(2026, 7, 1, 9, 45), "ready", _barrada())[0]
+
+
 def test_edicao_enviada_nao_e_tentada_mesmo_com_erro_velho():
     assert not orchestrator._should_run_now(_hoje(), _dt(2026, 7, 1, 9, 15), "sent", _falhou())[0]

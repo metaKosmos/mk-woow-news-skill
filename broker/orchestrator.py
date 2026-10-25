@@ -274,6 +274,7 @@ def _publish_edition_html(sm, wd, edition, source, by=""):
     stamp = datetime.now(BRT).strftime("%Y%m%dT%H%M%S%f")
     ver_url = _publish_html_version(wd, edition, stamp)   # snapshot imutável
     _append_html_history(sm, edition, ver_url, source, by, stamp)
+    _descarta_campanha_desatualizada(sm, edition)
     return html_url, img_url
 
 
@@ -406,21 +407,37 @@ def _resultado_envio(stdout):
     return {}
 
 
-def _proximo_envio(envio, res, rc, agora):
+def _ultima_linha(texto):
+    linhas = [l.strip() for l in (texto or "").splitlines() if l.strip()]
+    return linhas[-1][:300] if linhas else ""
+
+
+def _proximo_envio(envio, res, rc, agora, erro=""):
     """Próximo `envio_zma` da edição a partir do resultado do send_zma.py. Função pura.
 
     A recusa da revisão abre o modo barrado, e dentro dele qualquer recusa o mantém: com a
     revisão aberta no painel o ZMA responde outros códigos (6605, status mudou), e tratá-los
-    como falha comum trocaria o prazo pelo teto de 3 tentativas do dia."""
+    como falha comum trocaria o prazo pelo teto de 3 tentativas do dia. Falha sem resposta do
+    ZMA (token, rede) também mantém, mas fica em `ultimo_erro`, para o aviso do prazo não a
+    apresentar como revisão.
+
+    `criada_em` marca a campanha nova, e é por ele que o aviso diz qual liberar quando há duas
+    com o mesmo nome no painel. `ja_tinha_saido` marca a edição que não saiu por esta
+    tentativa: outra campanha com o mesmo nome já constava como enviada."""
     envio = envio or {}
     novo = dict(envio)
     tipo = res.get("tipo")
+    chave = res.get("campaign_key")
     for campo in ("campaign_key", "campaign_name"):
         if res.get(campo):
             novo[campo] = res[campo]
+    if chave and chave != envio.get("campaign_key") and tipo != "ja_enviada":
+        novo["criada_em"] = agora
     if rc == 0 and tipo in ("enviada", "ja_enviada"):
         novo["status"] = "enviada"
         novo["enviada_em"] = res.get("enviada_em") or agora
+        if tipo == "ja_enviada" and chave != envio.get("campaign_key"):
+            novo["ja_tinha_saido"] = True
         return novo
     if res.get("code"):
         novo["codigo"] = res["code"]
@@ -430,9 +447,28 @@ def _proximo_envio(envio, res, rc, agora):
         novo.setdefault("barrado_em", agora)
         novo["tentativas_envio"] = envio.get("tentativas_envio", 0) + 1
         novo["ultima_tentativa_em"] = agora
+        if res.get("code"):
+            novo.pop("ultimo_erro", None)
+        else:
+            novo["ultimo_erro"] = (res.get("erro") or _ultima_linha(erro)
+                                   or "sem resposta legível do Zoho")
     elif novo.get("campaign_key"):
         novo["status"] = "erro"
     return novo
+
+
+def _descarta_campanha_desatualizada(sm, edition):
+    """Conteúdo novo tira de uso a campanha que o ZMA criou com o antigo: o ZMA importa HTML e
+    assunto na criação, e reenviar aquela campanha mandaria a versão velha. A chave sai do
+    `envio_zma` para `descartadas`, a tentativa seguinte cria outra, e os avisos zeram para o
+    aviso novo citar a campanha nova. O modo barrado fica, e o prazo com ele."""
+    envio = sm.get_state(edition).get("envio_zma") or {}
+    if not envio.get("campaign_key") or envio.get("status") == "enviada":
+        return
+    novo = {k: v for k, v in envio.items() if k not in ("campaign_key", "criada_em", "avisos")}
+    novo["descartadas"] = list(envio.get("descartadas") or []) + [
+        {"campaign_key": envio["campaign_key"], "criada_em": envio.get("criada_em") or ""}]
+    sm.upsert_edition(edition, {"envio_zma": novo})
 
 
 def _build_send_args(edition, st, deliv, sender, active_list, entrega=None):
@@ -552,16 +588,24 @@ def run_stage(edition, stage, payload):
                 # MESMA campanha. Criar outra deixaria duas no painel, e quem libera uma
                 # enquanto o broker manda a outra faz a lista inteira receber duas vezes.
                 send_args += ["--campaign-key", anterior["campaign_key"]]
-            proc = _run_script_proc(wd, "send_zma.py", send_args)
-            res = _resultado_envio(proc.stdout)
-            envio = _proximo_envio(anterior, res, proc.returncode,
-                                   datetime.now(BRT).isoformat(timespec="seconds"))
+            try:
+                proc = _run_script_proc(wd, "send_zma.py", send_args)
+                saida, rc, falha = proc.stdout, proc.returncode, proc.stderr
+            except subprocess.TimeoutExpired as e:
+                # O que o script imprimiu antes do teto vale: a chave da campanha já criada
+                # está ali, e sem ela a tentativa seguinte criaria outra.
+                saida = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) \
+                    else (e.stdout or "")
+                rc, falha = None, f"send_zma.py estourou o teto de {e.timeout:.0f} s"
+            res = _resultado_envio(saida)
+            envio = _proximo_envio(anterior, res, rc,
+                                   datetime.now(BRT).isoformat(timespec="seconds"), falha)
             if envio.get("status") != "enviada":
                 if envio:
                     sm.upsert_edition(edition, {"envio_zma": envio})
                 if envio.get("status") == "barrado_revisao":
-                    raise EnvioBarradoPelaRevisao(f"send_zma.py: {proc.stderr[-800:]}")
-                raise RuntimeError(f"send_zma.py falhou: {proc.stderr[-800:]}")
+                    raise EnvioBarradoPelaRevisao(f"send_zma.py: {falha[-800:]}")
+                raise RuntimeError(f"send_zma.py falhou: {falha[-800:]}")
             # A chave é a da campanha que SAIU: liberada como cópia no painel, é a da cópia, e
             # é por ela que as métricas leem o relatório.
             key = envio.get("campaign_key", "")
@@ -569,7 +613,7 @@ def run_stage(edition, stage, payload):
             _clear_stage_error(sm, edition)
             # `alvo` no retorno: com quatro níveis de precedência, o operador precisa poder
             # ler PARA ONDE foi e DE ONDE veio o alvo, sem abrir o painel do ZMA.
-            return {"stage": "sent", "campaign_key": key, "log": proc.stdout.strip(),
+            return {"stage": "sent", "campaign_key": key, "log": saida.strip(),
                     "ja_enviada": res.get("tipo") == "ja_enviada",
                     "alvo": {"campanha": entrega.get("campanha"),
                              "list_key": entrega.get("list_key"),
@@ -2424,6 +2468,20 @@ def _hhmm(minutos):
     return f"{minutos // 60:02d}:{minutos % 60:02d}"
 
 
+# Teto de uma tentativa, com folga sobre os 900 s de request da function. Começo mais velho que
+# isto sem registro nenhum é tentativa que morreu calada: timeout da request, instância
+# reciclada. Nada fica no estado, e sem este teto o dia esperaria um registro que nunca vem.
+TENTATIVA_MAX_S = 20 * 60
+
+
+def _morreu_sem_registro(comecou, now_brt):
+    try:
+        inicio = datetime.fromisoformat(comecou)
+    except (TypeError, ValueError):
+        return False  # agenda sem `tentativa_em` (anterior à PROD-3167): sem régua, não chuta
+    return (now_brt - inicio).total_seconds() >= TENTATIVA_MAX_S
+
+
 def _retomada(sched, now_brt, estado):
     """Edição de hoje que já rodou e não terminou: tenta de novo? (bool, motivo). Pura.
 
@@ -2436,19 +2494,22 @@ def _retomada(sched, now_brt, estado):
     Nos dois, só depois que a tentativa anterior TERMINOU: o tick seguinte pode chegar com ela
     ainda rodando, e tentar de novo ali é corrida contra o próprio broker. Terminou quando o
     registro dela (`ultima_tentativa_em`, `last_error.at`) não é mais velho que o começo
-    (`tentativa_em`, gravado no claim)."""
+    (`tentativa_em`, gravado no claim), ou quando o começo passou do TENTATIVA_MAX_S sem
+    registro nenhum: aí ela morreu calada, e conta como falha."""
     agora = now_brt.hour * 60 + now_brt.minute
     prazo = _prazo_envio(sched)
     comecou = sched.get("tentativa_em") or ""
     envio = estado.get("envio_zma") or {}
+    erro_em = ((estado.get("health") or {}).get("last_error") or {}).get("at") or ""
+    falhou = bool(erro_em) and erro_em >= comecou
+    morreu = not falhou and _morreu_sem_registro(comecou, now_brt)
     if envio.get("status") == "barrado_revisao":
         if agora >= prazo:
             return False, f"barrada pela revisão do Zoho, e passou do prazo ({_hhmm(prazo)} BRT)"
-        if (envio.get("ultima_tentativa_em") or "") < comecou:
+        if (envio.get("ultima_tentativa_em") or "") < comecou and not (falhou or morreu):
             return False, "já rodou hoje (tentativa em andamento)"
         return True, "nova tentativa de envio (barrada pela revisão do Zoho)"
-    erro = (estado.get("health") or {}).get("last_error") or {}
-    if not erro or (erro.get("at") or "") < comecou:
+    if not (falhou or morreu):
         return False, "já rodou hoje"
     hoje = now_brt.strftime("%Y-%m-%d")
     feitas = (sched.get("tentativas") or 0) if sched.get("tentativas_data") == hoje else 0
@@ -2456,7 +2517,8 @@ def _retomada(sched, now_brt, estado):
         return False, f"já rodou hoje ({feitas} tentativas)"
     if agora >= prazo:
         return False, f"falhou e passou do prazo ({_hhmm(prazo)} BRT)"
-    return True, f"nova tentativa ({feitas + 1} de {TENTATIVAS_POR_DIA})"
+    return True, (f"nova tentativa ({feitas + 1} de {TENTATIVAS_POR_DIA})"
+                  + (": a anterior não terminou" if morreu else ""))
 
 
 def _should_run_now(sched, now_brt, edition_stage, estado=None):
@@ -2563,8 +2625,10 @@ def _candidatas_do_tick(sm, now, hoje):
             print(f"[tick] {slug} falhou antes de rodar: {e}")
             erros.append({"campanha": slug, "error": str(e)[:500]})
     # Vencida há mais tempo primeiro: `last_run_date` vazio (nunca rodou) ordena antes de
-    # qualquer data, que é exatamente a prioridade certa.
-    aprovadas.sort(key=lambda t: (t[0], t[1]))
+    # qualquer data, que é exatamente a prioridade certa. No mesmo dia, a de tentativa mais
+    # antiga: duas edições barradas pela revisão voltam em todo tick, e pelo slug a primeira
+    # rodaria sempre e a outra nunca seria reenviada.
+    aprovadas.sort(key=lambda t: (t[0], t[3].get("tentativa_em") or "", t[1]))
     return aprovadas, ignoradas, erros
 
 
@@ -2590,6 +2654,8 @@ def cron_tick():
     extra = {"prazos": prazos} if prazos else {}
 
     if not aprovadas:
+        if prazos:
+            sm.sync_to_firebase()  # o prazo mudou o estado, e o painel lê o espelho
         return {"ran": False, "reason": "nenhuma campanha vencida agora",
                 "pendentes": [], "ignoradas": ignoradas, "erros": erros, **extra}
 
@@ -2639,13 +2705,16 @@ def _avisa_do_tick(sm, slug, edition, now, result):
 
     Barrada pela revisão avisa UMA vez por edição, marcando quem libera: a cada 15 min a nova
     tentativa barrada repetiria a menção até o prazo. A edição que sai depois de barrada fecha
-    o assunto com "saiu". Falha comum diz se ainda há tentativa, e até quando."""
+    o assunto com "saiu". A que já constava como enviada vira `sent` sem sair por esta
+    tentativa, e avisa: duas campanhas com o mesmo nome no mesmo dia contam como uma. Falha
+    comum diz se ainda há tentativa, e até quando."""
     try:
         st = sm.get_state(edition)
         sched = get_schedule(sm, slug)
     except Exception as e:  # noqa: BLE001: aviso é observabilidade, não parte da entrega
         return f"falhou: {type(e).__name__}: {e}"[:200]
-    avisos = (st.get("envio_zma") or {}).get("avisos") or []
+    envio = st.get("envio_zma") or {}
+    avisos = envio.get("avisos") or []
     contexto = {"prazo": _hhmm(_prazo_envio(sched)), "tentativa": sched.get("tentativas"),
                 "tentativas_max": TENTATIVAS_POR_DIA}
     erro, evento = result.get("error"), None
@@ -2655,6 +2724,8 @@ def _avisa_do_tick(sm, slug, edition, now, result):
         erro, evento = None, "revisao"
     elif st.get("stage") == "sent" and "revisao" in avisos and "saiu" not in avisos:
         evento = "saiu"
+    elif st.get("stage") == "sent" and envio.get("ja_tinha_saido") and "ja_saiu" not in avisos:
+        evento = "ja_saiu"
     elif erro:
         contexto["nova_tentativa"] = _retomada(sched, now, st)[0]
     aviso = notify.avisa(st, edition, erro, evento=evento, contexto=contexto)
@@ -2689,7 +2760,8 @@ def _fecha_prazos(sm, now, hoje):
     """Fecha o dia das edições barradas pela revisão que passaram do prazo. Nunca levanta.
 
     Confere no ZMA antes de declarar que não saiu: a edição pode ter sido liberada e enviada
-    pelo painel entre o último tick antes do prazo e ele. Cada campanha no seu try, pelo
+    pelo painel entre o último tick antes do prazo e ele. O dia fechado cujo aviso não chegou
+    (Slack fora do ar) volta no tick seguinte até o aviso sair. Cada campanha no seu try, pelo
     mesmo motivo do `_candidatas_do_tick`."""
     fechadas = []
     agora = now.hour * 60 + now.minute
@@ -2702,9 +2774,16 @@ def _fecha_prazos(sm, now, hoje):
         try:
             edition = edition_id(slug, hoje)
             envio = dict(sm.get_state(edition).get("envio_zma") or {})
-            if envio.get("status") != "barrado_revisao":
+            if envio.get("status") not in ("barrado_revisao", "prazo_vencido"):
                 continue
-            prazo = _prazo_envio(get_schedule(sm, slug))
+            if envio["status"] == "prazo_vencido" and "prazo" in (envio.get("avisos") or []):
+                continue
+            sched = get_schedule(sm, slug)
+            if not sched.get("auto_send"):
+                # Sem envio automático o broker nunca tentou de novo: "parou de tentar" seria
+                # falso, e quem disparou à mão já recebeu a recusa.
+                continue
+            prazo = _prazo_envio(sched)
             if agora < prazo:
                 continue
             res = _confere_no_zma(envio)

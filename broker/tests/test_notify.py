@@ -130,6 +130,35 @@ def test_aviso_de_prazo_sem_conferencia_no_zma_diz_isso():
     assert "conferir no painel" in txt
 
 
+def test_aviso_de_revisao_diz_onde_clicar_e_qual_das_campanhas_liberar():
+    """Rodar a edição de novo deixa duas campanhas com o mesmo nome no painel (24/10/2026
+    teve duas). O horário de criação é o que o painel mostra ao lado do nome. Caminho e botão
+    conferidos no painel em 25/10/2026."""
+    estado = {"stage": "ready", "envio_zma": {**BARRADA["envio_zma"],
+                                              "criada_em": "2026-10-26T09:01:12-03:00"}}
+    txt = notify.monta_aviso("2026-10-26", estado, evento="revisao", contexto={"prazo": "12:00"})
+    assert "Marketing Campaigns" in txt and "Review and launch" in txt
+    assert "criada às 09:01" in txt
+
+
+def test_aviso_de_revisao_aponta_a_campanha_descartada_por_conteudo_antigo():
+    estado = {"stage": "ready", "envio_zma": {
+        **BARRADA["envio_zma"], "criada_em": "2026-10-26T10:32:00-03:00",
+        "descartadas": [{"campaign_key": "K0", "criada_em": "2026-10-26T09:01:12-03:00"}]}}
+    txt = notify.monta_aviso("2026-10-26", estado, evento="revisao", contexto={"prazo": "12:00"})
+    assert "criada às 10:32" in txt
+    assert "09:01" in txt and "conteúdo antigo" in txt
+
+
+def test_aviso_de_edicao_que_ja_tinha_saido():
+    estado = {"stage": "sent", "envio_zma": {
+        "campaign_key": "K9", "campaign_name": "mK Newsletter 2026-10-26", "status": "enviada",
+        "enviada_em": "26 Oct 2026, 08:40 AM", "ja_tinha_saido": True}}
+    txt = notify.monta_aviso("2026-10-26", estado, evento="ja_saiu")
+    assert "já tinha saído" in txt and "mK Newsletter 2026-10-26" in txt
+    assert "26 Oct 2026, 08:40 AM" in txt
+
+
 def test_edicao_pronta_sem_procedencia_nao_quebra():
     """Edição legada ou manual_html não tem provenance nenhum."""
     txt = notify.monta_aviso("2026-09-03", {"stage": "ready", "preview_url": "https://x"})
@@ -237,7 +266,8 @@ def test_tick_que_nao_roda_nao_avisa(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("estado,erro,evento", [
     (PRONTA, None, None), ({"stage": "researched"}, "falhou", None), (PRONTA, "falhou", None),
-    (BARRADA, None, "revisao"), (BARRADA, None, "saiu"), (BARRADA, None, "prazo")])
+    (BARRADA, None, "revisao"), (BARRADA, None, "saiu"), (BARRADA, None, "prazo"),
+    (BARRADA, None, "ja_saiu")])
 def test_aviso_nao_usa_travessao_longo(estado, erro, evento):
     """A regra editorial da mK proíbe travessão longo, e o próprio prompt da newsletter
     abre com "ZERO TRAVESSÃO LONGO". O aviso é texto da mK como qualquer outro."""

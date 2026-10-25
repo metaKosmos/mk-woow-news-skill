@@ -43,10 +43,13 @@ def _campanha(key, nome, status, enviada="", assunto="Drops do dia"):
 class _Zma:
     """ZMA de mentira no nível do HTTP: o que o send_zma decide fica real."""
 
-    def __init__(self, recentes=(), envio=SUCESSO, recentes_falha=False):
+    def __init__(self, recentes=(), envio=SUCESSO, recentes_falha=False, envio_falha=None,
+                 ao_enviar=None):
         self.recentes = list(recentes)
         self.envio = envio
         self.recentes_falha = recentes_falha
+        self.envio_falha = envio_falha
+        self.ao_enviar = ao_enviar
         self.chamadas = []
 
     def get(self, url, headers=None):
@@ -65,6 +68,10 @@ class _Zma:
             return {"message": "Campaign created successfully", "campaignKey": "NOVA",
                     "code": "200", "uri": "/api/v1/createCampaign"}
         if op == "sendcampaign":
+            if self.ao_enviar:
+                self.ao_enviar()
+            if self.envio_falha:
+                raise self.envio_falha
             return self.envio
         raise AssertionError(f"POST inesperado: {url}")
 
@@ -159,6 +166,50 @@ def test_primeira_recusa_ja_devolve_a_chave_criada(monkeypatch, capsys, tmp_path
     codigo, res, _ = _roda(monkeypatch, capsys, tmp_path, zma)
     assert codigo == send_zma.EXIT_BARRADO_REVISAO
     assert res["campaign_key"] == "NOVA"
+
+
+def test_chave_criada_sai_no_stdout_antes_do_envio(monkeypatch, capsys, tmp_path):
+    """Processo morto durante o sendcampaign (o teto de 600 s do subprocess, instância
+    reciclada) não chega ao resultado final. Sem a chave já impressa, a tentativa seguinte
+    criaria uma segunda campanha com o mesmo nome."""
+    antes_do_envio = []
+    zma = _Zma(ao_enviar=lambda: antes_do_envio.append(capsys.readouterr().out))
+    _roda(monkeypatch, capsys, tmp_path, zma)
+    linhas = [json.loads(l) for l in antes_do_envio[0].splitlines() if l.strip().startswith("{")]
+    assert linhas and linhas[-1]["campaign_key"] == "NOVA"
+
+
+def test_envio_que_cai_depois_de_criar_devolve_a_chave(monkeypatch, capsys, tmp_path):
+    zma = _Zma(envio_falha=OSError("conexão recusada"))
+    codigo, res, _ = _roda(monkeypatch, capsys, tmp_path, zma)
+    assert codigo not in (0, None, send_zma.EXIT_BARRADO_REVISAO)
+    assert "conexão recusada" in str(codigo)
+    assert res["tipo"] == "erro" and res["campaign_key"] == "NOVA"
+
+
+def test_chamadas_ao_zma_tem_teto_de_tempo(monkeypatch):
+    """Sem teto, uma chamada travada segura o tick até os 600 s do subprocess, inclusive a
+    conferência do prazo, que roda antes de escolher a campanha do tick."""
+    tetos = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def _urlopen(req, timeout=None):
+        tetos.append(timeout)
+        return _Resp()
+
+    monkeypatch.setattr(send_zma.urllib.request, "urlopen", _urlopen)
+    send_zma.get("https://zma/recentcampaigns")
+    send_zma.post_form("https://zma/sendcampaign", {"campaignkey": "K1"})
+    assert len(tetos) == 2 and all(tetos)
 
 
 def test_recusa_que_nao_e_da_revisao_continua_sendo_falha_comum(monkeypatch, capsys, tmp_path):

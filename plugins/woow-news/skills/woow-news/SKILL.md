@@ -193,7 +193,14 @@ Se o Zoho barrar o envio pela revisão dele (códigos 6608, 6609, 6611), o aviso
 libera no painel do Zoho Marketing Automation e diz até que horas o broker tenta. Libere a
 campanha que o aviso cita, sem criar outra: o broker reenvia essa mesma a cada 15 min e,
 se ela sair pelo painel, reconhece e não manda de novo. Campanha criada à mão ou
-cópia não é reconhecida: por isso, libere a que o aviso cita.
+cópia não é reconhecida: por isso, libere a que o aviso cita. O aviso diz o horário de
+criação, que separa campanhas de mesmo nome no painel (Marketing Campaigns › Email, botão
+"Review and launch").
+
+Trocar o HTML da edição barrada (`set-html`) tira de uso a campanha antiga, que o Zoho criou
+com o conteúdo velho: o broker cria outra, e o aviso novo diz qual liberar e qual não. Se a
+edição já constava como enviada por outra campanha de mesmo nome, o broker não manda de novo
+e avisa no canal.
 
 ## Listas e destinatários (ZMA, NÃO Zoho CRM)
 A lista de envio da newsletter vive no **Zoho Marketing Automation (ZMA)**, e a skill cria/lista/troca essas listas via broker (comandos acima). **Esta skill não usa Zoho CRM.** Se o seu ambiente Claude tiver algum conector `ZohoCRM_*` conectado, **ignore-o** — ele não tem nada a ver com a newsletter; criar algo no módulo "Campaigns" do CRM não vira lista de disparo. Para qualquer operação de lista, use sempre `scripts/woow.py` (list-lists / create-list / set-list), nunca ferramentas de CRM.

@@ -13,8 +13,9 @@ Fluxo:
                        ou --campaign-key (reusa a campanha de uma tentativa anterior)
                    ->  sendcampaign (campaignkey)   [só com --send]
 
-A última linha do stdout é um JSON com o resultado (`tipo`, `campaign_key`, `code`...), que
-o orquestrador lê. Recusa da revisão do ZMA sai com EXIT_BARRADO_REVISAO.
+O resultado sai no stdout em linhas JSON (`tipo`, `campaign_key`, `code`...), e o orquestrador
+lê a última: `criada` logo depois do createCampaign, o resultado do envio no fim. Recusa da
+revisão do ZMA sai com EXIT_BARRADO_REVISAO.
 
 Uso:
     # cria a campanha (Draft) a partir de um HTML já público, sem enviar:
@@ -50,6 +51,9 @@ BASE = Path(__file__).resolve().parent
 
 ACCOUNTS_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 ZMA_BASE = "https://marketingautomation.zoho.com/api/v1"
+# Teto de cada chamada HTTP. Sem ele, uma chamada travada só cai nos 600 s do subprocess, e
+# a conferência do prazo, que roda antes de o tick escolher a campanha, seguraria o tick.
+TIMEOUT_HTTP = 60
 
 DEFAULT_FROM_EMAIL = "david@metakosmos.com.br"
 DEFAULT_FROM_NAME = "metaKosmos"
@@ -127,13 +131,13 @@ def post_form(url, data, headers=None):
     body = urllib.parse.urlencode(data).encode("utf-8")
     req = urllib.request.Request(url, data=body, headers=headers or {}, method="POST")
     req.add_header("Content-Type", "application/x-www-form-urlencoded")
-    with urllib.request.urlopen(req) as resp:
+    with urllib.request.urlopen(req, timeout=TIMEOUT_HTTP) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
 def get(url, headers=None):
     req = urllib.request.Request(url, headers=headers or {}, method="GET")
-    with urllib.request.urlopen(req) as resp:
+    with urllib.request.urlopen(req, timeout=TIMEOUT_HTTP) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -386,12 +390,21 @@ def main():
         )
         print(f"OK createCampaign, campaignKey: {key}")
         print(f"    status: {resp.get('campaign_status') or resp.get('status')}")
+        # A chave sai já, antes do envio: processo morto no sendcampaign (o teto do
+        # subprocess, instância reciclada) não chega ao resultado final, e sem ela a
+        # tentativa seguinte criaria uma segunda campanha com o mesmo nome.
+        _resultado(tipo="criada", campaign_key=key, campaign_name=campaignname)
 
     if not args.send:
         print("Modo Draft (sem --send). Campanha criada, não enviada.")
         return
 
-    send_resp = send_campaign(token, key)
+    try:
+        send_resp = send_campaign(token, key)
+    except Exception as e:  # noqa: BLE001: a falha de rede não pode levar a chave junto
+        _resultado(tipo="erro", campaign_key=key, campaign_name=campaignname, code="",
+                   significado="", erro=str(e)[:200])
+        sys.exit(f"sendcampaign falhou (campaignKey {key}): {e}")
     print(f"sendcampaign -> {json.dumps(send_resp)}")
     tipo, code = classifica_envio(send_resp)
     falha = falha_sendcampaign(send_resp, key)
