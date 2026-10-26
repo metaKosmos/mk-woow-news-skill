@@ -59,8 +59,19 @@ printf '%s' 'NOVO_VALOR' | gcloud secrets versions add zoho-ma-refresh-token --d
 
 O broker avisa num canal do Slack quando a edição do dia fica **pronta para revisão** ou
 quando o estágio **falha**. É o único sinal que existe antes do horário de entrega: o
-`cron_tick` marca o dia como rodado antes de executar e não tenta de novo, então sem isto
+`cron_tick` tenta de novo no tick seguinte (até 3 vezes por dia e até o prazo), e sem isto
 a ausência do e-mail é a primeira notícia de que algo deu errado.
+
+Quando o ZMA barra o envio pela revisão (6608, 6609, 6611), o aviso marca quem libera no
+painel, uma vez por edição, e diz até que horas o broker tenta: o `prazo_envio` da agenda
+ou, sem ele, 3h depois do `send_time`. A pessoa marcada é o id do Slack em
+`ALERT_REVIEW_MENTION` (hoje o Patrick, `U04JLC4HPFT`); sem a variável, o aviso sai sem
+menção. Para ligar ou trocar, sem mexer nas outras variáveis:
+
+```bash
+gcloud functions deploy woow-news-broker --gen2 --region=$REGION \
+  --update-env-vars="ALERT_REVIEW_MENTION=U04JLC4HPFT"
+```
 
 O canal é escolhido ao criar o webhook no Slack (Incoming Webhooks do app da workspace):
 
@@ -306,8 +317,12 @@ gcloud scheduler jobs create http woow-news-tick \
 > gcloud functions deploy woow-news-broker --gen2 --region=$REGION \
 >   --update-env-vars=... --timeout=900s --memory=1Gi
 > ```
-> Falha de um dia **não** re-tenta sozinha (o dia já foi "claimado"); um operador roda na
-> mão com `woow.py run --edition <hoje>`.
+> Falha de um dia tenta de novo nos ticks seguintes, até 3 vezes e até o prazo da agenda
+> (PROD-3167); o claim do dia não é reaberto, quem decide é o `_retomada`. Edição barrada
+> pela revisão do ZMA tenta a cada tick até o prazo, sempre com a mesma campanha. Tentativa
+> que morre sem registro (timeout da request, instância reciclada) conta como falha 20 min
+> depois de começar, o `TENTATIVA_MAX_S`, que precisa ficar acima do `--timeout`. Esgotado
+> isso, um operador roda na mão com `woow.py run --edition <hoje>`.
 
 ## Papéis e allowlist
 
