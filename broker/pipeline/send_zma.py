@@ -2,16 +2,19 @@
 """Disparo da newsletter mK via API Zoho Marketing Automation (ZMA).
 
 Adaptação da automação MAR-118 (era Zoho Campaigns v1.1) para Marketing
-Automation v1. Até 16/10/2026 o sendcampaign passava sem revisão; desde 17/10 a conta
-revisa as campanhas e ele pode voltar 6608, 6609 ou 6611 até alguém liberar no painel
-(ver EXIT_BARRADO_REVISAO e o `_retomada` do orquestrador).
+Automation v1. Até 16/10/2026 o sendcampaign passava sem revisão; desde 17/10 a conta está no
+Marketing Automation 2.0, toda campanha nasce com revisão de conteúdo obrigatória e o
+sendcampaign da v1 volta 6611 sem conseguir mandá-la para revisão. O disparo passou para o
+`reviewandlaunch` da API v2.1 (doc enviada pelo suporte do Zoho em 30/10, não publicada): ele
+manda a campanha para a revisão do Zoho, e ela sai sozinha quando a revisão passa. A criação
+continua na v1. Recusa que ainda dependa de alguém no painel sai com EXIT_BARRADO_REVISAO.
 
 Fluxo:
     refresh OAuth  ->  recentcampaigns (a edição já saiu?)   [só com --send]
                    ->  getmailinglists (resolve listkey)
                    ->  createCampaign (content_url + list_details + topicId)
                        ou --campaign-key (reusa a campanha de uma tentativa anterior)
-                   ->  sendcampaign (campaignkey)   [só com --send]
+                   ->  reviewandlaunch v2.1 (campaign_id numérico)   [só com --send]
 
 O resultado sai no stdout em linhas JSON (`tipo`, `campaign_key`, `code`...), e o orquestrador
 lê a última: `criada` logo depois do createCampaign, o resultado do envio no fim. Recusa da
@@ -25,7 +28,7 @@ Uso:
     python3 send_zma.py content/2026-w24.md --content-url https://.../x.html --send
 
     # reenvia a campanha de uma tentativa barrada, sem criar outra:
-    python3 send_zma.py content/2026-w24.md --content-url https://.../x.html --send --campaign-key K
+    python3 send_zma.py content/2026-w24.md --content-url https://.../x.html --send --campaign-key K --campaign-id N
 
     # só confere se a campanha (ou uma cópia dela) já saiu:
     python3 send_zma.py --check --campaign-key K --campaign-name "mK Newsletter 2026-w24"
@@ -38,6 +41,7 @@ import argparse
 import json
 import os
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -51,6 +55,8 @@ BASE = Path(__file__).resolve().parent
 
 ACCOUNTS_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 ZMA_BASE = "https://marketingautomation.zoho.com/api/v1"
+# A v2.1 só responde neste host: no marketingautomation.zoho.com ela devolve 1004.
+ZMA_V21_BASE = "https://ma.zoho.com/api/v2.1"
 # Teto de cada chamada HTTP. Sem ele, uma chamada travada só cai nos 600 s do subprocess, e
 # a conferência do prazo, que roda antes de o tick escolher a campanha, seguraria o tick.
 TIMEOUT_HTTP = 60
@@ -76,12 +82,22 @@ SIGNIFICADO_ZMA = {
     "6503": "a campanha foi apagada",
     "3006": "o conteúdo mudou depois da revisão",
     "3007": "os destinatários mudaram depois da revisão",
+    # Do reviewandlaunch, lido ao vivo em 30/10/2026 numa campanha que já estava em revisão.
+    "5014": "a campanha não pode ir para revisão (já está em revisão ou saiu)",
 }
 # Recusa que só passa quando alguém libera a revisão no painel do ZMA.
 CODIGOS_REVISAO = frozenset({"6608", "6609", "6611", "3006", "3007"})
 # `campaign_status` de campanha que já saiu ou está saindo, sem espaço e em minúsculas.
+# A campanha em revisão entra: depois do reviewandlaunch ela sai sozinha quando a revisão do
+# Zoho passa, e mandar outra com o mesmo nome faria a lista receber duas vezes. O
+# recentcampaigns da v1 a mostra como "To Be Reviewed" (lido em 30/10/2026); a v2.1, como
+# ContentToBeReviewed.
 STATUS_SAIU = frozenset({"sent", "inprogress", "sending", "scheduled",
-                         "scheduledafterreviewed"})
+                         "scheduledafterreviewed", "tobereviewed", "contenttobereviewed",
+                         "sendingshortly"})
+# Status de sucesso do reviewandlaunch, no mesmo formato.
+STATUS_LANCADA = frozenset({"contenttobereviewed", "scheduled", "sendingshortly", "sending",
+                            "sent"})
 
 
 # ---------------------------------------------------------------- env / config
@@ -133,6 +149,21 @@ def post_form(url, data, headers=None):
     req.add_header("Content-Type", "application/x-www-form-urlencoded")
     with urllib.request.urlopen(req, timeout=TIMEOUT_HTTP) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def put(url, headers=None):
+    """PUT sem corpo. A recusa do ZMA vem como HTTP 4xx com JSON no corpo, e é ela que diz o
+    código: o corpo volta como resposta, não como exceção."""
+    req = urllib.request.Request(url, data=b"", headers=headers or {}, method="PUT")
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_HTTP) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        corpo = e.read().decode("utf-8", "replace")
+        try:
+            return json.loads(corpo)
+        except ValueError:
+            raise e from None
 
 
 def get(url, headers=None):
@@ -197,9 +228,32 @@ def create_campaign(token, *, campaignname, from_email, from_name, subject,
     return key, resp
 
 
-def send_campaign(token, campaignkey):
-    data = {"resfmt": "JSON", "campaignkey": campaignkey}
-    return post_form(f"{ZMA_BASE}/sendcampaign", data, headers=auth_headers(token))
+def _id_numerico(c):
+    """O campaign_id numérico de uma campanha ou resposta do ZMA, ou "". O createCampaign e o
+    recentcampaigns não usam o mesmo nome de campo (o recentcampaigns usa `campaignId`)."""
+    corpo = _corpo(c)
+    for campo in ("campaign_id", "campaignId", "campaignid"):
+        if corpo.get(campo):
+            return str(corpo[campo])
+    return ""
+
+
+def campaign_id_da_chave(token, campaign_key):
+    """O campaign_id da campanha pela chave, procurado no recentcampaigns, ou "". O
+    getcampaigndetails não traz o id, e o recentcampaigns pode deixar rascunho de fora (29/10):
+    por isso o id é guardado na criação e esta busca é só a rede de segurança."""
+    for c in _campanhas(recent_campaigns(token, 200)):
+        if c.get("campaign_key") == campaign_key:
+            return _id_numerico(c)
+    return ""
+
+
+def launch_campaign(token, campaign_id):
+    """reviewandlaunch da v2.1: manda a campanha para a revisão do Zoho e dispara quando ela
+    passa. Recebe o campaign_id numérico, não o campaignKey."""
+    url = (f"{ZMA_V21_BASE}/campaigns/{campaign_id}/reviewandlaunch"
+           "?send_mode=sendnow&schedule_type=sendnow")
+    return put(url, headers=auth_headers(token))
 
 
 def recent_campaigns(token, quantas=30):
@@ -245,9 +299,33 @@ def campanha_que_saiu(resp, campaign_key=None, nome=None):
     return None
 
 
+def status_lancamento(resp):
+    """Status da campanha na resposta do reviewandlaunch, sem espaço e em minúsculas, ou "".
+    Na resposta real (30/10/2026) ele vem em `campaign_details.status`."""
+    corpo = _corpo(resp)
+    detalhes = corpo.get("campaign_details")
+    for fonte in (detalhes if isinstance(detalhes, dict) else {}, corpo):
+        for campo in ("status", "campaign_status"):
+            if fonte.get(campo):
+                return str(fonte[campo]).replace(" ", "").replace("_", "").lower()
+    return ""
+
+
 def classifica_envio(send_resp):
-    """(tipo, code) da resposta do sendcampaign. tipo: enviada | ja_enviada | revisao | erro."""
-    code = str(_corpo(send_resp).get("code", ""))
+    """(tipo, code) da resposta do disparo. tipo: enviada | ja_enviada | revisao | erro.
+
+    `enviada` no reviewandlaunch é status_code 200 com a campanha num dos STATUS_LANCADA:
+    em ContentToBeReviewed ela já está com o Zoho e sai sozinha."""
+    corpo = _corpo(send_resp)
+    status_code = str(corpo.get("status_code", ""))
+    if status_code:
+        if status_code == "200" and status_lancamento(send_resp) in STATUS_LANCADA:
+            return "enviada", status_code
+        code = str(corpo.get("code") or corpo.get("error_code") or status_code)
+        if code == "6600":
+            return "ja_enviada", code
+        return ("revisao" if code in CODIGOS_REVISAO else "erro"), code
+    code = str(corpo.get("code", ""))
     if code in ("0", "200"):
         return "enviada", code
     if code == "6600":
@@ -327,6 +405,8 @@ def main():
     ap.add_argument("--send", action="store_true", help="dispara (default: só cria Draft)")
     ap.add_argument("--campaign-key", default=None,
                     help="reenvia esta campanha, de uma tentativa anterior, em vez de criar outra")
+    ap.add_argument("--campaign-id", default=None,
+                    help="campaign_id numérico da --campaign-key (sem ele, procura no recentcampaigns)")
     ap.add_argument("--check", action="store_true",
                     help="só confere se a campanha (--campaign-key/--campaign-name) já saiu")
     args = ap.parse_args()
@@ -363,12 +443,14 @@ def main():
         if saiu:
             print(f"OK a edição já saiu: {saiu.get('campaign_name')} ({saiu.get('campaign_key')})")
             _resultado(tipo="ja_enviada", campaign_key=saiu.get("campaign_key") or "",
+                       campaign_id=_id_numerico(saiu),
                        campaign_name=saiu.get("campaign_name") or campaignname,
                        enviada_em=saiu.get("sent_date_string") or "")
             return
 
     if args.campaign_key:
         key = args.campaign_key
+        campaign_id = args.campaign_id or ""
         print(f"OK campanha de tentativa anterior, campaignKey: {key}")
     else:
         if args.list_key:
@@ -388,30 +470,39 @@ def main():
             listkey=listkey,
             topic_id=args.topic_id,
         )
-        print(f"OK createCampaign, campaignKey: {key}")
+        campaign_id = _id_numerico(resp)
+        print(f"OK createCampaign, campaignKey: {key}, campaign_id: {campaign_id or '?'}")
         print(f"    status: {resp.get('campaign_status') or resp.get('status')}")
-        # A chave sai já, antes do envio: processo morto no sendcampaign (o teto do
-        # subprocess, instância reciclada) não chega ao resultado final, e sem ela a
-        # tentativa seguinte criaria uma segunda campanha com o mesmo nome.
-        _resultado(tipo="criada", campaign_key=key, campaign_name=campaignname)
+        # A chave sai já, antes do envio: processo morto no disparo (o teto do subprocess,
+        # instância reciclada) não chega ao resultado final, e sem ela a tentativa seguinte
+        # criaria uma segunda campanha com o mesmo nome.
+        _resultado(tipo="criada", campaign_key=key, campaign_id=campaign_id,
+                   campaign_name=campaignname)
 
     if not args.send:
         print("Modo Draft (sem --send). Campanha criada, não enviada.")
         return
 
     try:
-        send_resp = send_campaign(token, key)
+        if not campaign_id:
+            campaign_id = campaign_id_da_chave(token, key)
+        if not campaign_id:
+            raise RuntimeError("campaign_id não encontrado (nem na criação, nem no recentcampaigns)")
+        send_resp = launch_campaign(token, campaign_id)
     except Exception as e:  # noqa: BLE001: a falha de rede não pode levar a chave junto
-        _resultado(tipo="erro", campaign_key=key, campaign_name=campaignname, code="",
-                   significado="", erro=str(e)[:200])
-        sys.exit(f"sendcampaign falhou (campaignKey {key}): {e}")
-    print(f"sendcampaign -> {json.dumps(send_resp)}")
+        _resultado(tipo="erro", campaign_key=key, campaign_id=campaign_id,
+                   campaign_name=campaignname, code="", significado="", erro=str(e)[:200])
+        sys.exit(f"reviewandlaunch falhou (campaignKey {key}): {e}")
+    print(f"reviewandlaunch -> {json.dumps(send_resp)}")
     tipo, code = classifica_envio(send_resp)
     falha = falha_sendcampaign(send_resp, key)
     if not falha:
-        print("OK envio confirmado")
-    _resultado(tipo=tipo, campaign_key=key, campaign_name=campaignname, code=code,
-               significado=SIGNIFICADO_ZMA.get(code, ""))
+        print(f"OK campanha lançada ({status_lancamento(send_resp)}): sai quando a revisão "
+              "do Zoho passar")
+    _resultado(tipo=tipo, campaign_key=key, campaign_id=campaign_id,
+               campaign_name=campaignname, code=code,
+               significado=SIGNIFICADO_ZMA.get(code, ""),
+               status_zma=status_lancamento(send_resp))
     if tipo == "revisao":
         print(falha, file=sys.stderr)
         sys.exit(EXIT_BARRADO_REVISAO)
@@ -447,8 +538,8 @@ def _confere(token, campaign_key, nome):
 
 
 def falha_sendcampaign(send_resp, campaignkey):
-    """Mensagem de falha do sendcampaign, ou None quando o ZMA confirmou o envio (ou a
-    campanha já tinha saído).
+    """Mensagem de falha do disparo, ou None quando o ZMA aceitou o lançamento (ou a campanha
+    já tinha saído).
 
     A resposta crua vai na mensagem: o orquestrador só guarda o stderr, e sem o código
     do ZMA a falha não tem diagnóstico (o Daily Drops ficou parado dias por isso). O
@@ -460,9 +551,9 @@ def falha_sendcampaign(send_resp, campaignkey):
     significado = SIGNIFICADO_ZMA.get(code)
     rotulo = f"code {code or 'ausente'}" + (f": {significado}" if significado else "")
     if tipo == "revisao":
-        return (f"sendcampaign barrado pela revisão do ZMA ({rotulo}, campaignKey {campaignkey}): "
+        return (f"reviewandlaunch barrado pela revisão do ZMA ({rotulo}, campaignKey {campaignkey}): "
                 f"liberar a revisão desta campanha no painel do ZMA. {crua}")
-    return f"sendcampaign recusado pelo ZMA ({rotulo}, campaignKey {campaignkey}): {crua}"
+    return f"reviewandlaunch recusado pelo ZMA ({rotulo}, campaignKey {campaignkey}): {crua}"
 
 
 if __name__ == "__main__":

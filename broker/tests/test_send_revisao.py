@@ -11,6 +11,10 @@
 # lista sob `recent_campaigns`, data em texto ("23 Oct 2026, 10:44 AM"), `sent_date_string`
 # só na campanha enviada. A recusa do `sendcampaign` é a resposta crua de 24/10/2026, copiada
 # do #woow-news-alerts.
+#
+# Desde 30/10/2026 o disparo é o `reviewandlaunch` da v2.1 (PUT com o campaign_id numérico), e
+# o sucesso dele é status_code 200 com a campanha em ContentToBeReviewed (ou adiante). As
+# recusas no formato da v1 continuam aqui porque o classificador ainda as lê.
 import json
 import pathlib
 import sys
@@ -24,14 +28,21 @@ import send_zma  # noqa: E402
 RECUSA_6608 = {"code": "6608", "campaign_status": "Draft",
                "message": "zc.api.campaign.contactcount.changed", "uri": "/sendcampaign",
                "version": "1"}
-SUCESSO = {"code": "200", "message": "", "campaign_status": "inprogress",
-           "uri": "/api/v1/sendcampaign", "version": "1"}
+# Resposta real do reviewandlaunch em 30/10/2026 (campanha de teste para a lista de 1 contato).
+SUCESSO = {"status_message": "Success", "status_code": 200,
+           "campaign_details": {"updated_time_ms": 1793402040000,
+                                "name": "ZZ TESTE reviewandlaunch David 2026-10-30",
+                                "id": "1487553000017736875",
+                                "updated_date": "2026-10-30T13:14:00-03:00",
+                                "status": "ContentToBeReviewed"}}
+SUCESSO_V1 = {"code": "200", "message": "", "campaign_status": "inprogress",
+              "uri": "/api/v1/sendcampaign", "version": "1"}
 NOME = "mK Newsletter 2026-10-26"
 
 
 def _campanha(key, nome, status, enviada="", assunto="Drops do dia"):
     c = {"campaign_key": key, "campaign_name": nome, "campaign_status": status,
-         "campaignId": "1487553000017600022", "campaigntype": "normal", "is_hybrid": "false",
+         "campaignId": f"ID-{key}", "campaigntype": "normal", "is_hybrid": "false",
          "created_date_string": "26 Oct 2026, 09:01 AM", "created_time": "1793016060000",
          "from_email": "news@metakosmos.com.br", "reply_to": "news@metakosmos.com.br",
          "subject": assunto, "zuid": "892598387", "folder_id": ""}
@@ -66,14 +77,20 @@ class _Zma:
         self.chamadas.append((op, data.get("campaignkey")))
         if op == "createCampaign":
             return {"message": "Campaign created successfully", "campaignKey": "NOVA",
-                    "code": "200", "uri": "/api/v1/createCampaign"}
-        if op == "sendcampaign":
+                    "campaign_id": "ID-NOVA", "code": "200", "uri": "/api/v1/createCampaign"}
+        raise AssertionError(f"POST inesperado: {url}")
+
+    def put(self, url, headers=None):
+        assert url.startswith(send_zma.ZMA_V21_BASE + "/campaigns/"), url
+        caminho = url.split("?")[0].split("/")
+        self.chamadas.append((caminho[-1], caminho[-2]))
+        if caminho[-1] == "reviewandlaunch":
             if self.ao_enviar:
                 self.ao_enviar()
             if self.envio_falha:
                 raise self.envio_falha
             return self.envio
-        raise AssertionError(f"POST inesperado: {url}")
+        raise AssertionError(f"PUT inesperado: {url}")
 
 
 def _roda(monkeypatch, capsys, tmp_path, zma, *extra):
@@ -83,6 +100,7 @@ def _roda(monkeypatch, capsys, tmp_path, zma, *extra):
     monkeypatch.setattr(send_zma, "get_access_token", lambda env: "T")
     monkeypatch.setattr(send_zma, "get", zma.get)
     monkeypatch.setattr(send_zma, "post_form", zma.post_form)
+    monkeypatch.setattr(send_zma, "put", zma.put)
     argv = ["send_zma.py"]
     if "--check" not in extra:
         argv += [str(md), "--content-url", "https://pub/x.html", "--send", "--list-key", "LK"]
@@ -101,7 +119,7 @@ def test_tentativa_seguinte_reenvia_a_mesma_campanha_sem_criar_outra(monkeypatch
     zma = _Zma(recentes=[_campanha("K1", NOME, "Draft")])
     codigo, res, _ = _roda(monkeypatch, capsys, tmp_path, zma, "--campaign-key", "K1")
     assert codigo == 0
-    assert ("sendcampaign", "K1") in zma.chamadas
+    assert ("reviewandlaunch", "ID-K1") in zma.chamadas
     assert not any(c[0] == "createCampaign" for c in zma.chamadas if isinstance(c, tuple))
     assert res["tipo"] == "enviada" and res["campaign_key"] == "K1"
 
@@ -113,7 +131,7 @@ def test_mesma_edicao_ja_enviada_com_outra_chave_impede_o_reenvio(monkeypatch, c
                          _campanha("K2", NOME, "Sent", "26 Oct 2026, 10:20 AM")])
     codigo, res, _ = _roda(monkeypatch, capsys, tmp_path, zma, "--campaign-key", "K1")
     assert codigo == 0
-    assert not any(isinstance(c, tuple) and c[0] == "sendcampaign" for c in zma.chamadas)
+    assert not any(isinstance(c, tuple) and c[0] == "reviewandlaunch" for c in zma.chamadas)
     assert res["tipo"] == "ja_enviada"
     assert res["campaign_key"] == "K2"
     assert res["enviada_em"] == "26 Oct 2026, 10:20 AM"
@@ -128,7 +146,7 @@ def test_teste_enviado_ao_time_com_o_mesmo_assunto_nao_barra_a_edicao(monkeypatc
     zma = _Zma(recentes=[_campanha("K1", NOME, "Draft"), teste])
     codigo, res, _ = _roda(monkeypatch, capsys, tmp_path, zma, "--campaign-key", "K1")
     assert codigo == 0
-    assert ("sendcampaign", "K1") in zma.chamadas
+    assert ("reviewandlaunch", "ID-K1") in zma.chamadas
     assert res["tipo"] == "enviada" and res["campaign_key"] == "K1"
 
 
@@ -156,8 +174,9 @@ def test_primeiro_envio_cria_a_campanha_e_devolve_a_chave(monkeypatch, capsys, t
     assert codigo == 0
     criadas = [c for c in zma.chamadas if isinstance(c, tuple) and c[0] == "createCampaign"]
     assert len(criadas) == 1
-    assert ("sendcampaign", "NOVA") in zma.chamadas
-    assert res == {**res, "tipo": "enviada", "campaign_key": "NOVA", "campaign_name": NOME}
+    assert ("reviewandlaunch", "ID-NOVA") in zma.chamadas
+    assert res == {**res, "tipo": "enviada", "campaign_key": "NOVA", "campaign_id": "ID-NOVA",
+                   "campaign_name": NOME, "status_zma": "contenttobereviewed"}
 
 
 def test_primeira_recusa_ja_devolve_a_chave_criada(monkeypatch, capsys, tmp_path):
@@ -177,6 +196,7 @@ def test_chave_criada_sai_no_stdout_antes_do_envio(monkeypatch, capsys, tmp_path
     _roda(monkeypatch, capsys, tmp_path, zma)
     linhas = [json.loads(l) for l in antes_do_envio[0].splitlines() if l.strip().startswith("{")]
     assert linhas and linhas[-1]["campaign_key"] == "NOVA"
+    assert linhas[-1]["campaign_id"] == "ID-NOVA"
 
 
 def test_envio_que_cai_depois_de_criar_devolve_a_chave(monkeypatch, capsys, tmp_path):
@@ -208,8 +228,9 @@ def test_chamadas_ao_zma_tem_teto_de_tempo(monkeypatch):
 
     monkeypatch.setattr(send_zma.urllib.request, "urlopen", _urlopen)
     send_zma.get("https://zma/recentcampaigns")
-    send_zma.post_form("https://zma/sendcampaign", {"campaignkey": "K1"})
-    assert len(tetos) == 2 and all(tetos)
+    send_zma.post_form("https://zma/createCampaign", {"campaignname": "x"})
+    send_zma.put("https://zma/campaigns/1/reviewandlaunch")
+    assert len(tetos) == 3 and all(tetos)
 
 
 def test_recusa_que_nao_e_da_revisao_continua_sendo_falha_comum(monkeypatch, capsys, tmp_path):
@@ -222,10 +243,64 @@ def test_recusa_que_nao_e_da_revisao_continua_sendo_falha_comum(monkeypatch, cap
 
 def test_conferencia_fora_do_ar_nao_impede_o_envio(monkeypatch, capsys, tmp_path):
     zma = _Zma(recentes_falha=True)
-    codigo, res, _ = _roda(monkeypatch, capsys, tmp_path, zma, "--campaign-key", "K1")
+    codigo, res, _ = _roda(monkeypatch, capsys, tmp_path, zma,
+                           "--campaign-key", "K1", "--campaign-id", "ID-K1")
     assert codigo == 0
-    assert ("sendcampaign", "K1") in zma.chamadas
+    assert ("reviewandlaunch", "ID-K1") in zma.chamadas
     assert res["tipo"] == "enviada"
+
+
+def test_tentativa_sem_id_acha_o_id_pela_chave(monkeypatch, capsys, tmp_path):
+    """Edição barrada antes do conserto tem só a chave guardada: o id vem do recentcampaigns."""
+    zma = _Zma(recentes=[_campanha("K1", NOME, "Draft")])
+    codigo, res, _ = _roda(monkeypatch, capsys, tmp_path, zma, "--campaign-key", "K1")
+    assert codigo == 0 and res["campaign_id"] == "ID-K1"
+    assert ("reviewandlaunch", "ID-K1") in zma.chamadas
+
+
+def test_sem_id_e_sem_conferencia_falha_sem_perder_a_chave(monkeypatch, capsys, tmp_path):
+    zma = _Zma(recentes_falha=True)
+    codigo, res, _ = _roda(monkeypatch, capsys, tmp_path, zma, "--campaign-key", "K1")
+    assert codigo not in (0, None, send_zma.EXIT_BARRADO_REVISAO)
+    assert res["tipo"] == "erro" and res["campaign_key"] == "K1"
+    assert not any(isinstance(c, tuple) and c[0] == "reviewandlaunch" for c in zma.chamadas)
+
+
+def test_campanha_ja_em_revisao_do_zoho_nao_e_lancada_de_novo(monkeypatch, capsys, tmp_path):
+    """Depois do reviewandlaunch a campanha fica em ContentToBeReviewed e sai sozinha: lançar
+    outra com o mesmo nome faria a lista receber duas vezes."""
+    zma = _Zma(recentes=[_campanha("K1", NOME, "To Be Reviewed")])  # como veio em 30/10
+    codigo, res, _ = _roda(monkeypatch, capsys, tmp_path, zma, "--campaign-key", "K1")
+    assert codigo == 0 and res["tipo"] == "ja_enviada"
+    assert not any(isinstance(c, tuple) and c[0] == "reviewandlaunch" for c in zma.chamadas)
+
+
+@pytest.mark.parametrize("status", ["ContentToBeReviewed", "Scheduled", "SendingShortly",
+                                    "Sending", "Sent"])
+def test_status_de_lancamento_e_sucesso(status):
+    resp = {"status_code": 200, "campaign_details": {"status": status}}
+    assert send_zma.classifica_envio(resp) == ("enviada", "200")
+
+
+def test_status_code_200_com_campanha_parada_em_draft_e_erro():
+    """200 sozinho não basta: a campanha precisa ter saído do Draft."""
+    resp = {"status_code": 200, "campaign_details": {"status": "Draft"}}
+    assert send_zma.classifica_envio(resp)[0] == "erro"
+
+
+def test_recusa_http_do_reviewandlaunch_volta_como_resposta(monkeypatch):
+    """O ZMA recusa com HTTP 4xx e JSON no corpo; o código tem de chegar ao classificador."""
+    import io
+    import urllib.error
+
+    def _urlopen(req, timeout=None):
+        assert req.get_method() == "PUT"
+        raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {},
+                                     io.BytesIO(b'{"status_code": 400, "code": "6601"}'))
+
+    monkeypatch.setattr(send_zma.urllib.request, "urlopen", _urlopen)
+    resp = send_zma.put("https://ma.zoho.com/api/v2.1/campaigns/1/reviewandlaunch")
+    assert send_zma.classifica_envio(resp) == ("erro", "6601")
 
 
 def test_6600_e_campanha_que_ja_saiu(monkeypatch, capsys, tmp_path):
@@ -238,7 +313,7 @@ def test_6600_e_campanha_que_ja_saiu(monkeypatch, capsys, tmp_path):
 
 def test_sucesso_embrulhado_em_response_e_sucesso(monkeypatch, capsys, tmp_path):
     """A doc do ZMA mostra o sucesso dentro de `response`; a recusa de 24/10 veio solta."""
-    zma = _Zma(envio={"response": SUCESSO})
+    zma = _Zma(envio={"response": SUCESSO_V1})
     codigo, res, _ = _roda(monkeypatch, capsys, tmp_path, zma)
     assert codigo == 0 and res["tipo"] == "enviada"
 

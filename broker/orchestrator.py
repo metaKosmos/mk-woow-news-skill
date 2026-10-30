@@ -428,7 +428,7 @@ def _proximo_envio(envio, res, rc, agora, erro=""):
     novo = dict(envio)
     tipo = res.get("tipo")
     chave = res.get("campaign_key")
-    for campo in ("campaign_key", "campaign_name"):
+    for campo in ("campaign_key", "campaign_id", "campaign_name"):
         if res.get(campo):
             novo[campo] = res[campo]
     if chave and chave != envio.get("campaign_key") and tipo != "ja_enviada":
@@ -465,7 +465,8 @@ def _descarta_campanha_desatualizada(sm, edition):
     envio = sm.get_state(edition).get("envio_zma") or {}
     if not envio.get("campaign_key") or envio.get("status") == "enviada":
         return
-    novo = {k: v for k, v in envio.items() if k not in ("campaign_key", "criada_em", "avisos")}
+    novo = {k: v for k, v in envio.items()
+            if k not in ("campaign_key", "campaign_id", "criada_em", "avisos")}
     novo["descartadas"] = list(envio.get("descartadas") or []) + [
         {"campaign_key": envio["campaign_key"], "criada_em": envio.get("criada_em") or ""}]
     sm.upsert_edition(edition, {"envio_zma": novo})
@@ -588,6 +589,8 @@ def run_stage(edition, stage, payload):
                 # MESMA campanha. Criar outra deixaria duas no painel, e quem libera uma
                 # enquanto o broker manda a outra faz a lista inteira receber duas vezes.
                 send_args += ["--campaign-key", anterior["campaign_key"]]
+                if anterior.get("campaign_id"):
+                    send_args += ["--campaign-id", anterior["campaign_id"]]
             try:
                 proc = _run_script_proc(wd, "send_zma.py", send_args)
                 saida, rc, falha = proc.stdout, proc.returncode, proc.stderr
