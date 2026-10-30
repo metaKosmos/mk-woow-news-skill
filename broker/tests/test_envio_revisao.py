@@ -156,6 +156,20 @@ def test_tentativa_seguinte_reenvia_a_mesma_campanha(amb):
     assert "last_error" not in (st.get("health") or {})
 
 
+def test_tentativa_seguinte_leva_o_campaign_id_guardado(amb):
+    """O reviewandlaunch da v2.1 pede o id numérico, e o getcampaigndetails não o traz: o id
+    guardado na criação vai junto com a chave na tentativa seguinte."""
+    amb.pronta()
+    barrado = (BARRADO[0], {**BARRADO[1], "campaign_id": "1487553000017736855"}, BARRADO[2])
+    amb.respostas = [barrado, ENVIADA]
+    with pytest.raises(orchestrator.EnvioBarradoPelaRevisao):
+        orchestrator.run_stage(ED, "send", {})
+    assert amb.envio()["campaign_id"] == "1487553000017736855"
+    orchestrator.run_stage(ED, "send", {})
+    assert _tem_par(amb.envios[1], "--campaign-key", "K1")
+    assert _tem_par(amb.envios[1], "--campaign-id", "1487553000017736855")
+
+
 def test_edicao_que_saiu_por_outra_campanha_fica_com_a_chave_dela(amb):
     """As métricas leem `campaign_key`: precisa ser a da campanha que de fato saiu."""
     amb.pronta()
