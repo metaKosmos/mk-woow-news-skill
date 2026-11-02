@@ -382,6 +382,58 @@ def cmd_schedule_autosend(a):
         _render_schedule(bc.set_schedule(_cfg_campanha(a, {"auto_send": False})))
 
 
+def auditar_imagens(html):
+    """Lista os problemas de `src` que o Zoho Campaigns resolve calado: ele reescreve para o
+    CDN só a imagem que consegue ingerir e deixa `src` vazio nas outras, sem erro no import.
+    Medido no teste de 02/11/2026 da newsletter What's New: 9 de 14 imagens sumiram, e as 9
+    eram exatamente as de nome com espaço ou acento (%20, %C3..). Devolve [(src, motivo)]."""
+    import re
+    from urllib.parse import urlsplit, unquote
+    achados = []
+    for m in re.finditer(r"<img\b[^>]*>", html, flags=re.I):
+        tag = m.group(0)
+        sm = re.search(r"\bsrc\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", tag, flags=re.I)
+        if not sm:
+            achados.append(("(sem src)", "tag <img> sem src"))
+            continue
+        src = (sm.group(1) if sm.group(1) is not None else sm.group(2)).strip()
+        if not src:
+            achados.append(("(vazio)", "src vazio"))
+        elif src.lower().startswith("data:"):
+            achados.append((src[:40] + "...", "data: URI (o Zoho não ingere)"))
+        elif not src.lower().startswith("https://"):
+            achados.append((src, "não é https absoluto (caminho local, relativo ou http)"))
+        else:
+            nome = unquote(urlsplit(src).path.rsplit("/", 1)[-1])
+            if re.search(r"[^\x21-\x7e]", nome):  # espaço ou fora do ASCII visível
+                achados.append((src, f"nome de arquivo {nome!r} com espaço ou acento (o Zoho descarta)"))
+            elif nome.lower().endswith(".svg"):
+                achados.append((src, "SVG (o Zoho não ingere; use PNG)"))
+    return achados
+
+
+def _avisar_imagens(html, origem):
+    """Imprime o relatório e devolve True se há problema. Não bloqueia sozinho: quem chama
+    pergunta antes de subir."""
+    achados = auditar_imagens(html)
+    if not achados:
+        return False
+    print(f"⚠ {len(achados)} imagem(ns) em {origem} que o Zoho Campaigns vai descartar no import "
+          "(o e-mail sai com o espaço da imagem vazio):")
+    for src, motivo in achados:
+        print(f"  - {motivo}\n    {src}")
+    print("  Correção: renomear o arquivo sem espaço nem acento (ex.: mk-fashion.png), subir de novo "
+          "no CMS e trocar o src.\n")
+    return True
+
+
+def cmd_auditar_html(a):
+    html = Path(a.html).read_text(encoding="utf-8")
+    if _avisar_imagens(html, a.html):
+        sys.exit(1)
+    print(f"{a.html}: todas as imagens com src https de nome simples.")
+
+
 def cmd_create_campaign(a):
     edition = a.edition
     # `--campanha` (qual newsletter recorrente, e portanto qual regra de curadoria a edição
@@ -407,6 +459,8 @@ def cmd_create_campaign(a):
     html = Path(a.html).read_text(encoding="utf-8")
     if not html.strip():
         sys.exit(f"Arquivo HTML vazio: {a.html}")
+    if _avisar_imagens(html, a.html) and input("Subir mesmo assim? [s/N] ").strip().lower() != "s":
+        sys.exit("Cancelado. Corrija as imagens e rode de novo.")
     r = bc.create_campaign(edition, "manual_html", extra)
     edition = r.get("edition") or edition
     g = bc.run(edition, "generate", {"html": html, "subject": a.subject,
@@ -479,6 +533,8 @@ def cmd_set_html(a):
     html = Path(a.html).read_text(encoding="utf-8")
     if not html.strip():
         sys.exit(f"Arquivo HTML vazio: {a.html}")
+    if _avisar_imagens(html, a.html) and input("Republicar mesmo assim? [s/N] ").strip().lower() != "s":
+        sys.exit("Cancelado. Corrija as imagens e rode de novo.")
     r = bc.set_html(a.edition, html)
     print(f"HTML da edição {a.edition!r} republicado.")
     print(f"Preview: {r.get('preview_url')}")
@@ -1199,6 +1255,10 @@ def monta_parser():
     sh.add_argument("--edition", required=True)
     sh.add_argument("--html", required=True, help="arquivo HTML que substitui o preview da edição")
     sh.set_defaults(fn=cmd_set_html)
+
+    ah = sub.add_parser("auditar-html", help="confere as imagens de um HTML antes de importar no Zoho")
+    ah.add_argument("--html", required=True, help="arquivo HTML a conferir")
+    ah.set_defaults(fn=cmd_auditar_html)
     sub.add_parser("versions").set_defaults(fn=cmd_versions)
     rel = sub.add_parser("release")
     rel.add_argument("--notes", required=True, help="uma linha sobre o que mudou nesta versão")
