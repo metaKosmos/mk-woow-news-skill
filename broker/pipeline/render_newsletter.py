@@ -34,7 +34,8 @@ CONFIG = BASE / "config"
 # ou, no futuro, com a imagem gerada pelo Nano Banana.
 DEFAULT_IMAGE = "https://images.unsplash.com/photo-1556761175-5973dc0f32e7?w=1200&h=600&fit=crop&q=80"
 # Merge tag do ZMA: o link real de descadastro é injetado pela plataforma no envio.
-UNSUBSCRIBE_TAG = "$[UNSUBSCRIBE]$"
+# Tem de ser esta grafia: tag que o ZMA não reconhece vira link comum e quebra no clique.
+UNSUBSCRIBE_TAG = "$[LI:UNSUBSCRIBE]$"
 
 
 TEMPLATE_DEFAULT = "woow-daily-drops.html.j2"
